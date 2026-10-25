@@ -2,6 +2,8 @@
 import { loadConfig } from "./config.js";
 import { discover } from "./discover.js";
 import { runTask } from "./run.js";
+import { runBatch } from "./batch.js";
+import { loadTaskFile } from "./taskfile.js";
 import type { PermissionIntent, WorkerId } from "./types.js";
 
 function usage(): never {
@@ -10,11 +12,13 @@ function usage(): never {
 Usage:
   cliyard doctor
   cliyard run --repo <linux-path> --prompt "<task>" [--worker auto|claude|codex|codebuddy]
-              [--permission accept|bypass] [--dry-run]
+              [--model <id>] [--permission accept|bypass] [--dry-run]
+  cliyard batch <taskfile.yaml> [--dry-run] [--max-parallel N]
 
 Examples (PowerShell):
   npm run doctor
-  npm run run-task -- --repo ~/work/my-app --prompt "Add README section" --worker auto --dry-run
+  npm run run-task -- --repo ~/work/my-app --prompt "Add README section" --worker codebuddy --model gpt-5 --dry-run
+  npm run batch -- examples/module.tasks.yaml --dry-run
 `);
   process.exit(1);
 }
@@ -53,6 +57,7 @@ async function main(): Promise<void> {
     const worker = (arg("--worker", rest) ?? "auto") as WorkerId | "auto";
     const permission = (arg("--permission", rest) ??
       cfg.permission) as PermissionIntent;
+    const model = arg("--model", rest);
     const dryRun = has("--dry-run", rest);
 
     const result = await runTask(cfg, {
@@ -60,10 +65,27 @@ async function main(): Promise<void> {
       prompt,
       worker,
       permission,
+      model,
       dryRun,
     });
     console.log(JSON.stringify(result, null, 2));
     process.exit(result.exitCode === 0 ? 0 : 1);
+  }
+
+  if (cmd === "batch") {
+    const rest = argv.slice(1);
+    const filePath = rest.find((a) => !a.startsWith("--"));
+    if (!filePath) usage();
+    const dryRun = has("--dry-run", rest);
+    const maxRaw = arg("--max-parallel", rest);
+    const file = loadTaskFile(filePath);
+    const results = await runBatch(cfg, file, {
+      dryRun,
+      maxParallel: maxRaw ? Number(maxRaw) : undefined,
+    });
+    console.log(JSON.stringify(results, null, 2));
+    const failed = results.some((r) => r.exitCode !== 0);
+    process.exit(failed ? 1 : 0);
   }
 
   usage();

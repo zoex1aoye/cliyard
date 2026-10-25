@@ -31,15 +31,19 @@ Windows PowerShell
 # 1) Node 20+ on Windows
 cd \\wsl$\Ubuntu\home\<you>\cliyard
 npm install
+copy config.example.yaml config.yaml
 
 # 2) Probe WSL + CLIs
 npm run doctor
 
-# 3) Dry-run a task against a Linux-side repo
-npm run run-task -- --repo ~/work/my-app --prompt "Add a healthcheck endpoint" --worker auto
+# 3) Single task (optional --model)
+npm run run-task -- --repo ~/work/my-app --prompt "Add a healthcheck endpoint" --worker codebuddy --model gpt-5 --dry-run
+
+# 4) Parallel batch from taskfile (same-account CodeBuddy; default max_parallel=2)
+npm run batch -- examples/module.tasks.yaml --dry-run
 ```
 
-Copy `config.example.yaml` → `config.yaml` and edit distro / preferred workers.
+See `docs/TOMORROW.md` for the module workflow (AI reads docs → taskfile → batch).
 
 ## v0 building blocks
 

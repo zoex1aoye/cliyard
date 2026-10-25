@@ -1,0 +1,37 @@
+# Example batch for one module. Copy and edit model ids to match `codebuddy /model list`.
+# Repo path is Linux-side (inside WSL).
+
+repo: ~/work/my-app
+
+shared:
+  worker: codebuddy
+  permission: bypass
+  max_parallel: 2
+  contract_files:
+    - docs/reqs/module.md
+    # - prototypes/module/
+
+tasks:
+  - id: api
+    model: gpt-5
+    paths:
+      - src/api/
+    prompt: |
+      Implement the backend for this module per the contract files.
+      Stay inside the listed paths. Do not rewrite unrelated packages.
+
+  - id: web
+    model: gpt-4
+    paths:
+      - src/web/
+    prompt: |
+      Implement the UI for this module per the contract files and any prototype.
+      Stay inside the listed paths. Call the API as documented; do not change API code.
+
+  - id: tests
+    model: gpt-4
+    paths:
+      - tests/
+    prompt: |
+      Add focused tests for the module behavior described in the contract.
+      Stay inside the listed paths. You may read src/ but only write under tests/.

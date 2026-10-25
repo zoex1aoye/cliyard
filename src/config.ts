@@ -7,6 +7,7 @@ const DEFAULTS: HarnessConfig = {
   workers: ["codebuddy", "claude", "codex"],
   permission: "accept",
   worktree_dir: ".cliyard/worktrees",
+  max_parallel: 2,
 };
 
 /** Minimal YAML subset: key: value and nested workers list. Good enough for v0. */
@@ -32,6 +33,7 @@ export function loadConfig(cwd = process.cwd()): HarnessConfig {
       cfg.permission = val;
     }
     if (key === "worktree_dir" && val) cfg.worktree_dir = val;
+    if (key === "max_parallel" && val) cfg.max_parallel = Number(val);
   }
 
   const workers: WorkerId[] = [];

@@ -1,46 +1,63 @@
 import type { PermissionIntent, WorkerId } from "./types.js";
 import { shellQuote } from "./wsl.js";
 
+export interface WorkerCommandOptions {
+  prompt: string;
+  permission: PermissionIntent;
+  model?: string;
+  fallbackModel?: string;
+}
+
 /**
  * Map harness intent → CLI-native argv.
  * Prefer each product's own sandbox/permission flags; do not wrap Docker here.
  */
 export function buildWorkerCommand(
   worker: WorkerId,
-  prompt: string,
-  permission: PermissionIntent,
+  opts: WorkerCommandOptions,
 ): string {
-  const q = shellQuote(prompt);
+  const q = shellQuote(opts.prompt);
+  const modelFlag = opts.model ? `--model ${shellQuote(opts.model)}` : "";
+  const fallbackFlag = opts.fallbackModel
+    ? `--fallback-model ${shellQuote(opts.fallbackModel)}`
+    : "";
 
   switch (worker) {
     case "claude": {
-      // Non-interactive print mode. Sandbox is CLI-managed when enabled by user.
       const perm =
-        permission === "bypass"
+        opts.permission === "bypass"
           ? "--permission-mode bypassPermissions"
           : "--permission-mode acceptEdits";
-      return `claude -p ${q} ${perm}`;
+      return [`claude -p ${q}`, modelFlag, perm].filter(Boolean).join(" ");
     }
     case "codex": {
-      // exec = non-interactive. workspace-write = OS sandbox when available.
       const sandbox =
-        permission === "bypass"
+        opts.permission === "bypass"
           ? "--sandbox danger-full-access"
           : "--sandbox workspace-write";
       const approval =
-        permission === "bypass"
+        opts.permission === "bypass"
           ? "--ask-for-approval never"
           : "--ask-for-approval on-failure";
-      return `codex exec ${sandbox} ${approval} ${q}`;
+      return [`codex exec`, modelFlag, sandbox, approval, q]
+        .filter(Boolean)
+        .join(" ");
     }
     case "codebuddy": {
+      // CodeBuddy: -p with file/tool use requires --dangerously-skip-permissions.
       const perm =
-        permission === "bypass"
+        opts.permission === "bypass"
           ? "--permission-mode bypassPermissions"
           : "--permission-mode acceptEdits";
-      // -p print/non-interactive; bypass often required with -p when tools need auth
-      const danger = permission === "bypass" ? "--dangerously-skip-permissions" : "";
-      return `codebuddy -p ${q} ${perm} ${danger}`.trim();
+      return [
+        `codebuddy -p ${q}`,
+        modelFlag,
+        fallbackFlag,
+        perm,
+        "--dangerously-skip-permissions",
+      ]
+        .filter(Boolean)
+        .join(" ");
     }
     default: {
       const _exhaustive: never = worker;

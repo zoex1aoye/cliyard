@@ -19,3 +19,6 @@ permission: accept
 
 # Where worktrees live (relative to repo, created inside WSL)
 worktree_dir: .cliyard/worktrees
+
+# Same-account CodeBuddy shares quota; keep parallel low at first
+max_parallel: 2

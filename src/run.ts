@@ -30,9 +30,17 @@ export async function runTask(
   const worker = pickWorker(cfg, caps, input.worker);
   const permission = input.permission ?? cfg.permission;
   const repo = input.repo;
-  const id = `${Date.now().toString(36)}-${slug(input.prompt)}`;
+  const taskId = input.taskId ?? slug(input.prompt);
+  const id = `${Date.now().toString(36)}-${taskId}`;
   const branch = `cliyard/${id}`;
   const worktreeRel = `${cfg.worktree_dir}/${id}`;
+
+  const workerCmd = buildWorkerCommand(worker, {
+    prompt: input.prompt,
+    permission,
+    model: input.model,
+    fallbackModel: input.fallbackModel,
+  });
 
   const setup = [
     `set -euo pipefail`,
@@ -44,14 +52,15 @@ export async function runTask(
   ].join(" && ");
 
   if (input.dryRun) {
-    const cmd = buildWorkerCommand(worker, input.prompt, permission);
     return {
+      taskId,
       worker,
+      model: input.model,
       worktreePath: `${repo}/${worktreeRel}`,
       branch,
       exitCode: 0,
       diffStat: "(dry-run)",
-      logTail: `Would run in worktree:\n${cmd}`,
+      logTail: `Would run in worktree:\n${workerCmd}`,
     };
   }
 
@@ -69,11 +78,10 @@ export async function runTask(
     setupRes.stdout.match(/WORKTREE=(.+)/)?.[1]?.trim() ??
     `${repo}/${worktreeRel}`;
 
-  const workerCmd = buildWorkerCommand(worker, input.prompt, permission);
   const runScript = [
     `set -euo pipefail`,
     `cd ${shellQuote(worktreePath)}`,
-    `echo "=== cliyard worker=${worker} ==="`,
+    `echo "=== cliyard worker=${worker} model=${input.model ?? "default"} ==="`,
     workerCmd,
   ].join("\n");
 
@@ -89,7 +97,9 @@ export async function runTask(
 
   const log = (runRes.stdout + "\n" + runRes.stderr).trim();
   return {
+    taskId,
     worker,
+    model: input.model,
     worktreePath,
     branch,
     exitCode: runRes.code,
