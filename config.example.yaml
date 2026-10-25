@@ -1,0 +1,21 @@
+# Copy to config.yaml (gitignored) and adjust for your machine.
+
+# WSL distro name as shown by: wsl -l -v
+distro: Ubuntu
+
+# Default Linux-side repo (tilde expanded inside WSL)
+# Prefer paths under the Linux home, NOT /mnt/c/...
+default_repo: ~/work/my-app
+
+# Preference order when --worker auto
+workers:
+  - codebuddy
+  - claude
+  - codex
+
+# Permission / sandbox intent — adapters map to CLI-native flags
+# accept | bypass (bypass only for unattended experiments you accept the risk of)
+permission: accept
+
+# Where worktrees live (relative to repo, created inside WSL)
+worktree_dir: .cliyard/worktrees
