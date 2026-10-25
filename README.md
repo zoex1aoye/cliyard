@@ -1,69 +1,67 @@
 # cliyard
 
-Thin orchestrator for **real-world validation** on **Windows + WSL**:
+Thin orchestrator for coding CLIs: **Windows entry → WSL workers**, capability-based, **no Docker required**.
 
-- Entry on **Windows** (`cliyard`)
-- Workers run **inside WSL** (Claude Code / Codex / CodeBuddy — whatever is installed)
-- **No Docker required**; isolation = git worktree + each CLI’s own sandbox/permissions
-- Capability discovery → route → dispatch → collect summary
+North star (why this exists): stop babysitting AI with endless confirmations and course-corrections. A thin **Master** should dispatch, steer against a frozen contract, and accept/reject; workers run to a **verifiable** done. State lives on disk—not in a collapsing chat. Full intent: **[docs/VISION.md](docs/VISION.md)**（中文愿景与目标）.
 
-JetBrains PSI / heavy ADE are **out of scope for v0**.
+## What we want (ideal)
 
-## Recommended layout on your machine
+```text
+Human: requirements / prototype / boundaries (contract)
+   → Master: split → pick CLI/model → dispatch → gates → accept | repair≤N | human
+   → Workers: worktree + CodeBuddy/Claude/Codex (same account OK, capped parallel)
+   → You come back to branches + diffs + exit codes, not a derailed chat
+```
 
-Keep the **git repo inside the WSL filesystem** (e.g. `~/work/my-app`), not under `/mnt/c/...`.  
-Windows only hosts the harness CLI; all `git` / agent CLIs run via `wsl.exe`.
+## What v0 does today
+
+- Entry on **Windows** (`cliyard`); workers inside **WSL**
+- Isolation = **git worktree** + each CLI’s own sandbox/permissions
+- `doctor` / `run` / `batch` (taskfile with per-task `model` + `paths`)
+- Same-account parallel CodeBuddy with `max_parallel` (default 2)
+
+Not yet: Master LLM loop, verify/repair state machine, JetBrains PSI, Docker.
+
+## Recommended layout
+
+Keep the **app repo on the WSL filesystem** (e.g. `~/work/my-app`), not `/mnt/c/...`.
 
 ```text
 Windows PowerShell
-  cliyard doctor | run
+  cliyard doctor | run | batch
        │
        ▼
   wsl.exe -d <distro> --cd <linux-repo> -- bash -lc '…'
        │
        ├─ git worktree add …
-       └─ claude | codex | codebuddy …
+       └─ codebuddy | claude | codex …
 ```
 
-## Quick start (on Windows)
+## Quick start (Windows)
 
 ```powershell
-# 1) Node 20+ on Windows
 cd \\wsl$\Ubuntu\home\<you>\cliyard
 npm install
 copy config.example.yaml config.yaml
 
-# 2) Probe WSL + CLIs
 npm run doctor
-
-# 3) Single task (optional --model)
-npm run run-task -- --repo ~/work/my-app --prompt "Add a healthcheck endpoint" --worker codebuddy --model gpt-5 --dry-run
-
-# 4) Parallel batch from taskfile (same-account CodeBuddy; default max_parallel=2)
+npm run run-task -- --repo ~/work/my-app --prompt "…" --worker codebuddy --model gpt-5 --dry-run
 npm run batch -- examples/module.tasks.yaml --dry-run
 ```
 
-See `docs/TOMORROW.md` for the module workflow (AI reads docs → taskfile → batch).
+- Module trial: [docs/TOMORROW.md](docs/TOMORROW.md)  
+- Vision / principles: [docs/VISION.md](docs/VISION.md)
 
-## v0 building blocks
+## Building blocks
 
-| Concern | Brick | Role in v0 |
-|---------|--------|------------|
-| Process bridge | `wsl.exe` (Microsoft) | Windows → Linux exec |
-| File isolation | `git worktree` | Parallel tasks without shared dirty tree |
-| Worker CLIs | Claude Code / Codex / CodeBuddy | Actual coding agents (BYO install + login) |
-| Optional later | oneharness, dmux, ACP | Unify flags / richer TUI |
-| Optional later | tree-sitter MCP | Light code map for Master |
-| Optional later | JetBrains headless / MCP | Semantic accept only |
-
-## What v0 proves
-
-1. Doctor sees your distro + which CLIs exist in WSL  
-2. One task → one worktree → one WSL CLI run  
-3. Result summary: branch, `git diff --stat`, exit code  
-4. You can tune prompts / permission flags on real projects  
-
-Not yet: multi-worker fan-out UI, Master LLM loop, JetBrains, Docker.
+| Concern | Brick | Role |
+|---------|--------|------|
+| Bridge | `wsl.exe` | Windows → Linux |
+| Isolation | `git worktree` | Parallel without shared dirty tree |
+| Workers | CodeBuddy / Claude / Codex | BYO install + login |
+| Later | Workflow-style ledger, verify gates | Master without fat context |
+| Later | tree-sitter MCP / JetBrains headless | Optional semantic accept |
+| Optional | Docker | Never required |
 
 ## License
 

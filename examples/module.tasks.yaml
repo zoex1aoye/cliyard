@@ -1,5 +1,8 @@
 # Example batch for one module. Copy and edit model ids to match `codebuddy /model list`.
 # Repo path is Linux-side (inside WSL).
+#
+# Intent: frozen contract (shared.contract_files + per-task paths) → parallel workers.
+# See docs/VISION.md — this file is the "dispatch contract", not a chat transcript.
 
 repo: ~/work/my-app
 
