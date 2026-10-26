@@ -12,6 +12,7 @@ import {
 } from "./scheduler/codex-batch.js";
 import { runPlanDispatchCli } from "./planner/cli.js";
 import { runEstimatePlanCli } from "./planner/estimate-cli.js";
+import { runSupervisorCli } from "./supervisor/cli.js";
 import type { PermissionIntent, WorkerId } from "./types.js";
 
 function usage(): never {
@@ -34,6 +35,12 @@ Usage:
                        [--worker claude|codex|mock] [--model id] [--out path]
                        [--ledger path] [--dry-run] [--cleanup]
   cliyard estimate-plan <plan.json|->
+  cliyard supervisor start <contracts.json> --repo <path> [--worker claude|codex]
+                           [--model id] [--plan-id id] [--dry-run]
+  cliyard supervisor status --repo <path> [--run <id>] [--json]
+  cliyard supervisor resume --repo <path> [--run <id>] [--worker claude|codex]
+                           [--dry-run] [--retry-rejected] [--force]
+  cliyard supervisor stop --repo <path> [--run <id>] [--force]
 
 Master (DeepSeek Harness plugin / local demo):
   npm run master-monitor
@@ -135,6 +142,12 @@ async function main(): Promise<void> {
 
   if (cmd === "estimate-plan") {
     runEstimatePlanCli(argv.slice(1));
+    return;
+  }
+
+  if (cmd === "supervisor") {
+    // Let Node exit naturally so stdout is flushed before the process ends.
+    process.exitCode = await runSupervisorCli(argv.slice(1));
     return;
   }
 
