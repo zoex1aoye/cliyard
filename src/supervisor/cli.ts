@@ -99,9 +99,13 @@ export async function runSupervisorCli(
 ): Promise<number> {
   const log = options.log ?? ((line: string) => console.log(line));
   const [cmd, ...rest] = argv;
-  if (!cmd || cmd === "-h" || cmd === "--help") {
+  if (!cmd) {
     printUsage(log);
     return 1;
+  }
+  if (cmd === "-h" || cmd === "--help") {
+    printUsage(log);
+    return 0;
   }
 
   switch (cmd) {

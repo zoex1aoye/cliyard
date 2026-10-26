@@ -214,6 +214,26 @@ function parseJson(lines: string[]): Record<string, any> {
 // start / status
 // ---------------------------------------------------------------------------
 
+test("supervisor help succeeds and a missing command fails", async () => {
+  const help: string[] = [];
+  assert.equal(
+    await runSupervisorCli(["--help"], {
+      log: (line) => help.push(line),
+      signalHandling: false,
+    }),
+    0,
+  );
+  assert.match(help.join("\n"), /cliyard supervisor/);
+
+  assert.equal(
+    await runSupervisorCli([], {
+      log: () => undefined,
+      signalHandling: false,
+    }),
+    1,
+  );
+});
+
 test("supervisor start runs a foreground batch and persists a completed run", async () => {
   await withRepo(async (repo) => {
     const base = runGit(repo, ["rev-parse", "HEAD"]);
