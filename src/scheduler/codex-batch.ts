@@ -301,15 +301,33 @@ async function snapshotTask(
   taskId: string,
   writePaths: string[],
 ): Promise<string> {
+  const snapshotPaths: string[] = [];
+  for (const writePath of writePaths) {
+    const tracked = await git(handle.worktreePath, [
+      "ls-files",
+      "--",
+      writePath,
+    ]);
+    if (
+      existsSync(join(handle.worktreePath, writePath)) ||
+      tracked.stdout.trim()
+    ) {
+      snapshotPaths.push(writePath);
+    }
+  }
+  if (snapshotPaths.length === 0) {
+    return (await git(handle.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+  }
+
   const status = await git(handle.worktreePath, [
     "status",
     "--porcelain",
     "--untracked-files=all",
     "--",
-    ...writePaths,
+    ...snapshotPaths,
   ]);
   if (status.stdout.trim()) {
-    await git(handle.worktreePath, ["add", "-A", "--", ...writePaths]);
+    await git(handle.worktreePath, ["add", "-A", "--", ...snapshotPaths]);
     await git(handle.worktreePath, [
       "-c",
       "user.name=cliyard",

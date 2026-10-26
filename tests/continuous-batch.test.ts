@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -210,6 +211,61 @@ test("rejected foundation blocks every dependent wave", async () => {
         (task) => task.taskId === "foundation" && task.verdict === "rejected",
       ),
     );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("snapshot accepts a worker that creates only a subset of allowed paths", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "cliyard-optional-paths-"));
+  try {
+    spawnSync("git", ["init"], { cwd: repo, stdio: "ignore" });
+    spawnSync("git", ["config", "user.email", "t@t.com"], {
+      cwd: repo,
+      stdio: "ignore",
+    });
+    spawnSync("git", ["config", "user.name", "t"], {
+      cwd: repo,
+      stdio: "ignore",
+    });
+    writeFileSync(join(repo, "README.md"), "# fixture\n");
+    spawnSync("git", ["add", "."], { cwd: repo, stdio: "ignore" });
+    spawnSync("git", ["commit", "-m", "init"], {
+      cwd: repo,
+      stdio: "ignore",
+    });
+
+    const contractsPath = join(repo, "contracts.json");
+    writeFileSync(
+      contractsPath,
+      JSON.stringify({
+        contracts: [
+          {
+            ...contract("foundation", [], "foundation.ts", [
+              "test -f foundation.ts",
+            ]),
+            writePaths: ["foundation.ts", "optional.ts"],
+          },
+        ],
+      }),
+    );
+
+    const result = await runCodexBatch({
+      contractsPath,
+      repoRoot: repo,
+      ledgerPath: join(repo, ".cliyard", "ledger.json"),
+      worker: "claude",
+      dryRun: false,
+      keepWorktrees: true,
+      workerFactory: (_worker, cwd) => createSnapshotWorker(cwd),
+    });
+
+    assert.equal(result.allAccepted, true);
+    assert.match(
+      readFileSync(join(result.integration.path, "foundation.ts"), "utf8"),
+      /export const name = 'foundation'/,
+    );
+    assert.equal(existsSync(join(result.integration.path, "optional.ts")), false);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
