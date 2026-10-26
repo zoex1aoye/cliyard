@@ -12,7 +12,8 @@ North star: stop babysitting AI. **Master 壳 = DeepSeek Harness GUI**；**cliya
 **WinUI 3 × TDesign pilot:** [docs/WINUI3_TDESIGN_PILOT.md](docs/WINUI3_TDESIGN_PILOT.md).
 **Task sizing and cost estimation:** [docs/TASK_ESTIMATION.md](docs/TASK_ESTIMATION.md).
 **Harness boundaries and DSH replacement strategy:** [docs/HARNESS_BOUNDARIES.md](docs/HARNESS_BOUNDARIES.md).
-**Next iteration:** [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md) — Supervisor v0 and safe self-hosting.
+**Supervisor v0 operations:** [docs/SUPERVISOR_V0.md](docs/SUPERVISOR_V0.md) — durable foreground runs, recovery, limitations, safe self-hosting.
+**Next iteration:** [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md) — Supervisor v0 verification and safe self-hosting.
 
 ## What we want (ideal)
 
@@ -32,9 +33,10 @@ Human: requirements + prototype in DeepSeek Harness
 - **Codex worker spike (S2):** `npm run codex-batch -- … --dry-run` (real Codex without `--dry-run`)
 - **Claude Code + DeepSeek worker:** `claude-ds` + `npm run claude-batch`
 - **Continuous waves:** accepted work enters an integration branch before dependent tasks start
+- **Supervisor v0 (durable foreground):** `supervisor start/status/resume/stop`, atomic JSON RunManifest, integration-branch checkpoint, one-lock recovery; resume skips accepted tasks (no daemon, no SQLite)
 - **Windows track:** `doctor` / `run` / `batch` via WSL (deferred for CodeBuddy E2E)
 
-Not yet: Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, Multica runtime.
+Not yet: Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, Multica runtime, Supervisor daemon/background service, SQLite manifests.
 
 ## Recommended layout
 
@@ -89,6 +91,13 @@ npm run plan-dispatch -- examples/glass-parallel.plan.json --repo ../ui-prototyp
 # Glass sibling trial (../ui-prototype)
 npm run glass-dry
 npm run glass-dispatch   # deepseek-flash, keep worktrees
+
+# Durable Supervisor v0 (foreground; atomic JSON RunManifest; no daemon / SQLite)
+npm run dev -- supervisor start <contracts.json> --repo <scratch-repo> --worker claude
+npm run dev -- supervisor status --repo <scratch-repo> --json
+npm run dev -- supervisor resume --repo <scratch-repo>   # after interruption
+npm run dev -- supervisor stop --repo <scratch-repo>     # cooperative SIGTERM
+# After `npm run build`: node dist/cli.js supervisor …
 ```
 
 Plan compile writes `<target>/.cliyard/plans/<planId>.json` and
@@ -97,6 +106,9 @@ resolves `HEAD` to a commit, freezes each contract, and rejects unknown deps,
 cycles, repo-external paths, and overlapping task `writePaths`.
 
 Ledger: `<target>/.cliyard/ledger.json` (gitignored).  
+Supervisor state: `<target>/.cliyard/runs/<runId>.json` + `active.json` + `supervisor.lock`
+(gitignored); accepted tasks and the integration head are checkpointed there.
+Supervisor details: [docs/SUPERVISOR_V0.md](docs/SUPERVISOR_V0.md) — foreground only, JSON manifest, manual review/merge, no daemon or SQLite.
 Glass 实机：[docs/GLASS_TRIAL.md](docs/GLASS_TRIAL.md) · DSH 插件：[plugins/dsh-cliyard/README.md](plugins/dsh-cliyard/README.md).
 Claude + DeepSeek：[docs/CLAUDE_DEEPSEEK_WORKER.md](docs/CLAUDE_DEEPSEEK_WORKER.md).
 
