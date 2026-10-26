@@ -53,7 +53,8 @@ npm run batch -- examples/module.tasks.yaml --dry-run
 
 - Module trial: [docs/TOMORROW.md](docs/TOMORROW.md)  
 - Vision / principles: [docs/VISION.md](docs/VISION.md)  
-- MVP plan (phase A review): [docs/MVP_IMPLEMENTATION_PLAN.md](docs/MVP_IMPLEMENTATION_PLAN.md)
+- MVP plan (phase A review): [docs/MVP_IMPLEMENTATION_PLAN.md](docs/MVP_IMPLEMENTATION_PLAN.md)  
+- OSS landscape + scaffold (Codex spike): [docs/OSS_LANDSCAPE.md](docs/OSS_LANDSCAPE.md) · [docs/SCAFFOLD_FROM_OSS.md](docs/SCAFFOLD_FROM_OSS.md)
 
 ## Building blocks
 
