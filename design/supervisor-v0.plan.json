@@ -1,0 +1,129 @@
+{
+  "planId": "supervisor-v0",
+  "tasks": [
+    {
+      "taskId": "sv0-manifest-store",
+      "goal": "Implement Supervisor v0 RunManifest types and an atomic JSON store for single-repository runs. Provide create/load/save/update, active run pointer, contracts file hash, exclusive supervisor lock with owner metadata, and stale/interrupted detection. Do not change scheduler behavior yet. Add focused tests for atomic writes, hash mismatch, active run lookup, and exclusive lock behavior.",
+      "nonGoals": [
+        "No SQLite",
+        "No scheduler changes",
+        "No CLI changes"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/NEXT_ITERATION.md",
+        "design/supervisor-v0.md",
+        "src/persistence/ledger.ts",
+        "src/contracts/schema.ts"
+      ],
+      "writePaths": [
+        "src/supervisor/types.ts",
+        "src/supervisor/store.ts",
+        "tests/supervisor-store.test.ts"
+      ],
+      "verifyCommands": [
+        "test -f src/supervisor/store.ts",
+        "grep -q 'RunManifest' src/supervisor/types.ts",
+        "grep -q 'supervisor.lock' src/supervisor/store.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "sv0-resume-loop",
+      "goal": "Refactor worker-batch execution to accept an optional RunManifest checkpoint and persist state after every accepted task. On resume, reject changed contracts/base data, use the recorded integration branch, skip accepted tasks, and rebuild pending/ready work from the contract DAG. Preserve existing non-resume behavior. Add a test that simulates a finished first wave and a new scheduler invocation resuming only the remaining wave.",
+      "nonGoals": [
+        "No CLI changes",
+        "No automatic merge to user main",
+        "No new scheduler framework"
+      ],
+      "dependsOn": [
+        "sv0-manifest-store"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/NEXT_ITERATION.md",
+        "design/supervisor-v0.md",
+        "src/scheduler/codex-batch.ts",
+        "src/supervisor/types.ts",
+        "src/supervisor/store.ts",
+        "tests/continuous-batch.test.ts"
+      ],
+      "writePaths": [
+        "src/scheduler/codex-batch.ts",
+        "src/planner/bridge.ts",
+        "tests/supervisor-resume.test.ts"
+      ],
+      "verifyCommands": [
+        "grep -q 'resume' src/scheduler/codex-batch.ts",
+        "test -f tests/supervisor-resume.test.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "sv0-cli",
+      "goal": "Add cliyard supervisor start/status/resume/stop commands using the new manifest store and resumable batch path. Start is foreground for V0. Status must show runId, status, accepted/pending counts, integration branch/head, lock owner and last checkpoint. Add CLI tests using fixture repos and assert a resumed run only starts unfinished tasks.",
+      "nonGoals": [
+        "No DSH UI changes",
+        "No background daemon",
+        "No SQLite"
+      ],
+      "dependsOn": [
+        "sv0-resume-loop"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/NEXT_ITERATION.md",
+        "design/supervisor-v0.md",
+        "src/cli.ts",
+        "src/supervisor/types.ts",
+        "src/supervisor/store.ts",
+        "src/scheduler/codex-batch.ts"
+      ],
+      "writePaths": [
+        "src/cli.ts",
+        "src/supervisor/cli.ts",
+        "tests/supervisor-cli.test.ts"
+      ],
+      "verifyCommands": [
+        "grep -q 'supervisor' src/cli.ts",
+        "test -f src/supervisor/cli.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "sv0-docs",
+      "goal": "Document the implemented Supervisor v0 commands, RunManifest, lock/recovery semantics, limitations, and the safe tool self-hosting procedure. Update README and the next-iteration status without claiming daemon or SQLite support.",
+      "nonGoals": [
+        "No source code changes",
+        "No claims of 24h daemon readiness"
+      ],
+      "dependsOn": [
+        "sv0-cli"
+      ],
+      "readPaths": [
+        "README.md",
+        "docs/NEXT_ITERATION.md",
+        "design/supervisor-v0.md",
+        "src/supervisor/cli.ts"
+      ],
+      "writePaths": [
+        "docs/SUPERVISOR_V0.md",
+        "docs/NEXT_ITERATION.md",
+        "README.md"
+      ],
+      "verifyCommands": [
+        "test -f docs/SUPERVISOR_V0.md",
+        "grep -q 'supervisor resume' docs/SUPERVISOR_V0.md",
+        "npm run build"
+      ],
+      "maxRepairs": 0
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "taskId": "real-verify-true",
+  "version": 1,
+  "frozen": true,
+  "goals": [
+    "Exercise shell verifier with a trivial true command (Darwin MVP M5)"
+  ],
+  "dependsOn": [],
+  "readPaths": ["src/"],
+  "writePaths": ["src/hello/"],
+  "sharedResources": [],
+  "baseCommit": "HEAD",
+  "verifyCommands": ["true"],
+  "maxRepairs": 2
+}

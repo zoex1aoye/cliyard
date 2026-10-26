@@ -1,0 +1,27 @@
+{
+  "taskId": "claude-ds-smoke",
+  "version": 1,
+  "frozen": true,
+  "goals": [
+    "Create worker-smoke.txt in the repository root containing exactly one line: CLAUDE_DS_OK",
+    "Do not modify any other file"
+  ],
+  "nonGoals": [
+    "Do not commit or push",
+    "Do not create additional files"
+  ],
+  "dependsOn": [],
+  "readPaths": [
+    "README.md"
+  ],
+  "writePaths": [
+    "worker-smoke.txt"
+  ],
+  "sharedResources": [],
+  "baseCommit": "HEAD",
+  "verifyCommands": [
+    "test -f worker-smoke.txt",
+    "grep -q '^CLAUDE_DS_OK$' worker-smoke.txt"
+  ],
+  "maxRepairs": 0
+}

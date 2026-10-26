@@ -1,5 +1,9 @@
 export type WorkerId = "claude" | "codex" | "codebuddy";
 
+/** Re-export Route C contract / status for consumers; see contracts/ + core/. */
+export type { TaskContract } from "./contracts/schema.js";
+export type { TaskStatus } from "./core/status.js";
+
 export type PermissionIntent = "accept" | "bypass";
 
 export interface HarnessConfig {

@@ -1,0 +1,56 @@
+{
+  "contracts": [
+    {
+      "taskId": "root",
+      "version": 1,
+      "frozen": true,
+      "goals": ["Root shared types"],
+      "dependsOn": [],
+      "readPaths": ["src/"],
+      "writePaths": ["src/root/"],
+      "sharedResources": [],
+      "baseCommit": "HEAD",
+      "verifyCommands": [],
+      "maxRepairs": 2
+    },
+    {
+      "taskId": "left",
+      "version": 1,
+      "frozen": true,
+      "goals": ["Left branch"],
+      "dependsOn": ["root"],
+      "readPaths": ["src/"],
+      "writePaths": ["src/left/"],
+      "sharedResources": [],
+      "baseCommit": "HEAD",
+      "verifyCommands": [],
+      "maxRepairs": 2
+    },
+    {
+      "taskId": "right",
+      "version": 1,
+      "frozen": true,
+      "goals": ["Right branch"],
+      "dependsOn": ["root"],
+      "readPaths": ["src/"],
+      "writePaths": ["src/right/"],
+      "sharedResources": [],
+      "baseCommit": "HEAD",
+      "verifyCommands": [],
+      "maxRepairs": 2
+    },
+    {
+      "taskId": "leaf",
+      "version": 1,
+      "frozen": true,
+      "goals": ["Integrate left and right"],
+      "dependsOn": ["left", "right"],
+      "readPaths": ["src/"],
+      "writePaths": ["src/leaf/"],
+      "sharedResources": [],
+      "baseCommit": "HEAD",
+      "verifyCommands": [],
+      "maxRepairs": 2
+    }
+  ]
+}

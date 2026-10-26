@@ -1,0 +1,33 @@
+{
+  "taskId": "spike-hello",
+  "version": 1,
+  "frozen": true,
+  "goals": [
+    "Add a hello helper under src/hello/ that returns a greeting string"
+  ],
+  "nonGoals": [
+    "Do not touch package.json or CI config"
+  ],
+  "dependsOn": [],
+  "readPaths": [
+    "src/",
+    "docs/"
+  ],
+  "writePaths": [
+    "src/hello/"
+  ],
+  "sharedResources": [],
+  "baseCommit": "HEAD",
+  "verifyCommands": [
+    "npm test -- --grep hello",
+    "tsc -p tsconfig.json --noEmit"
+  ],
+  "deliverables": [
+    "src/hello/index.ts"
+  ],
+  "forbidden": [
+    "git push",
+    "rm -rf"
+  ],
+  "maxRepairs": 2
+}

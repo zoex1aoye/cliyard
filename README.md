@@ -2,27 +2,39 @@
 
 Thin orchestrator for coding CLIs: **Windows entry → WSL workers**, capability-based, **no Docker required**.
 
-North star (why this exists): stop babysitting AI with endless confirmations and course-corrections. A thin **Master** should dispatch, steer against a frozen contract, and accept/reject; workers run to a **verifiable** done. State lives on disk—not in a collapsing chat.
+North star: stop babysitting AI. **Master 壳 = DeepSeek Harness GUI**；**cliyard = 控制面**（契约 / 隔离 / 门禁 / ledger）。State lives on disk—not in a collapsing chat.
 
-**End state (Linus-shaped):** you hand requirements/description to Master; when you return to review, the artifact is something you’d be willing to seriously accept (or reject with evidence)—not a derailed chat. See **[docs/VISION.md](docs/VISION.md)** §3（对标 Linus）.
+**第一步用户故事：** [docs/USER_STORY_STEP1.md](docs/USER_STORY_STEP1.md)  
+**End state (Linus-shaped):** [docs/VISION.md](docs/VISION.md) §3.
+**Product thesis / competitive boundary:** [docs/KEY_MIND.md](docs/KEY_MIND.md).
+**V1 walking skeleton:** [docs/KEY_MIND_MVP.md](docs/KEY_MIND_MVP.md).
+**Continuous multi-wave trial:** [docs/CONTINUOUS_TRIAL.md](docs/CONTINUOUS_TRIAL.md).
+**WinUI 3 × TDesign pilot:** [docs/WINUI3_TDESIGN_PILOT.md](docs/WINUI3_TDESIGN_PILOT.md).
+**Task sizing and cost estimation:** [docs/TASK_ESTIMATION.md](docs/TASK_ESTIMATION.md).
+**Harness boundaries and DSH replacement strategy:** [docs/HARNESS_BOUNDARIES.md](docs/HARNESS_BOUNDARIES.md).
+**Next iteration:** [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md) — Supervisor v0 and safe self-hosting.
 
 ## What we want (ideal)
 
 ```text
-Human (Linus seat): requirements / description / taste bar
-   → Master: split → pick CLI/model → dispatch → gates → accept | repair≤N | human
-   → Workers: worktree + CodeBuddy/Claude/Codex (same account OK, capped parallel)
-   → Human returns: review-worthy diffs + tests + notes (satisfied ≠ bug-free forever)
+Human: requirements + prototype in DeepSeek Harness
+   → Master plugin (dsh-cliyard): Plan → TaskContract → dispatch
+   → cliyard: pick CLI → worktree isolation → gates → accept | repair≤N
+   → Monitor: ledger statuses
+   → Human returns: review-worthy diffs
 ```
 
-## What v0 does today
+## What works today
 
-- Entry on **Windows** (`cliyard`); workers inside **WSL**
-- Isolation = **git worktree** + each CLI’s own sandbox/permissions
-- `doctor` / `run` / `batch` (taskfile with per-task `model` + `paths`)
-- Same-account parallel CodeBuddy with `max_parallel` (default 2)
+- **Darwin MVP:** mock closed loop, DAG, `mock-batch` (parallel ready-wave), optional `--real-verify`, JSON ledger
+- **Master spike (S1):** `plugins/dsh-cliyard` + `npm run master-monitor` / `master-dispatch`
+- **Plan bridge:** structured Plan → validated/frozen contracts → isolated dispatch, also exposed to DSH as the `cliyard_plan_dispatch` agent tool
+- **Codex worker spike (S2):** `npm run codex-batch -- … --dry-run` (real Codex without `--dry-run`)
+- **Claude Code + DeepSeek worker:** `claude-ds` + `npm run claude-batch`
+- **Continuous waves:** accepted work enters an integration branch before dependent tasks start
+- **Windows track:** `doctor` / `run` / `batch` via WSL (deferred for CodeBuddy E2E)
 
-Not yet: Master LLM loop, verify/repair state machine, JetBrains PSI, Docker.
+Not yet: Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, Multica runtime.
 
 ## Recommended layout
 
@@ -39,6 +51,57 @@ Windows PowerShell
        └─ codebuddy | claude | codex …
 ```
 
+## Local MVP (macOS mock)
+
+On Darwin there is no `wsl.exe`. Use the Route C mock control plane (no WSL / CodeBuddy / Docker):
+
+```bash
+npm install --registry https://registry.npmjs.org/
+npm test
+npm run mock-loop                                          # fail verify once → repair → accept (mock verifier)
+npm run mock-loop -- --fail-verify-times 0                 # happy path
+npm run mock-loop -- --fail-verify-times 3                 # exhaust maxRepairs → reject (exit 1)
+npm run mock-loop -- --briefing-dir .cliyard/briefing      # also write briefing/<taskId>.md
+# Optional real shell verify (still mock worker; no WSL):
+npm run mock-loop -- examples/real-verify.contract.json --real-verify --fail-verify-times 0
+# Multi-task mock scheduler (dependsOn / DAG; parallel ready-wave):
+npm run mock-batch -- examples/mock-batch.chain.json
+npm run mock-batch -- examples/mock-batch.parallel.json
+
+# Master monitor + dispatch (S1; no DSH required for demo)
+npm run master-monitor          # http://127.0.0.1:3927/
+npm run master-dispatch         # configured worker batch (Claude by default) → ledger
+
+# Codex dual worktree (S2); --dry-run skips API
+npm run codex-batch -- examples/codex-batch.parallel.json --dry-run
+
+# Claude Code + DeepSeek probe and worker smoke
+claude-ds -p 'Reply exactly with PROBE_OK.'
+npm run claude-batch -- examples/claude-smoke.contract.json --repo /path/to/temp-git-repo
+
+# Plan → contract file → optional dispatch (distinct parallel writePaths required)
+npm run plan-dispatch -- examples/glass-parallel.plan.json --repo ../ui-prototype
+npm run plan-dispatch -- examples/glass-parallel.plan.json --repo ../ui-prototype \
+  --dispatch --worker codex --model deepseek-flash --dry-run
+# Remove --dry-run for a real Codex run. Codex worktrees are kept by default.
+# Add --background to return a pid/log receipt immediately; ledger remains the truth.
+
+# Glass sibling trial (../ui-prototype)
+npm run glass-dry
+npm run glass-dispatch   # deepseek-flash, keep worktrees
+```
+
+Plan compile writes `<target>/.cliyard/plans/<planId>.json` and
+`<target>/.cliyard/contracts/<planId>.contracts.json`. The control plane
+resolves `HEAD` to a commit, freezes each contract, and rejects unknown deps,
+cycles, repo-external paths, and overlapping task `writePaths`.
+
+Ledger: `<target>/.cliyard/ledger.json` (gitignored).  
+Glass 实机：[docs/GLASS_TRIAL.md](docs/GLASS_TRIAL.md) · DSH 插件：[plugins/dsh-cliyard/README.md](plugins/dsh-cliyard/README.md).
+Claude + DeepSeek：[docs/CLAUDE_DEEPSEEK_WORKER.md](docs/CLAUDE_DEEPSEEK_WORKER.md).
+
+`npm run doctor` / `run` / `batch` need Windows+WSL — expect failure on macOS.
+
 ## Quick start (Windows)
 
 ```powershell
@@ -51,10 +114,10 @@ npm run run-task -- --repo ~/work/my-app --prompt "…" --worker codebuddy --mod
 npm run batch -- examples/module.tasks.yaml --dry-run
 ```
 
-- Module trial: [docs/TOMORROW.md](docs/TOMORROW.md)  
-- Vision / principles: [docs/VISION.md](docs/VISION.md)  
-- MVP plan (phase A review): [docs/MVP_IMPLEMENTATION_PLAN.md](docs/MVP_IMPLEMENTATION_PLAN.md)  
-- OSS landscape + scaffold (Codex spike): [docs/OSS_LANDSCAPE.md](docs/OSS_LANDSCAPE.md) · [docs/SCAFFOLD_FROM_OSS.md](docs/SCAFFOLD_FROM_OSS.md)
+- Step-1 user story: [docs/USER_STORY_STEP1.md](docs/USER_STORY_STEP1.md)  
+- Vision: [docs/VISION.md](docs/VISION.md)  
+- MVP plan: [docs/MVP_IMPLEMENTATION_PLAN.md](docs/MVP_IMPLEMENTATION_PLAN.md)  
+- OSS landscape: [docs/OSS_LANDSCAPE.md](docs/OSS_LANDSCAPE.md) · [docs/SCAFFOLD_FROM_OSS.md](docs/SCAFFOLD_FROM_OSS.md)
 
 ## Building blocks
 

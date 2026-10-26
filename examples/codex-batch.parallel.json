@@ -1,0 +1,34 @@
+{
+  "contracts": [
+    {
+      "taskId": "module-a",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "In an isolated worktree, create ONLY src/module-a/README.md with one short paragraph describing Module A API stub. Do not touch other paths."
+      ],
+      "dependsOn": [],
+      "readPaths": ["README.md", "docs/"],
+      "writePaths": ["src/module-a/"],
+      "sharedResources": [],
+      "baseCommit": "HEAD",
+      "verifyCommands": ["test -f src/module-a/README.md"],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "module-b",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "In an isolated worktree, create ONLY src/module-b/README.md with one short paragraph describing Module B UI stub. Do not touch other paths."
+      ],
+      "dependsOn": [],
+      "readPaths": ["README.md", "docs/"],
+      "writePaths": ["src/module-b/"],
+      "sharedResources": [],
+      "baseCommit": "HEAD",
+      "verifyCommands": ["test -f src/module-b/README.md"],
+      "maxRepairs": 1
+    }
+  ]
+}

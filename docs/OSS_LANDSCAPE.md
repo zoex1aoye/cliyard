@@ -2,6 +2,8 @@
 
 > 目的：不要假设 cliyard 必须自研完整编排器；先分层看清「已解决什么」，再定差异化。  
 > 与 [VISION.md](./VISION.md)、[MVP_IMPLEMENTATION_PLAN.md](./MVP_IMPLEMENTATION_PLAN.md) 配套。
+> 产品命题、Codex/Claude Code/WorkBuddy/Qwen 边界与更完整的开源支撑矩阵见 [KEY_MIND.md](./KEY_MIND.md)。
+> Harness、Master Shell 与控制面的分层及 DSH 替换策略见 [HARNESS_BOUNDARIES.md](./HARNESS_BOUNDARIES.md)。
 
 ## 三类能力层
 
@@ -39,27 +41,35 @@
 
 - 趋势：任务生命周期 + 隔离环境 + 验证 + PR 交付。
 - **仅「多 Agent 并行」** 已逐渐成为 IDE 基础设施 → cliyard 正面竞争收益低。
-- 我们的差异：保留 **CodeBuddy(+DeepSeek) 已有授权** + Cursor 作 Master + 本地工程认知长期方向。
+- 我们的差异：保留 **CodeBuddy(+DeepSeek) 已有授权** + **DeepSeek Harness 作 Master 壳** + cliyard 本地控制面 + 工程认知长期方向。  
+- Cursor/Codex 仍可作**开发本仓库**的工具，**不再默认**当终端用户 Master。
+
+### DeepSeek Harness（[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)）
+
+- 开源 agent harness；**everything-is-a-plugin**（Cordis）；`npx @deepseek-ai/dsh web` → 本机 Web GUI。
+- 适合做人机面：**整理 Plan、插件监控、会话**；不替代 cliyard 的契约/DAG/worktree/ledger。
+- 社区已有 workbench / HUD / agent-board 等监控插件可对照；我们的 Master 插件见 `plugins/dsh-cliyard`。
+- 风险：developer preview，API 可能 breaking → 插件保持薄，**业务状态只信 cliyard 磁盘**。
 
 ## 三条路线
 
 | 路线 | 做法 | 何时选 |
 |------|------|--------|
 | **A** 采用现成编排器 | 先实测 Multica（CodeBuddy 匹配）；Cezar 作轻量工作流对照 | 调度/看板/日志已够，不愿养平台 |
-| **B** cliyard 二次开发 | 移植 Cezar/ai-orchestrator 的契约与闭环，保留现有 WSL 桥 | A 过重/许可证不合/Cursor 无法当 Master |
-| **C** 只做工程控制层 | Cursor=Master；cliyard=任务记录+路径保护+Verifier+报告；并行可后接 | 最小兼容现工作流 |
+| **B** cliyard 二次开发 | 移植 Cezar/ai-orchestrator 的契约与闭环，保留现有 WSL 桥 | A 过重/许可证不合 |
+| **C** 工程控制层 + DSH Master 壳 | **DSH GUI=Master**；cliyard=契约+隔离+Verifier+ledger；插件桥接 | **现行主路径** |
 
-**当前倾向：** 先量 A（Multica）与 C 的差距 → 不够再 B。不要默认维护完整编排平台；差异化留给 **工程上下文与本地验收协议**。
+**当前倾向：** **C**（DSH 壳 + cliyard 控制面）。Multica 仅对照，不进运行时依赖。见 [USER_STORY_STEP1.md](./USER_STORY_STEP1.md)。
 
 ## 对比试验矩阵（建议同一多模块需求跑一遍）
 
-| 维度 | Multica | Cezar | cliyard(C/B) |
-|------|---------|-------|--------------|
-| CodeBuddy | 文档列出，须实测 | 未确认 | 现有 adapters |
-| Cursor 保持 Master | 须验证（CLI skill/API） | 须验证 | 设计目标 |
-| 任务状态/日志 | 强 | 本地文件 | 待建/薄 |
-| 部署重量 | 高（PG/Docker） | 低 | 可控 |
-| 许可证 | 附加条件 | MIT | 自有 |
+| 维度 | Multica | Cezar | cliyard + DSH |
+|------|---------|-------|---------------|
+| CodeBuddy | 文档列出，须实测 | 未确认 | adapters（Windows 第二步） |
+| Master 壳 | Multica UI / skill | CLI | **DeepSeek Harness GUI + 插件** |
+| 任务状态/日志 | 强 | 本地文件 | JSON ledger + 插件监控 |
+| 部署重量 | 高（PG/Docker） | 低 | 可控（无 PG） |
+| 许可证 | 附加条件 | MIT | 自有 + DSH 上游 |
 | 工程认知深度集成 | 需自扩 | 需自扩 | 长期差异化 |
 
-任务样例：Spring Boot 多模块跨模块接口 + DTO + 测试；要求：Cursor 规划与验收、CodeBuddy 执行、记 diff、独立测、失败由 Cursor 决定是否修、不破坏未提交改动。
+任务样例：两模块需求+原型 → DSH 整理两份 Plan → 并行隔离派 Codex/CodeBuddy → 监控台看 ledger → 人验收。

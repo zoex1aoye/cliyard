@@ -1,0 +1,68 @@
+{
+  "contracts": [
+    {
+      "taskId": "glass-empty-a11y",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "In glass-frontend only: improve GlassEmpty.vue accessibility lightly.",
+        "Add role=\"status\" on the root t-empty (or a wrapping element if t-empty cannot take it) so empty states are announced as status.",
+        "Do NOT change theme.css, Lab views, or other components.",
+        "Keep Quiet Empty semantics; no new magic colors; follow AGENTS.md red lines.",
+        "Read glass-frontend/src/components/glass/GlassEmpty.vue before editing."
+      ],
+      "nonGoals": [
+        "Do not redesign Empty visuals",
+        "Do not touch GlassSkeleton or other files"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "glass-frontend/src/components/glass/GlassEmpty.vue",
+        "glass-frontend/src/styles/theme.css"
+      ],
+      "writePaths": [
+        "glass-frontend/src/components/glass/GlassEmpty.vue"
+      ],
+      "sharedResources": [],
+      "baseCommit": "HEAD",
+      "verifyCommands": [
+        "test -f glass-frontend/src/components/glass/GlassEmpty.vue",
+        "grep -E 'role=.status.' glass-frontend/src/components/glass/GlassEmpty.vue"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "glass-skeleton-a11y",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "In glass-frontend only: improve GlassSkeleton.vue accessibility lightly.",
+        "When loading is true (default), mark the skeleton as decorative/busy: aria-busy=\"true\" and aria-hidden=\"true\" on the root t-skeleton (or wrapper).",
+        "Do NOT change theme.css, Lab views, or other components.",
+        "Keep Neutral Soft bone; no magic colors; follow AGENTS.md red lines.",
+        "Read glass-frontend/src/components/glass/GlassSkeleton.vue before editing."
+      ],
+      "nonGoals": [
+        "Do not redesign Skeleton animation",
+        "Do not touch GlassEmpty or other files"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "glass-frontend/src/components/glass/GlassSkeleton.vue",
+        "glass-frontend/src/styles/theme.css"
+      ],
+      "writePaths": [
+        "glass-frontend/src/components/glass/GlassSkeleton.vue"
+      ],
+      "sharedResources": [],
+      "baseCommit": "HEAD",
+      "verifyCommands": [
+        "test -f glass-frontend/src/components/glass/GlassSkeleton.vue",
+        "grep -q 'aria-busy' glass-frontend/src/components/glass/GlassSkeleton.vue"
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}

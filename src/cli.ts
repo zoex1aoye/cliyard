@@ -4,21 +4,41 @@ import { discover } from "./discover.js";
 import { runTask } from "./run.js";
 import { runBatch } from "./batch.js";
 import { loadTaskFile } from "./taskfile.js";
+import { runMockLoopCli } from "./mock-loop.js";
+import { runMockBatchCli } from "./scheduler/mock-batch.js";
+import {
+  runClaudeBatchCli,
+  runCodexBatchCli,
+} from "./scheduler/codex-batch.js";
+import { runPlanDispatchCli } from "./planner/cli.js";
+import { runEstimatePlanCli } from "./planner/estimate-cli.js";
 import type { PermissionIntent, WorkerId } from "./types.js";
 
 function usage(): never {
-  console.log(`cliyard — Windows entry, WSL workers
+  console.log(`cliyard — control plane (+ Darwin Master spikes)
 
 Usage:
   cliyard doctor
   cliyard run --repo <linux-path> --prompt "<task>" [--worker auto|claude|codex|codebuddy]
               [--model <id>] [--permission accept|bypass] [--dry-run]
   cliyard batch <taskfile.yaml> [--dry-run] [--max-parallel N]
+  cliyard mock-loop [contract.json] [--fail-verify-times N] [--ledger path]
+                    [--briefing-dir path] [--real-verify]
+  cliyard mock-batch <contracts.json|taskfile.yaml> [--ledger path] [--real-verify]
+                     [--fail-verify-times N]
+  cliyard codex-batch <contracts.json> [--repo path] [--ledger path] [--model id]
+                     [--dry-run] [--keep-worktrees]
+  cliyard claude-batch <contracts.json> [--repo path] [--ledger path] [--model id]
+                      [--dry-run] [--keep-worktrees]
+  cliyard plan-dispatch <plan.json|-> --repo path [--dispatch]
+                       [--worker claude|codex|mock] [--model id] [--out path]
+                       [--ledger path] [--dry-run] [--cleanup]
+  cliyard estimate-plan <plan.json|->
 
-Examples (PowerShell):
-  npm run doctor
-  npm run run-task -- --repo ~/work/my-app --prompt "Add README section" --worker codebuddy --model gpt-5 --dry-run
-  npm run batch -- examples/module.tasks.yaml --dry-run
+Master (DeepSeek Harness plugin / local demo):
+  npm run master-monitor
+  npm run master-dispatch
+  See docs/USER_STORY_STEP1.md and plugins/dsh-cliyard/README.md
 `);
   process.exit(1);
 }
@@ -86,6 +106,36 @@ async function main(): Promise<void> {
     console.log(JSON.stringify(results, null, 2));
     const failed = results.some((r) => r.exitCode !== 0);
     process.exit(failed ? 1 : 0);
+  }
+
+  if (cmd === "mock-loop") {
+    await runMockLoopCli(argv.slice(1));
+    return;
+  }
+
+  if (cmd === "mock-batch") {
+    await runMockBatchCli(argv.slice(1));
+    return;
+  }
+
+  if (cmd === "codex-batch") {
+    await runCodexBatchCli(argv.slice(1));
+    return;
+  }
+
+  if (cmd === "claude-batch") {
+    await runClaudeBatchCli(argv.slice(1));
+    return;
+  }
+
+  if (cmd === "plan-dispatch") {
+    await runPlanDispatchCli(argv.slice(1));
+    return;
+  }
+
+  if (cmd === "estimate-plan") {
+    runEstimatePlanCli(argv.slice(1));
+    return;
   }
 
   usage();

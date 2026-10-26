@@ -1,0 +1,30 @@
+{
+  "contracts": [
+    {
+      "taskId": "module-a",
+      "version": 1,
+      "frozen": true,
+      "goals": ["Module A: stub from plan (api surface)"],
+      "dependsOn": [],
+      "readPaths": ["docs/", "src/"],
+      "writePaths": ["src/module-a/"],
+      "sharedResources": [],
+      "baseCommit": "HEAD",
+      "verifyCommands": [],
+      "maxRepairs": 2
+    },
+    {
+      "taskId": "module-b",
+      "version": 1,
+      "frozen": true,
+      "goals": ["Module B: stub from plan (ui shell)"],
+      "dependsOn": [],
+      "readPaths": ["docs/", "src/"],
+      "writePaths": ["src/module-b/"],
+      "sharedResources": [],
+      "baseCommit": "HEAD",
+      "verifyCommands": [],
+      "maxRepairs": 2
+    }
+  ]
+}

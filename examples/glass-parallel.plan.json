@@ -1,0 +1,49 @@
+{
+  "planId": "glass-parallel-a11y",
+  "tasks": [
+    {
+      "taskId": "glass-empty-a11y",
+      "goal": "In glass-frontend only, add role=\"status\" to the root GlassEmpty element (or wrapper) so Quiet Empty states are announced as status. Read AGENTS.md and the component first.",
+      "nonGoals": [
+        "Do not redesign Empty visuals",
+        "Do not touch theme.css, Lab views, GlassSkeleton, or other components"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "glass-frontend/src/components/glass/GlassEmpty.vue",
+        "glass-frontend/src/styles/theme.css"
+      ],
+      "writePaths": [
+        "glass-frontend/src/components/glass/GlassEmpty.vue"
+      ],
+      "verifyCommands": [
+        "test -f glass-frontend/src/components/glass/GlassEmpty.vue",
+        "grep -E 'role=.status.' glass-frontend/src/components/glass/GlassEmpty.vue"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "glass-skeleton-a11y",
+      "goal": "In glass-frontend only, mark the loading GlassSkeleton as busy and decorative with aria-busy=\"true\" and aria-hidden=\"true\" on the root element (or wrapper). Read AGENTS.md and the component first.",
+      "nonGoals": [
+        "Do not redesign Skeleton animation",
+        "Do not touch theme.css, Lab views, GlassEmpty, or other components"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "glass-frontend/src/components/glass/GlassSkeleton.vue",
+        "glass-frontend/src/styles/theme.css"
+      ],
+      "writePaths": [
+        "glass-frontend/src/components/glass/GlassSkeleton.vue"
+      ],
+      "verifyCommands": [
+        "test -f glass-frontend/src/components/glass/GlassSkeleton.vue",
+        "grep -q 'aria-busy' glass-frontend/src/components/glass/GlassSkeleton.vue"
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}

@@ -13,22 +13,30 @@
 3. **上下文崩坏**：主会话又派工又改代码，轮次一长就中断、遗忘、胡改。  
 4. **并行打架**：多路同时改同一工作区，文件冲突、难以验收。
 
-我们要的不是再做一个聊天窗口，而是：**一个清醒的管家（Master）把任务送到验收，人只在契约与不可逆节点出场。**
+我们要的不是再自研一个聊天窗口，而是：**一个清醒的管家（Master）把任务送到验收，人只在契约与不可逆节点出场。**
+
+**Master 壳 = [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（GUI + everything-is-a-plugin）**；  
+**cliyard = 薄控制面**（契约、DAG、隔离、verify、ledger）。人在 DSH 里整理 Plan 与看监控；派发与状态真相在磁盘。第一步用户故事见 [USER_STORY_STEP1.md](./USER_STORY_STEP1.md)。
+
+持续运行、独立运行态验收、临时端口租约和并行验收原则见 [MASTER_OPERATING_MODEL.md](./MASTER_OPERATING_MODEL.md)。
+Harness 边界与 DSH 可替换性见 [HARNESS_BOUNDARIES.md](./HARNESS_BOUNDARIES.md)。
 
 ---
 
 ## 2. 理想效果（成功长什么样）
 
 ```text
-人：放好需求 / 原型 / 边界（契约）
+人：在 DeepSeek Harness GUI 放好需求 / 原型 / 边界
         ↓
-Master（薄）：拆任务 → 选 CLI / 模型 / 强度 → 派发 → 看门禁与摘要 → 接受 | 打回 | 有限重修
+Master 壳（DSH）+ Master 插件（dsh-cliyard）：整理 Plan → TaskContract → 派发
         ↓
-Workers（厚）：各自 worktree + 各家 CLI 自带沙箱；按契约改代码
+cliyard 控制面：选 CLI / 模型 / 强度 → worktree 隔离 → 门禁与摘要 → 接受 | 打回 | 有限重修
+        ↓
+Workers（厚）：各自 worktree + 各家 CLI（Codex / CodeBuddy / …）
         ↓
 Verifier：重跑测试/build 等（不信任 Worker 自报「已通过」）
         ↓
-人：审合入 / 上线（不可逆）；多数时候「走开再回来看结果」
+监控台（DSH 插件）：读 ledger；人审合入 / 上线（不可逆）
 ```
 
 理想体验：
@@ -36,10 +44,11 @@ Verifier：重跑测试/build 等（不信任 Worker 自报「已通过」）
 - **少打断**：无人值守权限 + 可执行验收，代替人肉确认。  
 - **少纠偏**：方向写进冻结契约（paths、验收命令、反例）；漂了就 reject/requeue，而不是长聊劝说。  
 - **Master 不中断**：状态在磁盘（taskfile / ledger / 状态机），不在超长对话里；每轮只喂短摘要，或新会话 + resume pack。  
-- **并行可控**：同账号可多路 CodeBuddy，按任务指定模型；目录不重叠优先；并发有上限（配额共用）。  
-- **验收可证伪**：有命令、有 diff、有退出码；「我说做完了」不算数。
+- **并行可控**：多模块 Plan 可连续派发；worktree + paths 不重叠；并发有上限（配额共用）。  
+- **验收可证伪**：有命令、有 diff、有退出码；「我说做完了」不算数。  
+- **监控可见**：不必翻终端才知道 running / verifying / repairing / accepted / rejected。
 
-尚不作为 v0 必达（后续）：自动完美合入、JetBrains PSI 语义验收、强制 Docker、完整 GUI。
+尚不作为第一步必达：自动完美合入、JetBrains PSI、强制 Docker、Windows WSL/CodeBuddy 真连（第二步再接）。
 
 ---
 
@@ -85,7 +94,7 @@ AI 放大执行；品味与最终责任仍在人；Master 负责让中间过程�
 | 角色 | 职责 | 不做什么 |
 |------|------|----------|
 | **人** | 定/改契约；审不可逆（合主支、发布） | 不当逐步陪聊纠偏员 |
-| **Master** | 派发、校准（对照契约）、验收裁决 | 不自己写大段业务代码；不把全程轨迹塞进上下文 |
+| **Master** | 壳在 DSH GUI；插件派发/校准/裁决；状态信 cliyard ledger | 不自己写大段业务代码；不把全程轨迹塞进上下文；不以 DSH Jobs 冒充多 CLI 隔离 |
 | **Worker** | 在隔离 worktree 内实现 | 不改契约、不越权改 paths 外文件 |
 | **Verifier** | 独立重跑 gate；可选另一模型只读审 | 不当实现者 |
 
@@ -134,19 +143,16 @@ Master 每轮只需：
 
 ## 7. 与当前实现（v0）的差距
 
-| 已有 | 尚未有 |
-|------|--------|
-| Windows → WSL 桥、`doctor` | Master LLM 闭环 |
-| `run` / `batch` + taskfile（model、paths） | verify / repair / accept 状态机 |
-| worktree 隔离、结果 JSON | 外置 ledger、resume pack |
-| 能力发现（有哪些 CLI） | 语义验收（轻索引 / JetBrains 按需） |
+| 已有 | 尚未有 / 进行中 |
+|------|------------------|
+| Darwin mock 闭环、DAG、`mock-batch`、ledger、可选 shell verify、Plan→Contract bridge | 自然语言 Plan 仍由 DSH 模型整理；目前没有独立的 planner 模型/UI 表单 |
+| Windows → WSL 桥、`doctor`、`run`/`batch` | CodeBuddy 真连与同账号并行（第二步） |
+| Codex worker spike（本机） | 语义验收（轻索引 / JetBrains 按需） |
 
-路线：先在真实模块上验证 **batch + 契约** → 再加 **gate 验收与有限重修** → 再加 **薄 Master** → 最后按需语义层。
-
-详细差距与分阶段实施见 [MVP_IMPLEMENTATION_PLAN.md](./MVP_IMPLEMENTATION_PLAN.md)（阶段 A 审查）。
+路线：见 [USER_STORY_STEP1.md](./USER_STORY_STEP1.md) Spike S1→S2 → Windows/CodeBuddy；细节 [MVP_IMPLEMENTATION_PLAN.md](./MVP_IMPLEMENTATION_PLAN.md) §10。
 
 ---
 
 ## 8. 一句话
 
-**cliyard = 能力发现的多 CLI 编排场；Master 是清醒管家（派发 / 校准 / 验收），状态出聊天，任务自行走到可证伪的验收——人把需求和描述交给 Master，回来验收的应是愿意认真认领的结果（Linus 式终点），而不是一路陪聊纠偏。**
+**DeepSeek Harness = Master 壳（GUI + 插件）；cliyard = 多 CLI 控制面（契约 / 隔离 / 门禁 / ledger）。状态出聊天，人把需求与原型交给 Master，派给合适的 code agent CLI 并行隔离执行，在监控台看进度——回来验收的应是愿意认真认领的结果（Linus 式终点）。**

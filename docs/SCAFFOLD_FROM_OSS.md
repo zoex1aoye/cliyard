@@ -144,17 +144,17 @@ interface AgentAdapter {
 
 ## 5. Multica spike 清单（Codex 现在能做的 / 留到 Windows+CodeBuddy 的）
 
-### 现在（本 Codex 会话内）
+### 现在（本 Codex / macOS 会话内）
 
-- [ ] 通读 Multica README 与 LICENSE，记录 run/task/retry/timeout 数据模型。
+- [x] 通读 Multica README 与 LICENSE，记录 run/task/retry/timeout 数据模型。（见 OSS_LANDSCAPE）
 - [ ] 核对 multica-cli skill 如何让 Codex/Claude/Cursor 当 Master。
 - [ ] 在本地（无 Windows 依赖）试跑 Multica（如可行），确认 CodeBuddy 是真实支持还是仅文档列出。
-- [ ] 抽取 Cezar 的 implement→verify→onFail retry 最小字段，落成 `TaskContract` 草案。
-- [ ] 抽取 ai-orchestrator 的 briefing/queue 文件约定。
-- [ ] 写裁决记录：CodeBuddy 匹配、Cursor 当 Master、许可证、部署重量四项是否过关。
-- [ ] 用 Mock Adapter + 临时 git 仓跑通 `TaskFile → TaskContract → verify → repair` 的最小闭环。
+- [x] 抽取 Cezar 的 implement→verify→onFail retry 最小字段，落成 `TaskContract`（`src/contracts/schema.ts` + `examples/mock.contract.json`）。
+- [ ] 抽取 ai-orchestrator 的 briefing/queue 文件约定（下一刀：assemble briefing）。
+- [x] 写裁决记录：主推 Route C；Multica 作镜像。（见本文 §2）
+- [x] Mock Adapter 闭环：`npm run mock-loop`（contract → implement → verify → repair≤N）；本机 2026-10-26 已绿。尚缺 TaskFile→Contract 与真 git worktree。
 - [ ] 记录 multica-cli 的入参/出参 JSON 形态，评估能否把 Codex/Cursor 接成 Master 的驱动。
-- [ ] 把 Cezar 的 `verify` 命令与 `onFail` 三档语义写进 `contracts/schema.ts`，并配单测。
+- [x] `verify` + onFail 语义进 `contracts/schema.ts` + `repair/loop.ts`；状态机单测已有；闭环单测待补（MVP §10 M1）。
 
 ### 稍后（必须回 Windows+WSL+CodeBuddy）
 

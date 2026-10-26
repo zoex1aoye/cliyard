@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "cliyard Master",
+    "description": "把结构化 Plan 落成冻结契约，派发隔离 Worker，并读取账本监控进度。"
+  }
+}

@@ -1,12 +1,62 @@
-# cliyard MVP 实施计划（阶段 A：现状审查）
+# cliyard MVP 实施计划
 
-基于仓库当前代码（`main` @ 审查时点）与用户 MVP 方案对照。**本阶段只出计划，不进行大规模实现。** 阶段 B 起需你确认后再动。
+基于仓库代码与本机实测。**后续开发以 MVP 实践驱动**：先在本机跑通并扩展可运行切片，再按反馈调整方案；不以「阶段 B–H 愿景清单」为默认推进节奏。
+
+> 历史：§1–§9 保留阶段 A 审查快照（对照早期 `main`）。§0 与 §10 为 **2026-10-26 macOS+Codex 实测后** 的现行工作约定。
 
 ---
 
-## 1. 当前模块结构及职责
+## 0. 本机已验证（macOS + Codex）
 
-仓库为极薄 TypeScript 单体（无 `tests/`、无运行时依赖，仅 `tsx`/`typescript` 开发依赖）。
+**环境**：Darwin `arm64`，Node `v20.20.2`，无 `wsl.exe`；Codex `v0.163.0` + `deepseek-v4-pro` 可用。  
+**Route C 裁决不变**：薄控制面为本机默认路径；Multica 仅作镜像对照，不接入运行时。  
+**本机默认入口**：`npm test` + `npm run mock-loop`（非 `doctor`/`run`/`batch`）。
+
+### 命令与结果（2026-10-26）
+
+| 命令 | 结果 | 退出码 |
+|------|------|--------|
+| `npm install --registry https://registry.npmjs.org/` | 依赖就绪（tsx/typescript） | 0 |
+| `npm test` | 4/4 通过（`core/status` 转换表） | 0 |
+| `npm run mock-loop`（默认 `failVerifyTimes=1`） | implement → verify fail → repair → accept；写 `.cliyard/ledger.json` | 0 |
+| `npm run mock-loop -- --fail-verify-times 0` | 一次 verify 即 `accepted` | 0 |
+| `npm run mock-loop -- --fail-verify-times 3` | `maxRepairs=2` 耗尽 → `rejected` | **1**（预期） |
+| `npx tsx src/cli.ts --help` | 打印含 `mock-loop` 的 usage | 1（usage 约定） |
+| `npm run doctor` | `wslOk: false`，notes 提示须 Windows+WSL | **2**（预期） |
+| `npm run batch -- examples/module.tasks.yaml --dry-run` | 仍走 `discover`/WSL，本机失败 | 非 0（预期） |
+| `codex exec -m deepseek-v4-pro`（短探针） | 回复 `MVP_OK` | 0 |
+
+### 已落地的 Route C 薄层（本机可跑）
+
+```text
+src/core/status.ts           # 九态 + 合法转换
+src/contracts/schema.ts      # TaskContract validate + JSON 加载
+src/agents/{types,mock}.ts   # AgentAdapter + Mock
+src/verification/verifier.ts # Mock + optional shell verifier（--real-verify）
+src/repair/loop.ts           # implement → verify → repair≤N → accept|reject
+src/persistence/ledger.ts    # JSON 文件账本（.cliyard/ledger.json）
+src/scheduler/{dag,mock-batch}.ts  # readyIds + multi-task mock scheduler
+src/mock-loop.ts + cli mock-loop / mock-batch
+examples/mock.contract.json · real-verify.contract.json · mock-batch.*.json
+tests/*.test.ts
+```
+
+`wsl` / `discover` / `adapters` / `batch` **未改**；Windows 路径仍为第二轨。
+
+### 实践反馈（据此排下一切片）
+
+1. Mock 闭环与状态机在 Darwin 上已够用；M1–M6 后下一刀再看 SQLite / 真实 CLI。  
+2. `doctor`/`batch` 在无 WSL 时不可用——本机勿假装测桥；文档与脚本入口须把 mock-loop / mock-batch 标成 Darwin MVP。  
+3. Ledger 已是 JSON 文件（对齐 SCAFFOLD「先文件账本」）；**暂不引入 SQLite**，直到恢复场景逼出来。  
+4. M5/M6 已落地：真 shell verify 为 opt-in；多任务 mock 调度尊重 `dependsOn`。
+
+---
+
+## 1. 当前模块结构及职责（阶段 A 快照）
+
+> 下表反映审查时点；§0 已列出此后新增的 mock 控制面。
+
+仓库为极薄 TypeScript 单体（审查时无 `tests/`；现已有 `tests/status.test.ts` + mock-loop）。
 
 | 路径 | 职责 | 证据 |
 |------|------|------|
@@ -289,12 +339,62 @@ interface TaskContract {
 
 ---
 
-## 9. 阶段 A 结论
+## 9. 阶段 A 结论（历史）
 
-当前仓库是 **可用的「发现 + worktree + 多 CLI 并行发射器」**，与 VISION 的「清醒 Master → 可证伪验收」之间缺的是：**契约内核、状态账本、DAG 调度、独立 Verifier、集成队列与恢复**。
+审查时点仓库是 **可用的「发现 + worktree + 多 CLI 并行发射器」**。此后 §0 已在 Darwin 落地契约/状态机/Mock 闭环/JSON 账本；缺口变为：**briefing、DAG、真实 verifier shell、worktree 强制、Windows 桥实测**。
 
-**推荐路径**：按 B→H 增量演进；先确认上文 D1–D10，再进入阶段 B（模型 + SQLite + 状态机 + 单元测试）。
+~~推荐路径：按 B→H 等待确认后开 B。~~ → 见 **§10**（MVP 实践切片）。
 
 ---
 
-*阶段 A 交付物：本文。等待确认后开始阶段 B。*
+## 10. 现行约定：MVP 实践切片（取代「等阶段 B」）
+
+**原则**：每一刀必须本机可跑（`npm test` 和/或 `npm run mock-loop` / 新 CLI）；跑通再调计划。Route C 不变；**Master 壳 = DeepSeek Harness**；Multica 不进依赖。用户故事：[USER_STORY_STEP1.md](./USER_STORY_STEP1.md)。
+
+### 已完成切片（M1–M6）
+
+| # | 切片 | 状态 |
+|---|------|------|
+| M1–M4 | 闭环单测 / TaskFile→Contract / briefing / DAG | **done** |
+| M5 | 可选 shell verify（`--real-verify`） | **done** |
+| M6 | 多任务 mock 调度 + ledger | **done** — ready 集 **并行** |
+
+### 下一步切片（DSH Master）
+
+| # | 切片 | 验收 | 状态 |
+|---|------|------|------|
+| S1 | `plugins/dsh-cliyard`：dispatch → `mock-batch`；监控读 ledger | 插件 README + `npm run master-dispatch` / `master-monitor` | **done**（本机可无 DSH 演示；`dsh plugin add link:…` 可选） |
+| S2 | Codex CLI worker + 双 worktree 并行隔离 | `npm run codex-batch` + fixture；ledger 可见 | **done**（需本机 `codex`） |
+| S2.5 | Plan → Contract → dispatch bridge；DSH agent tool | `npm run plan-dispatch` + 兄弟仓工具测试；overlap/path/graph 负例 | **done**（结构化 Plan 由 DSH 模型生成） |
+| S2.6 | Claude Code + DeepSeek Worker | `claude-ds` probe + `npm run claude-batch` 真实临时仓 accepted | **done**（Claude Code 2.1.185 / `deepseek-flash[1m]`） |
+| S3 | Windows + CodeBuddy 真连 | doctor / run / batch | **deferred** |
+
+默认继续 JSON ledger；不做 SQLite，直到恢复场景逼出。
+
+**实践微调**
+
+- Master：**DSH GUI**，非 Cursor。Cursor/Codex 可开发本仓。
+- 并行隔离：**cliyard worktree + paths**，不以 DSH Jobs 冒充。
+- M6：同一 ready 波次 `Promise.all` 并行；ledger 写带锁。
+- `npm test` 覆盖 status / loop / fromTaskfile / assemble / dag / verifier-shell / mock-batch / ledger-lock / codex-adapter（dry）/ Plan bridge / 真实 Git diff 路径门禁。
+- Plan bridge 是唯一新的一站式入口：结构化 Plan → 冻结契约文件 → 可选 worktree dispatch；控制面拒绝重叠写路径。
+- `codex-batch` 在创建 worktree 前解析真实 base commit 并做 DAG/路径预检；Codex 完成后按 Git diff 取真实 touched paths。
+- 当前 `dependsOn` 只提供启动顺序，不自动把上游 worktree diff 带入下游；真实依赖模块仍需独立 integration 切片。
+
+### 明确推迟到 Windows + WSL + CodeBuddy
+
+- `cliyard doctor` 真实 ping / worker 探测  
+- `run` / `batch` 真实 WSL worktree + CodeBuddy  
+- CodeBuddy 同账号并行与 permission 边界  
+- Multica 对照试跑（若仍需要）  
+- 多模块真实仓 E2E  
+
+### 与旧阶段 B–H 的关系
+
+§7 的 B–H 仍作 **能力地图**。映射：M1–M6 ≈ 控制面核；S1–S2 ≈ 原 G「薄 Master」的 DSH 版；原 D/F/H 等 Windows 或 S3。
+
+D1–D10（§8）仍有效：**D4 SQLite 延后**；**D5 WSL 默认仅 Windows**；**D8 Master = DSH + 插件**（不再等「阶段 G 再接 LLM」空窗）。
+
+---
+
+*现行入口：§0 实测 + §10 切片。改计划先改本节，勿先写大阶段。*

@@ -1,0 +1,14 @@
+- insert:
+    - id: cliyard-master
+      name: dsh-cliyard
+      config:
+        # The control plane can live outside the target business repo.
+        controlRoot: "/Users/x1aoye/Documents/pers-project/cliyard"
+        # Sibling Glass UI prototype (ui-prototype). Override via dispatch --repo.
+        repoRoot: "/Users/x1aoye/Documents/pers-project/ui-prototype"
+        defaultContracts: "/Users/x1aoye/Documents/pers-project/cliyard/examples/glass-parallel.contracts.json"
+        ledgerPath: ".cliyard/ledger.json"
+        defaultWorker: "claude"
+        model: "deepseek-flash[1m]"
+        keepWorktrees: true
+        monitorPort: 3927

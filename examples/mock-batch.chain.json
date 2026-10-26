@@ -1,0 +1,30 @@
+{
+  "contracts": [
+    {
+      "taskId": "api",
+      "version": 1,
+      "frozen": true,
+      "goals": ["Implement api module stub"],
+      "dependsOn": [],
+      "readPaths": ["src/"],
+      "writePaths": ["src/api/"],
+      "sharedResources": [],
+      "baseCommit": "HEAD",
+      "verifyCommands": [],
+      "maxRepairs": 2
+    },
+    {
+      "taskId": "web",
+      "version": 1,
+      "frozen": true,
+      "goals": ["Implement web UI against api"],
+      "dependsOn": ["api"],
+      "readPaths": ["src/"],
+      "writePaths": ["src/web/"],
+      "sharedResources": [],
+      "baseCommit": "HEAD",
+      "verifyCommands": [],
+      "maxRepairs": 2
+    }
+  ]
+}

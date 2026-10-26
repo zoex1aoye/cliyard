@@ -1,0 +1,52 @@
+{
+  "planId": "winui3-tdesign-foundation-audit",
+  "tasks": [
+    {
+      "taskId": "winui3-foundation-audit",
+      "goal": "Audit the existing ui-prototype Glass/TDesign implementation against a WinUI 3-inspired web design language. Produce one Chinese QA document at output/qa/winui3-tdesign-foundation-audit.md. Cover: (1) WinUI 3 Mica / Acrylic / Solid / Smoke / Layer / Elevation semantics mapped to this repository; (2) a component coverage matrix for GlassButton, GlassInput, GlassSelect, GlassPanel, GlassDialog, GlassTable, Navigation, Feedback and Data; (3) current strengths and concrete gaps versus existing theme.css/rules/Lab; (4) a P0 reference component set and dependency order; (5) explicit non-goals and items requiring human design approval. Do not modify product code, theme.css, rules, skills, AGENTS.md, package.json, or Git history.",
+      "nonGoals": [
+        "Do not implement components",
+        "Do not modify theme tokens or Lab pages",
+        "Do not treat old proposal files as final authority when they conflict with current theme.css or AGENTS.md"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        ".agents/rules/prototype-fidelity.mdc",
+        ".agents/rules/glass-component-kit.mdc",
+        ".agents/skills/glass-ui/SKILL.md",
+        ".agents/skills/glass-ui/references/interaction-tokens.md",
+        ".agents/tmp-winui-stack-redesign-plan.md",
+        ".agents/tmp-surface-winui-layer-plan.md",
+        ".agents/tmp-winui-alipay-companion-plan.md",
+        "glass-frontend/src/styles/theme.css",
+        "glass-frontend/src/components/glass/GlassButton.vue",
+        "glass-frontend/src/components/glass/GlassInput.vue",
+        "glass-frontend/src/components/glass/GlassSelect.vue",
+        "glass-frontend/src/components/glass/GlassPanel.vue",
+        "glass-frontend/src/components/glass/GlassDialog.vue",
+        "glass-frontend/src/components/glass/GlassTable.vue",
+        "glass-frontend/src/views/system/lab/"
+      ],
+      "writePaths": [
+        "output/qa/winui3-tdesign-foundation-audit.md"
+      ],
+      "verifyCommands": [
+        "test -f output/qa/winui3-tdesign-foundation-audit.md",
+        "grep -q 'WinUI 3' output/qa/winui3-tdesign-foundation-audit.md",
+        "grep -q 'Mica' output/qa/winui3-tdesign-foundation-audit.md",
+        "grep -q 'Acrylic' output/qa/winui3-tdesign-foundation-audit.md",
+        "grep -q 'GlassButton' output/qa/winui3-tdesign-foundation-audit.md",
+        "grep -q 'GlassTable' output/qa/winui3-tdesign-foundation-audit.md",
+        "grep -q 'P0' output/qa/winui3-tdesign-foundation-audit.md",
+        "grep -q '验收' output/qa/winui3-tdesign-foundation-audit.md"
+      ],
+      "forbidden": [
+        "git commit",
+        "git push",
+        "Modify AGENTS.md or .agents"
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}

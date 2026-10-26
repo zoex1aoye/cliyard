@@ -12,7 +12,18 @@
     "dev": "tsx src/cli.ts",
     "doctor": "tsx src/cli.ts doctor",
     "run-task": "tsx src/cli.ts run",
-    "batch": "tsx src/cli.ts batch"
+    "batch": "tsx src/cli.ts batch",
+    "mock-loop": "tsx src/cli.ts mock-loop",
+    "mock-batch": "tsx src/cli.ts mock-batch",
+    "codex-batch": "tsx src/cli.ts codex-batch",
+    "claude-batch": "tsx src/cli.ts claude-batch",
+    "plan-dispatch": "tsx src/cli.ts plan-dispatch",
+    "estimate-plan": "tsx src/cli.ts estimate-plan",
+    "master-dispatch": "node plugins/dsh-cliyard/lib/dispatch-cli.js",
+    "master-monitor": "node plugins/dsh-cliyard/lib/monitor-cli.js",
+    "glass-dry": "tsx src/cli.ts codex-batch examples/glass-parallel.contracts.json --repo ../ui-prototype --dry-run",
+    "glass-dispatch": "tsx src/cli.ts codex-batch examples/glass-parallel.contracts.json --repo ../ui-prototype --model deepseek-flash --keep-worktrees",
+    "test": "tsx --test tests/*.test.ts"
   },
   "engines": {
     "node": ">=20"
