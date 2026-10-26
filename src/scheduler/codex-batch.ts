@@ -84,15 +84,16 @@ export async function runCodexBatch(
   opts: CodexBatchOptions,
 ): Promise<CodexBatchResult> {
   const repoRoot = resolve(opts.repoRoot ?? process.cwd());
+  const contractsPath = resolveContractsPath(repoRoot, opts.contractsPath);
   const ledgerPath = opts.ledgerPath ?? defaultLedgerPath(repoRoot);
   const requestedManifest = opts.runManifest;
   if (requestedManifest) {
-    validateManifestIdentity(repoRoot, opts.contractsPath, requestedManifest);
+    validateManifestIdentity(repoRoot, contractsPath, requestedManifest);
   }
 
   const contracts = await resolveContractBases(
     repoRoot,
-    loadContractsInput(opts.contractsPath),
+    loadContractsInput(contractsPath),
   );
   validateDispatchGraph(contracts);
   await validateReadContexts(repoRoot, contracts);
@@ -372,7 +373,7 @@ function validateManifestIdentity(
         `not ${repoRoot}`,
     );
   }
-  const requestedPath = resolve(contractsPath);
+  const requestedPath = resolveContractsPath(repoRoot, contractsPath);
   const recordedPath = resolveContractsPath(repoRoot, manifest.contractsPath);
   if (requestedPath !== recordedPath) {
     throw new Error(

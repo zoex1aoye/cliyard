@@ -313,3 +313,42 @@ test("resume rejects changed contracts and changed base data before dispatch", a
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("resume resolves a relative contracts path against repoRoot", async () => {
+  const repo = initRepo();
+  try {
+    const base = runGit(repo, ["rev-parse", "HEAD"]);
+    writeContracts(repo, base);
+    const manifest = createRunManifest(repo, {
+      planId: "relative-contracts",
+      contractsPath: "contracts.json",
+      baseCommit: base,
+      integrationBranch: "cliyard/integration/relative-contracts",
+      tasks: ["foundation", "left", "right", "upper"],
+    });
+
+    const harness: WorkerHarness = { started: [] };
+    const result = await runCodexBatch({
+      contractsPath: "contracts.json",
+      repoRoot: repo,
+      ledgerPath: join(repo, ".cliyard", "ledger.json"),
+      worker: "claude",
+      dryRun: false,
+      keepWorktrees: false,
+      runManifest: manifest,
+      workerFactory: (_worker, cwd) =>
+        createFixtureWorker(cwd, harness),
+    });
+
+    assert.equal(result.allAccepted, true);
+    assert.deepEqual(result.startOrder, [
+      "foundation",
+      "left",
+      "right",
+      "upper",
+    ]);
+    assert.equal(result.manifest?.status, "completed");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
