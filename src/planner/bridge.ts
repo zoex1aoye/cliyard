@@ -16,6 +16,7 @@ import { createMockAdapter } from "../agents/mock.js";
 import { defaultLedgerPath } from "../persistence/ledger.js";
 import { runCodexBatch } from "../scheduler/codex-batch.js";
 import { runMockBatch } from "../scheduler/mock-batch.js";
+import type { RunManifest } from "../supervisor/types.js";
 import { createMockVerifier } from "../verification/verifier.js";
 import {
   compilePlan,
@@ -42,6 +43,12 @@ export interface PlanBridgeOptions {
   /** Validate and compile synchronously, then launch the worker detached. */
   background?: boolean;
   verbose?: boolean;
+  /**
+   * Optional durable checkpoint forwarded to the worker batch. Foreground
+   * claude/codex dispatch only; background jobs and mock workers cannot carry
+   * an in-memory manifest.
+   */
+  runManifest?: RunManifest;
 }
 
 export interface PlanBridgeResult {
@@ -78,6 +85,7 @@ export interface PlanBridgeResult {
       branch: string;
       head: string;
     };
+    manifest?: RunManifest;
   };
 }
 
@@ -116,6 +124,13 @@ export async function runPlanBridge(
   const ledgerPath =
     opts.ledgerPath ?? defaultLedgerPath(repoRoot);
 
+  if (opts.runManifest && opts.background === true) {
+    throw new Error(
+      "plan bridge: run manifest checkpointing is not available for " +
+        "background dispatch",
+    );
+  }
+
   if (opts.background === true) {
     const job = startBackgroundWorker({
       repoRoot,
@@ -139,6 +154,12 @@ export async function runPlanBridge(
   }
 
   if (worker === "mock") {
+    if (opts.runManifest) {
+      throw new Error(
+        "plan bridge: run manifest checkpointing requires a claude or " +
+          "codex worker",
+      );
+    }
     const result = await runMockBatch({
       contracts: plan.contracts,
       createWorker: () => createMockAdapter({ failVerifyTimes: 0 }),
@@ -174,6 +195,7 @@ export async function runPlanBridge(
     dryRun: opts.dryRun === true,
     keepWorktrees: opts.keepWorktrees !== false,
     verbose: opts.verbose,
+    runManifest: opts.runManifest,
   });
   return bridgeResult({
     plan,
@@ -197,6 +219,7 @@ export async function runPlanBridge(
       })),
       skipped: result.skipped,
       integration: result.integration,
+      manifest: result.manifest,
     },
   });
 }

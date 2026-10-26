@@ -5,8 +5,10 @@
 import {
   existsSync,
   lstatSync,
+  mkdirSync,
   symlinkSync,
 } from "node:fs";
+import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { createClaudeAdapter } from "../agents/claude.js";
@@ -18,6 +20,13 @@ import {
 } from "../verification/verifier.js";
 import { defaultLedgerPath } from "../persistence/ledger.js";
 import { runClosedLoop, type LoopResult } from "../repair/loop.js";
+import {
+  assertContractsHash,
+  resolveContractsPath,
+  runManifestPath,
+  updateRunManifest,
+} from "../supervisor/store.js";
+import type { RunManifest, RunTaskState } from "../supervisor/types.js";
 import {
   addWorktree,
   removeWorktree,
@@ -41,6 +50,17 @@ export interface CodexBatchOptions {
     worker: "codex" | "claude",
     cwd: string,
   ) => AgentAdapter;
+  /**
+   * Durable Supervisor checkpoint (RunManifest). When provided, the batch:
+   *   - rejects changed contracts or a changed base commit,
+   *   - checks work out of the recorded integration branch,
+   *   - skips tasks already accepted in the manifest,
+   *   - rebuilds pending/ready work from the contract DAG,
+   *   - writes a checkpoint after every task result.
+   * The manifest must already be persisted (see createRunManifest), and the
+   * caller owns the supervisor lock for the duration of the batch.
+   */
+  runManifest?: RunManifest;
 }
 
 export interface CodexBatchResult {
@@ -56,6 +76,8 @@ export interface CodexBatchResult {
     branch: string;
     head: string;
   };
+  /** Final checkpoint, when the batch ran with `runManifest`. */
+  manifest?: RunManifest;
 }
 
 export async function runCodexBatch(
@@ -63,6 +85,11 @@ export async function runCodexBatch(
 ): Promise<CodexBatchResult> {
   const repoRoot = resolve(opts.repoRoot ?? process.cwd());
   const ledgerPath = opts.ledgerPath ?? defaultLedgerPath(repoRoot);
+  const requestedManifest = opts.runManifest;
+  if (requestedManifest) {
+    validateManifestIdentity(repoRoot, opts.contractsPath, requestedManifest);
+  }
+
   const contracts = await resolveContractBases(
     repoRoot,
     loadContractsInput(opts.contractsPath),
@@ -77,6 +104,9 @@ export async function runCodexBatch(
     throw new Error(
       "worker-batch requires one shared base commit for all tasks",
     );
+  }
+  if (requestedManifest) {
+    validateManifestTasks(requestedManifest, contracts, sharedBase);
   }
   const handles = new Map<string, WorktreeHandle>();
   const workerKind = opts.worker ?? "codex";
@@ -94,20 +124,56 @@ export async function runCodexBatch(
     throw new Error(`codex-batch: cycle ${cycle.cycle.join(" → ")}`);
   }
 
-  const integration = await addWorktree({
-    repoRoot,
-    taskId: "integration",
-    baseCommit: sharedBase,
-  });
+  let checkpoint = requestedManifest;
+  const integration = checkpoint
+    ? await ensureIntegrationWorktree(repoRoot, checkpoint, log)
+    : await addWorktree({
+        repoRoot,
+        taskId: "integration",
+        baseCommit: sharedBase,
+      });
   await linkDependencies(repoRoot, integration.worktreePath, log);
   log(
     `[${workerKind}-batch] integration ${integration.branch} → ${integration.worktreePath}`,
   );
 
   try {
+    if (checkpoint) {
+      const integrationHead = await gitHead(integration.worktreePath);
+      checkpoint = checkpointManifest(repoRoot, checkpoint, (manifest) => {
+        manifest.status = "running";
+        manifest.owner = { pid: process.pid, host: hostname() };
+        manifest.integrationHead = integrationHead;
+        for (const contract of contracts) {
+          const task: RunTaskState = manifest.tasks[contract.taskId] ?? {
+            taskId: contract.taskId,
+            status: "ready",
+            accepted: false,
+          };
+          if (!task.accepted) {
+            // A previous owner may have died mid-task; rebuild it as ready.
+            task.status = "ready";
+            delete task.reason;
+          }
+          manifest.tasks[contract.taskId] = task;
+        }
+      });
+    }
+
     const byId = new Map(contracts.map((c) => [c.taskId, c]));
-    const pending = new Set(contracts.map((c) => c.taskId));
     const accepted = new Set<string>();
+    if (checkpoint) {
+      for (const contract of contracts) {
+        if (checkpoint.tasks[contract.taskId]?.accepted) {
+          accepted.add(contract.taskId);
+        }
+      }
+    }
+    const pending = new Set(
+      contracts
+        .map((contract) => contract.taskId)
+        .filter((taskId) => !accepted.has(taskId)),
+    );
     const results: LoopResult[] = [];
     const skipped: { taskId: string; reason: string }[] = [];
     const startOrder: string[] = [];
@@ -196,11 +262,62 @@ export async function runCodexBatch(
             handles.get(id)!,
             snapshot,
           );
+          if (checkpoint) {
+            const integrationHead = await gitHead(integration.worktreePath);
+            checkpoint = checkpointManifest(
+              repoRoot,
+              checkpoint,
+              (manifest) => {
+                manifest.tasks[id] = {
+                  taskId: id,
+                  status: "accepted",
+                  accepted: true,
+                  resultCommit: snapshot,
+                };
+                manifest.integrationHead = integrationHead;
+              },
+            );
+          }
           log(`[${workerKind}-batch] accepted ${id}`);
         } else {
+          if (checkpoint) {
+            checkpoint = checkpointManifest(
+              repoRoot,
+              checkpoint,
+              (manifest) => {
+                manifest.tasks[id] = {
+                  taskId: id,
+                  status: result.status,
+                  accepted: false,
+                  reason: result.reason,
+                };
+              },
+            );
+          }
           log(`[${workerKind}-batch] rejected ${id}: ${result.reason}`);
         }
       }
+    }
+
+    const finalHead = await gitHead(integration.worktreePath);
+    const allAccepted =
+      skipped.length === 0 && results.every((r) => r.verdict === "accepted");
+    if (checkpoint) {
+      checkpoint = checkpointManifest(repoRoot, checkpoint, (manifest) => {
+        manifest.integrationHead = finalHead;
+        for (const item of skipped) {
+          const task: RunTaskState = manifest.tasks[item.taskId] ?? {
+            taskId: item.taskId,
+            status: "ready",
+            accepted: false,
+          };
+          task.status = "blocked";
+          task.accepted = false;
+          task.reason = item.reason;
+          manifest.tasks[item.taskId] = task;
+        }
+        manifest.status = allAccepted ? "completed" : "blocked";
+      });
     }
 
     return {
@@ -209,8 +326,7 @@ export async function runCodexBatch(
       startOrder,
       waves,
       ledgerPath,
-      allAccepted:
-        skipped.length === 0 && results.every((r) => r.verdict === "accepted"),
+      allAccepted,
       worktrees: [...handles.values()].map((h) => ({
         taskId: h.taskId,
         path: h.worktreePath,
@@ -219,16 +335,233 @@ export async function runCodexBatch(
       integration: {
         path: integration.worktreePath,
         branch: integration.branch,
-        head: await gitHead(integration.worktreePath),
+        head: finalHead,
       },
+      ...(checkpoint ? { manifest: checkpoint } : {}),
     };
   } finally {
     if (!opts.keepWorktrees) {
-      await removeWorktree(integration, { force: true }).catch(() => undefined);
       for (const h of handles.values()) {
         await removeWorktree(h, { force: true }).catch(() => undefined);
       }
+      if (requestedManifest) {
+        // The integration branch is the durable resume checkpoint.
+        await removeWorktreeKeepBranch(integration).catch(() => undefined);
+      } else {
+        await removeWorktree(integration, { force: true }).catch(
+          () => undefined,
+        );
+      }
     }
+  }
+}
+
+/**
+ * Resume preconditions that only need the manifest and the contracts file.
+ * These run before any worktree is created or worker dispatched.
+ */
+function validateManifestIdentity(
+  repoRoot: string,
+  contractsPath: string,
+  manifest: RunManifest,
+): void {
+  const manifestRoot = resolve(manifest.repoRoot);
+  if (manifestRoot !== repoRoot) {
+    throw new Error(
+      `worker-batch: run ${manifest.runId} belongs to ${manifestRoot}, ` +
+        `not ${repoRoot}`,
+    );
+  }
+  const requestedPath = resolve(contractsPath);
+  const recordedPath = resolveContractsPath(repoRoot, manifest.contractsPath);
+  if (requestedPath !== recordedPath) {
+    throw new Error(
+      `worker-batch: contracts path changed for run ${manifest.runId}: ` +
+        `manifest has ${recordedPath}, batch was given ${requestedPath}`,
+    );
+  }
+  if (!existsSync(runManifestPath(repoRoot, manifest.runId))) {
+    throw new Error(
+      `worker-batch: run manifest ${manifest.runId} is not persisted; ` +
+        "create it with createRunManifest before dispatching",
+    );
+  }
+  // Hash the recorded absolute path so resume is independent of the cwd.
+  assertContractsHash({ ...manifest, contractsPath: recordedPath });
+}
+
+function validateManifestTasks(
+  manifest: RunManifest,
+  contracts: ReturnType<typeof loadContractsInput>,
+  sharedBase: string,
+): void {
+  if (manifest.baseCommit !== sharedBase) {
+    throw new Error(
+      `worker-batch: base commit changed for run ${manifest.runId}: ` +
+        `manifest has ${manifest.baseCommit}, contracts resolve to ${sharedBase}`,
+    );
+  }
+  const contractIds = new Set(contracts.map((contract) => contract.taskId));
+  for (const taskId of Object.keys(manifest.tasks)) {
+    if (!contractIds.has(taskId)) {
+      throw new Error(
+        `worker-batch: run ${manifest.runId} tracks task ${taskId}, ` +
+          "which is not present in the contracts",
+      );
+    }
+  }
+}
+
+function checkpointManifest(
+  repoRoot: string,
+  manifest: RunManifest,
+  mutate: (manifest: RunManifest) => void,
+): RunManifest {
+  return updateRunManifest(repoRoot, manifest.runId, mutate);
+}
+
+interface ListedWorktree {
+  path: string;
+  branch?: string;
+}
+
+/**
+ * Attach to the recorded integration branch, creating it on a fresh run.
+ * A resume must never silently lose accepted work, so a missing branch or a
+ * branch that no longer contains the recorded head is a hard error.
+ */
+async function ensureIntegrationWorktree(
+  repoRoot: string,
+  manifest: RunManifest,
+  log: (message: string) => void,
+): Promise<WorktreeHandle> {
+  const branch = manifest.integrationBranch;
+  await gitRaw(repoRoot, ["worktree", "prune"]).catch(() => undefined);
+  const existing = (await listWorktrees(repoRoot)).find(
+    (entry) => entry.branch === `refs/heads/${branch}`,
+  );
+
+  const branchRef = await gitRaw(repoRoot, [
+    "rev-parse",
+    "--verify",
+    `refs/heads/${branch}^{commit}`,
+  ]);
+  const branchHead =
+    branchRef.exitCode === 0 ? branchRef.stdout.trim() : undefined;
+  const accepted = Object.values(manifest.tasks).filter(
+    (task) => task.accepted,
+  );
+
+  if (!branchHead) {
+    if (manifest.status !== "running" || accepted.length > 0) {
+      throw new Error(
+        `worker-batch: integration branch ${branch} is missing for run ` +
+          `${manifest.runId} (${accepted.length} accepted task(s)); ` +
+          "cannot resume without the integration checkpoint",
+      );
+    }
+    await resolveGitCommit(repoRoot, manifest.integrationHead);
+    log(
+      `[worker-batch] create integration branch ${branch} ` +
+        `at ${manifest.integrationHead}`,
+    );
+    return addIntegrationWorktree(
+      repoRoot,
+      branch,
+      manifest.integrationHead,
+      true,
+    );
+  }
+
+  const recorded = await gitRaw(repoRoot, [
+    "merge-base",
+    "--is-ancestor",
+    manifest.integrationHead,
+    branchHead,
+  ]);
+  if (recorded.exitCode !== 0) {
+    throw new Error(
+      `worker-batch: integration branch ${branch} does not contain the ` +
+        `recorded head ${manifest.integrationHead} for run ${manifest.runId}`,
+    );
+  }
+  for (const task of accepted) {
+    if (!task.resultCommit) continue;
+    const contained = await gitRaw(repoRoot, [
+      "merge-base",
+      "--is-ancestor",
+      task.resultCommit,
+      branchHead,
+    ]);
+    if (contained.exitCode !== 0) {
+      throw new Error(
+        `worker-batch: accepted task ${task.taskId} commit ` +
+          `${task.resultCommit} is not contained in integration branch ${branch}`,
+      );
+    }
+  }
+  if (existing) {
+    log(
+      `[worker-batch] reuse integration worktree ${existing.path} (${branch})`,
+    );
+    return {
+      taskId: "integration",
+      branch,
+      worktreePath: existing.path,
+      repoRoot,
+    };
+  }
+  log(`[worker-batch] resume integration branch ${branch}`);
+  return addIntegrationWorktree(repoRoot, branch, branch, false);
+}
+
+async function addIntegrationWorktree(
+  repoRoot: string,
+  branch: string,
+  startPoint: string,
+  createBranch: boolean,
+): Promise<WorktreeHandle> {
+  const id = `${Date.now().toString(36)}-integration`;
+  const worktreePath = resolve(repoRoot, join(".cliyard", "worktrees", id));
+  mkdirSync(resolve(repoRoot, ".cliyard", "worktrees"), { recursive: true });
+  await git(
+    repoRoot,
+    createBranch
+      ? ["worktree", "add", "-b", branch, worktreePath, startPoint]
+      : ["worktree", "add", worktreePath, startPoint],
+  );
+  return { taskId: "integration", branch, worktreePath, repoRoot };
+}
+
+async function listWorktrees(repoRoot: string): Promise<ListedWorktree[]> {
+  const result = await git(repoRoot, ["worktree", "list", "--porcelain"]);
+  const entries: ListedWorktree[] = [];
+  let current: ListedWorktree | undefined;
+  for (const line of result.stdout.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      current = { path: line.slice("worktree ".length) };
+      entries.push(current);
+    } else if (line.startsWith("branch ") && current) {
+      current.branch = line.slice("branch ".length);
+    } else if (line === "") {
+      current = undefined;
+    }
+  }
+  return entries;
+}
+
+/** Drop the integration worktree but keep the branch as the checkpoint. */
+async function removeWorktreeKeepBranch(
+  handle: WorktreeHandle,
+): Promise<void> {
+  const removed = await gitRaw(handle.repoRoot, [
+    "worktree",
+    "remove",
+    "--force",
+    handle.worktreePath,
+  ]);
+  if (removed.exitCode !== 0) {
+    await gitRaw(handle.repoRoot, ["worktree", "prune"]);
   }
 }
 
@@ -382,6 +715,22 @@ async function git(
   cwd: string,
   args: string[],
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const result = await gitRaw(cwd, args);
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `git ${args.join(" ")} failed: ${
+        (result.stderr || result.stdout).trim() || `exit ${result.exitCode}`
+      }`,
+    );
+  }
+  return result;
+}
+
+/** Like `git`, but returns the exit code instead of throwing on non-zero. */
+async function gitRaw(
+  cwd: string,
+  args: string[],
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   return new Promise((resolvePromise, reject) => {
     const child = spawn("git", args, {
       cwd,
@@ -398,22 +747,7 @@ async function git(
     });
     child.on("error", reject);
     child.on("close", (code) => {
-      const result = {
-        exitCode: code ?? 1,
-        stdout,
-        stderr,
-      };
-      if (result.exitCode !== 0) {
-        reject(
-          new Error(
-            `git ${args.join(" ")} failed: ${
-              (stderr || stdout).trim() || `exit ${result.exitCode}`
-            }`,
-          ),
-        );
-      } else {
-        resolvePromise(result);
-      }
+      resolvePromise({ exitCode: code ?? 1, stdout, stderr });
     });
   });
 }
