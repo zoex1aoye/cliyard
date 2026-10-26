@@ -416,11 +416,11 @@ contracts bytes and retry the task against the same frozen contract.
 
 ## 7. Verification evidence
 
-On 2026-10-26 in this checkout:
+On 2026-10-27 in this checkout:
 
 ```text
 npm run build   → pass
-npm test        → 83/83 pass
+npm test        → 86/86 pass
 ```
 
 The supervisor suites cover manifest durability, active pointer, atomic writes,
@@ -429,17 +429,20 @@ lock exclusivity/staleness, contracts/base rejection, `start`/`status`/
 the second wave's dispatch fails, a new scheduler invocation reloads the
 manifest from disk, and only unfinished tasks run.
 
-The interruption tests currently inject the crash through the worker factory
-inside the process. A real `SIGKILL`/`SIGTERM` process-level restart test is
-still outstanding and belongs to the next iteration (and to the Verifier-owned
-runtime checks).
+The CLI suite also launches a separate Supervisor process with a controlled
+worker, waits until the first task is checkpointed and the second task is
+running, then sends `SIGKILL` to the whole process group. A new process reads
+`effectiveStatus=interrupted` and `lock=stale`; `resume` clears the stale lock,
+starts only the unfinished task, preserves the accepted task commit, and
+finishes with the integration branch containing both outputs.
 
 ## 8. Safe tool self-hosting procedure
 
 Goal: use the **stable** cliyard to change cliyard itself, with reviewable
-diffs and a rollback path. This is a manual procedure. A completed, reviewed
-self-hosting upgrade is not yet documented; the steps below are the required
-safe path, not evidence that one has already happened.
+diffs and a rollback path. This remains a manual merge procedure. The first
+Supervisor v0 implementation was produced through the older plan-dispatch
+control path and reviewed before merge; a live self-hosting run owned by the
+new Supervisor remains the next proof.
 
 ### Roles
 

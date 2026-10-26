@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import {
+  chmodSync,
   existsSync,
   mkdtempSync,
   readFileSync,
@@ -64,6 +65,41 @@ async function withRepo(fn: (repo: string) => Promise<void>): Promise<void> {
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
+}
+
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+  throw new Error(`timed out after ${timeoutMs}ms`);
+}
+
+function runCliProcess(
+  args: string[],
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", CLI_PATH, ...args], {
+      cwd: ROOT,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", reject);
+    child.on("close", (status) => resolvePromise({ status, stdout, stderr }));
+  });
 }
 
 function contract(
@@ -460,6 +496,240 @@ test("supervisor resume rejects changed contracts and a moved base", async () =>
     assert.equal(inspectSupervisorLock(repo).state, "free");
   });
 });
+
+test(
+  "SIGKILL leaves a stale checkpoint and a new process resumes only unfinished work",
+  { skip: process.platform === "win32", timeout: 30_000 },
+  async () => {
+    const repo = initRepo();
+    let supervisor:
+      | ReturnType<typeof spawn>
+      | undefined;
+    try {
+      const base = runGit(repo, ["rev-parse", "HEAD"]);
+      const contractsPath = join(repo, "process-e2e.contracts.json");
+      writeFileSync(
+        contractsPath,
+        JSON.stringify(
+          {
+            contracts: [
+              contract("foundation", [], "foundation.ts", base, [
+                "test -f foundation.ts",
+              ]),
+              contract("upper", ["foundation"], "upper.ts", base, [
+                "test -f foundation.ts",
+                "test -f upper.ts",
+              ]),
+            ],
+          },
+          null,
+          2,
+        ) + "\n",
+        "utf8",
+      );
+
+      const fakeClaude = join(repo, "fake-claude.cjs");
+      writeFileSync(
+        fakeClaude,
+        `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+
+if (process.argv.includes("--version")) {
+  console.log("fixture-claude 1.0");
+  process.exit(0);
+}
+
+const promptIndex = process.argv.indexOf("-p");
+const prompt = promptIndex >= 0 ? process.argv[promptIndex + 1] : "";
+const taskId = (prompt.match(/Task:\\s*(\\S+)/) || [])[1];
+const writePath = (prompt.match(/Write only under:\\n- ([^\\n]+)/) || [])[1];
+if (!taskId || !writePath) {
+  console.error("fixture could not parse task prompt");
+  process.exit(2);
+}
+
+if (process.env.CLIYARD_TEST_WORKER_LOG) {
+  fs.appendFileSync(process.env.CLIYARD_TEST_WORKER_LOG, taskId + "\\n");
+}
+if (
+  taskId === process.env.CLIYARD_TEST_BLOCK_TASK &&
+  process.env.CLIYARD_TEST_UNBLOCK !== "1"
+) {
+  fs.writeFileSync(process.env.CLIYARD_TEST_MARKER, taskId + "\\n");
+  setInterval(() => {}, 1000);
+} else {
+  const target = path.resolve(process.cwd(), writePath);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, "export const task = '" + taskId + "';\\n");
+  console.log(JSON.stringify({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: "fixture completed " + taskId,
+    session_id: "fixture-" + taskId,
+    total_cost_usd: 0,
+    usage: { input_tokens: 0, output_tokens: 0 },
+    modelUsage: {}
+  }));
+}
+`,
+        "utf8",
+      );
+      chmodSync(fakeClaude, 0o755);
+
+      const marker = join(repo, "upper-started");
+      const workerLog = join(repo, "worker-calls.log");
+      const env = {
+        ...process.env,
+        CLIYARD_CLAUDE_BINARY: fakeClaude,
+        CLIYARD_CLAUDE_MAX_CONCURRENT: "1",
+        CLIYARD_TEST_BLOCK_TASK: "upper",
+        CLIYARD_TEST_MARKER: marker,
+        CLIYARD_TEST_WORKER_LOG: workerLog,
+      };
+      supervisor = spawn(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          CLI_PATH,
+          "supervisor",
+          "start",
+          contractsPath,
+          "--repo",
+          repo,
+          "--worker",
+          "claude",
+          "--model",
+          "fixture-model",
+          "--ledger",
+          join(repo, ".cliyard", "ledger-process-e2e.json"),
+        ],
+        {
+          cwd: ROOT,
+          env,
+          detached: true,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let supervisorStdout = "";
+      let supervisorStderr = "";
+      supervisor.stdout?.on("data", (chunk) => {
+        supervisorStdout += String(chunk);
+      });
+      supervisor.stderr?.on("data", (chunk) => {
+        supervisorStderr += String(chunk);
+      });
+      assert.ok(supervisor.pid);
+
+      await waitFor(() => {
+        const activePath = supervisorPaths(repo).activePath;
+        if (!existsSync(activePath) || !existsSync(marker)) return false;
+        const active = JSON.parse(readFileSync(activePath, "utf8")) as {
+          runId: string;
+        };
+        const manifestPath = join(
+          supervisorPaths(repo).runsDir,
+          `${active.runId}.json`,
+        );
+        if (!existsSync(manifestPath)) return false;
+        const manifest = JSON.parse(
+          readFileSync(manifestPath, "utf8"),
+        ) as { tasks: Record<string, { accepted: boolean }> };
+        return manifest.tasks.foundation?.accepted === true;
+      });
+
+      const interrupted = loadRunManifest(repo);
+      assert.equal(interrupted.tasks.foundation?.accepted, true);
+      assert.notEqual(interrupted.tasks.upper?.accepted, true);
+      const foundationCommit = interrupted.tasks.foundation?.resultCommit;
+      assert.ok(foundationCommit);
+
+      const supervisorExit = once(supervisor, "exit");
+      process.kill(-supervisor.pid, "SIGKILL");
+      await supervisorExit;
+      assert.equal(existsSync(marker), true);
+
+      const statusResult = await runCliProcess(
+        ["supervisor", "status", "--repo", repo, "--json"],
+        env,
+      );
+      assert.equal(
+        statusResult.status,
+        0,
+        `${statusResult.stderr}\n${supervisorStderr}`,
+      );
+      const status = JSON.parse(statusResult.stdout) as Record<string, any>;
+      assert.equal(status.effectiveStatus, "interrupted");
+      assert.equal(status.lock.state, "stale");
+      assert.equal(status.accepted, 1);
+      assert.equal(status.pending, 1);
+
+      const resumeResult = await runCliProcess(
+        [
+          "supervisor",
+          "resume",
+          "--repo",
+          repo,
+          "--worker",
+          "claude",
+          "--model",
+          "fixture-model",
+          "--ledger",
+          join(repo, ".cliyard", "ledger-process-e2e.json"),
+        ],
+        { ...env, CLIYARD_TEST_UNBLOCK: "1" },
+      );
+      assert.equal(
+        resumeResult.status,
+        0,
+        `${resumeResult.stderr}\n${supervisorStdout}\n${supervisorStderr}`,
+      );
+      const summary = JSON.parse(resumeResult.stdout) as Record<string, any>;
+      assert.equal(summary.status, "completed");
+      assert.equal(summary.resumed, true);
+      assert.deepEqual(summary.startOrder, ["upper"]);
+
+      const completed = loadRunManifest(repo, interrupted.runId);
+      assert.equal(completed.status, "completed");
+      assert.equal(completed.tasks.upper?.accepted, true);
+      assert.equal(
+        completed.tasks.foundation?.resultCommit,
+        foundationCommit,
+        "SIGKILL resume must not regenerate accepted work",
+      );
+      assert.equal(inspectSupervisorLock(repo).state, "free");
+      assert.equal(
+        readFileSync(workerLog, "utf8")
+          .trim()
+          .split("\n")
+          .filter((taskId) => taskId === "foundation").length,
+        1,
+      );
+      assert.match(
+        runGit(repo, [
+          "show",
+          `${completed.integrationBranch}:foundation.ts`,
+        ]),
+        /task = 'foundation'/,
+      );
+      assert.match(
+        runGit(repo, ["show", `${completed.integrationBranch}:upper.ts`]),
+        /task = 'upper'/,
+      );
+    } finally {
+      if (supervisor?.pid && supervisor.exitCode === null) {
+        try {
+          process.kill(-supervisor.pid, "SIGKILL");
+        } catch {
+          /* already exited */
+        }
+      }
+      rmSync(repo, { recursive: true, force: true });
+    }
+  },
+);
 
 // ---------------------------------------------------------------------------
 // stop / lock exclusivity

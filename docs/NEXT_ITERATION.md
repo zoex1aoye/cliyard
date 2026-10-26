@@ -1,8 +1,8 @@
 # 下一迭代：Supervisor v0 验收收口与安全自举
 
-> 日期：2026-10-26（更新）
+> 日期：2026-10-27（更新）
 >
-> 结论：Supervisor v0 已实现并接入 CLI。下一步只做验收收口、进程级恢复测试和安全自举，不扩 daemon、SQLite、Web/GUI 或多租户。
+> 结论：Supervisor v0 已实现，真实进程级 SIGKILL 恢复 E2E 已通过。下一步让新 Supervisor 接管一次真实自举，再决定是否需要后台化；不扩 daemon、SQLite、Web/GUI 或多租户。
 
 ## 0. 当前状态
 
@@ -16,7 +16,8 @@ Supervisor v0 已落地（单仓、本机、前台）：
 - 单 Supervisor 锁、stale/invalid lock 诊断与显式恢复；
 - contracts hash、base commit、integration branch 前置检查；
 - `--retry-rejected` 显式重试被拒任务；
-- 前台信号处理：SIGINT/SIGTERM 标记 interrupted 并释放锁。
+- 前台信号处理：SIGINT/SIGTERM 标记 interrupted 并释放锁；
+- 真实独立进程 SIGKILL 后，新进程能识别 stale lock，并只恢复未完成 wave。
 
 明确未落地：
 
@@ -24,14 +25,13 @@ Supervisor v0 已落地（单仓、本机、前台）：
 - SQLite（仍为原子 JSON manifest）；
 - 自动合入 default branch；
 - Web/GUI、RuntimeManager、多租户/云执行；
-- 第二家 Supervisor Worker（仅 claude / codex）；
-- 进程级 kill/restart E2E。当前恢复测试通过 worker factory 抛错模拟中断，并让新的 scheduler 从磁盘重载 manifest；尚未真正 `SIGKILL` 一个 supervisor 进程后重启。
+- 第二家 Supervisor Worker（仅 claude / codex）。
 
-验证（2026-10-26，本工作树）：
+验证（2026-10-27，本工作树）：
 
 ```text
 npm run build   → 通过
-npm test        → 83/83 通过
+npm test        → 86/86 通过
 ```
 
 操作语义、RunManifest 字段、锁状态、恢复手册和自举步骤见
@@ -48,19 +48,18 @@ npm test        → 83/83 通过
 | 5 | resume 使用已有 integration branch | 已实现；缺失、head 不包含或 accepted commit 不在分支上会拒绝 |
 | 6 | plan/base/contracts hash 不一致时拒绝 resume | 已实现；contracts 按字节 hash，base 必须解析到同一 commit |
 | 7 | 两个 Supervisor 同时启动只有一个取得锁 | 已实现；`O_EXCL` 锁 + 测试覆盖 |
-| 8 | 所有现有测试继续通过 | 已实现；83/83 |
-| 9 | 新增中断恢复测试 | 部分完成；进程内中断注入 + 重载已覆盖，缺真实进程级 kill/restart |
+| 8 | 所有现有测试继续通过 | 已实现；86/86 |
+| 9 | 新增中断恢复测试 | 已实现；进程内注入和真实独立进程 SIGKILL/restart 均覆盖 |
 
 ## 2. 下一迭代范围
 
 只做三件事：
 
-1. **进程级中断恢复 E2E（Verifier 拥有运行时）**
-   - 启动真实 supervisor 进程；
-   - 在 wave 中途发送 SIGTERM / SIGKILL；
-   - `status --json` 必须报告 interrupted / stale lock；
-   - `resume` 必须只派发未完成任务；
-   - 第二个 supervisor 必须拿不到锁；
+1. **进程级中断恢复 E2E（已完成）**
+   - 独立 supervisor 进程在第二 wave 运行时整进程组 SIGKILL；
+   - `status --json` 报告 `interrupted` / `stale` lock；
+   - `resume` 只派发未完成任务；
+   - accepted task 的 commit 保持不变；
    - 完成后 integration branch 与 manifest 一致。
 
 2. **冻结 baseline 并完成一次安全自举（人工执行）**
@@ -112,7 +111,7 @@ npm test        → 83/83 通过
 
 ## 5. 完成标准
 
-1. 进程级 kill/restart E2E 通过；accepted task 不被重跑。
+1. 进程级 kill/restart E2E 已通过；accepted task 不被重跑。
 2. 至少一次工具自举 run 在 integration branch 上得到 accepted 结果，且旧测试 + 新测试通过。
 3. 人工审阅完成，手工 merge；没有自动合入 main 或自动 push。
 4. 新 Supervisor 的 read-only / `--dry-run` 首次启动检查通过。
@@ -123,7 +122,7 @@ npm test        → 83/83 通过
 ## 6. 下一步顺序
 
 ```text
-1. Verifier 进程级 kill/restart E2E
+1. [已完成] Verifier 进程级 kill/restart E2E
 2. 冻结 baseline commit/tag
 3. estimate-plan + 编译并提交 contracts
 4. scratch repo dry-run 演练
