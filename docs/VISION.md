@@ -143,6 +143,8 @@ Master 每轮只需：
 
 路线：先在真实模块上验证 **batch + 契约** → 再加 **gate 验收与有限重修** → 再加 **薄 Master** → 最后按需语义层。
 
+详细差距与分阶段实施见 [MVP_IMPLEMENTATION_PLAN.md](./MVP_IMPLEMENTATION_PLAN.md)（阶段 A 审查）。
+
 ---
 
 ## 8. 一句话

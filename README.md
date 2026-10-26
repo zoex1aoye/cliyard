@@ -52,7 +52,8 @@ npm run batch -- examples/module.tasks.yaml --dry-run
 ```
 
 - Module trial: [docs/TOMORROW.md](docs/TOMORROW.md)  
-- Vision / principles: [docs/VISION.md](docs/VISION.md)
+- Vision / principles: [docs/VISION.md](docs/VISION.md)  
+- MVP plan (phase A review): [docs/MVP_IMPLEMENTATION_PLAN.md](docs/MVP_IMPLEMENTATION_PLAN.md)
 
 ## Building blocks
 
