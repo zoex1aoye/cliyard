@@ -2,7 +2,11 @@
 
 > Date: 2026-10-28
 >
-> Status: design after real Claude Code + DeepSeek probe; not implemented
+> Status: implemented in v0. Health-gated deadline extension and same-session
+> budget continuation are policy-gated and default off. See
+> [DEADLINE_EXTENSION.md](../docs/evidence/DEADLINE_EXTENSION.md),
+> [BUDGET_CONTINUATION.md](../docs/evidence/BUDGET_CONTINUATION.md) and
+> [CONTINUATION_SELF_HOST.md](../docs/evidence/CONTINUATION_SELF_HOST.md).
 
 ## 1. Question
 

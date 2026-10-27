@@ -83,8 +83,10 @@ Consequences:
 - concurrent queue work would make inference from a single active pointer
   unsafe.
 
-Status: open. The failure/cost slice improves terminal failure truth but does
-not close this live-run binding gap.
+Status: closed for foreground queue dispatch. A start id is allocated and
+persisted in the queue before worker execution, passed through
+`supervisor start --run-id`, and reconciled from the same explicit id.
+See [QUEUE_RUN_BINDING.md](../docs/evidence/QUEUE_RUN_BINDING.md).
 
 Required direction:
 
@@ -113,7 +115,10 @@ Consequences:
 - budget failures bypass verification that would normally report a path
   overshoot.
 
-Status: open.
+Status: closed for worker exits and reused worktrees. Every closed-loop worker
+exit records bounded path evidence; a reused worktree is audited before its
+next worker starts and fails closed on unexpected paths without deleting
+them. See [WORKER_EXIT_PATH_AUDIT.md](../docs/evidence/WORKER_EXIT_PATH_AUDIT.md).
 
 Required direction:
 
