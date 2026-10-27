@@ -1,0 +1,101 @@
+{
+  "planId": "worker-progress-v0",
+  "contracts": [
+    {
+      "taskId": "worker-progress-heartbeat",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Add live worker progress without weakening completion semantics. Extend AgentStartInput with an optional onProgress callback and define a versioned WorkerProgressEvent for session.start, assistant, tool.start, tool.result, heartbeat, result, retry and error phases. Change the Claude adapter to invoke `--output-format stream-json --verbose`, parse complete JSONL records incrementally, derive bounded safe summaries, and still extract the final result record for exit/transient-retry logic; remain compatible with a plain single JSON result. Emit a heartbeat at a configurable interval while waiting for provider events and clear it on exit. Pass task/session context through runClosedLoop. When runCodexBatch has a runManifest, append each event immediately as one JSON line under .cliyard/worker-events/<runId>/<taskId>.jsonl, independent of RunManifest checkpoints. Extend supervisor status JSON with a read-only workerProgress array containing each task's latest valid event, age and stale flag, and print the newest human-readable event. Malformed or missing event files must not alter run status or accepted/verdict authority. Add focused tests using a fake stream-json provider that emits an early assistant/tool event, remains alive, and emits result later; prove events are visible before collect completes and supervisor status reads them without mutation. Preserve existing dry-run, transient retry, budget and result behavior."
+      ],
+      "nonGoals": [
+        "No daemon or server-sent-events UI",
+        "No raw prompt, secret or full file-content logging",
+        "No WebSocket protocol",
+        "No provider-session resume",
+        "No change to accepted or verdict authority"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "design/attempt-continuity-progress-v0.md",
+        "docs/SUPERVISOR_V0.md",
+        "src/agents/types.ts",
+        "src/agents/claude.ts",
+        "src/repair/loop.ts",
+        "src/scheduler/codex-batch.ts",
+        "src/supervisor/cli.ts",
+        "tests/claude-adapter.test.ts",
+        "tests/supervisor-cli.test.ts"
+      ],
+      "writePaths": [
+        "src/agents/types.ts",
+        "src/agents/claude.ts",
+        "src/repair/loop.ts",
+        "src/scheduler/codex-batch.ts",
+        "src/supervisor/cli.ts",
+        "tests/claude-progress.test.ts",
+        "tests/supervisor-worker-progress.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "2eccd3a2f07e68f1ac7904ef9b31e7a92fe768fa",
+      "verifyCommands": [
+        "npx tsx --test tests/claude-progress.test.ts tests/supervisor-worker-progress.test.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "continuity-progress-docs",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Run the implemented attempt continuity, worker progress and abnormal drill recovery paths against fresh measured evidence, inspect their output, and document only the observed results. Update README, NEXT_ITERATION, SUPERVISOR_V0 and RUNTIME_MANAGER; add docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md with exact commands, rejected-attempt worktree reuse, fresh-attempt behavior, live stream event examples, heartbeat/status behavior, timed-out drill recovery, final test counts and remaining limitations. Explain that default rejected retry reuses a recorded draft, --fresh-attempt deliberately discards it, stream events are observational only, and abnormal recovery uses exact reaper rules. Name Task Architect as the next capability and preserve daemon, cross-host, SQLite, browser evidence and admission scheduling as non-goals."
+      ],
+      "nonGoals": [
+        "No source or test behavior changes",
+        "No invented evidence",
+        "No daemon or 24-hour execution claim",
+        "No Task Architect implementation",
+        "No automatic push or main merge"
+      ],
+      "dependsOn": [
+        "worker-progress-heartbeat"
+      ],
+      "readPaths": [
+        "README.md",
+        "docs/NEXT_ITERATION.md",
+        "docs/SUPERVISOR_V0.md",
+        "docs/RUNTIME_MANAGER.md",
+        "design/attempt-continuity-progress-v0.md",
+        "src/supervisor/types.ts",
+        "src/supervisor/cli.ts",
+        "src/agents/claude.ts",
+        "src/runtime/failure-drills.ts",
+        "tests/supervisor-attempt-reuse.test.ts",
+        "tests/claude-progress.test.ts",
+        "tests/supervisor-worker-progress.test.ts",
+        "tests/runtime-failure-drills.test.ts"
+      ],
+      "writePaths": [
+        "README.md",
+        "docs/NEXT_ITERATION.md",
+        "docs/SUPERVISOR_V0.md",
+        "docs/RUNTIME_MANAGER.md",
+        "docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "2eccd3a2f07e68f1ac7904ef9b31e7a92fe768fa",
+      "verifyCommands": [
+        "npm test",
+        "npm run build",
+        "test -s docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md",
+        "rg -q 'reuse' docs/SUPERVISOR_V0.md",
+        "rg -q 'worker-events' docs/SUPERVISOR_V0.md",
+        "rg -q 'abnormal' docs/RUNTIME_MANAGER.md"
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
