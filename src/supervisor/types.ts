@@ -26,6 +26,28 @@ export interface RunTaskState {
   accepted: boolean;
   resultCommit?: string;
   reason?: string;
+  /**
+   * Durable attempt continuity (design/attempt-continuity-progress-v0.md).
+   * Checkpointed after the worktree is created and before the worker starts.
+   * A rejected attempt keeps all fields plus `attemptRejectedAt`; acceptance
+   * clears them.
+   */
+  attemptWorktree?: string;
+  attemptBranch?: string;
+  attemptBaseCommit?: string;
+  attemptStartedAt?: string;
+  /** Present only while the attempt is rejected and eligible for reuse. */
+  attemptRejectedAt?: string;
+}
+
+/** A rejected attempt whose worktree still validates for reuse. */
+export interface ReusableAttempt {
+  taskId: string;
+  worktree: string;
+  branch: string;
+  baseCommit: string;
+  startedAt: string;
+  rejectedAt: string;
 }
 
 export interface RunManifest {

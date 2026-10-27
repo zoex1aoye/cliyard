@@ -6,10 +6,14 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
   symlinkSync,
 } from "node:fs";
 import { hostname } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
 import { createClaudeAdapter } from "../agents/claude.js";
 import { createCodexAdapter } from "../agents/codex.js";
@@ -26,7 +30,11 @@ import {
   runManifestPath,
   updateRunManifest,
 } from "../supervisor/store.js";
-import type { RunManifest, RunTaskState } from "../supervisor/types.js";
+import type {
+  ReusableAttempt,
+  RunManifest,
+  RunTaskState,
+} from "../supervisor/types.js";
 import {
   addWorktree,
   removeWorktree,
@@ -56,11 +64,18 @@ export interface CodexBatchOptions {
    *   - checks work out of the recorded integration branch,
    *   - skips tasks already accepted in the manifest,
    *   - rebuilds pending/ready work from the contract DAG,
+   *   - checkpoints the exact attempt worktree/branch/base before dispatch,
    *   - writes a checkpoint after every task result.
    * The manifest must already be persisted (see createRunManifest), and the
    * caller owns the supervisor lock for the duration of the batch.
    */
   runManifest?: RunManifest;
+  /**
+   * Resume a rejected task in its recorded worktree instead of creating a
+   * clean one. Validation is fail-closed; pass false (fresh) to discard the
+   * recorded draft and start a new worktree.
+   */
+  reuseAttempts?: boolean;
 }
 
 export interface CodexBatchResult {
@@ -78,6 +93,315 @@ export interface CodexBatchResult {
   };
   /** Final checkpoint, when the batch ran with `runManifest`. */
   manifest?: RunManifest;
+}
+
+// ---------------------------------------------------------------------------
+// Attempt continuity
+// ---------------------------------------------------------------------------
+
+interface RecordedAttemptFields {
+  worktree: string;
+  branch: string;
+  baseCommit: string;
+  startedAt: string;
+  rejectedAt: string;
+}
+
+function recordedAttempt(task: RunTaskState): RecordedAttemptFields | undefined {
+  if (
+    task.attemptWorktree === undefined &&
+    task.attemptBranch === undefined &&
+    task.attemptBaseCommit === undefined &&
+    task.attemptStartedAt === undefined &&
+    task.attemptRejectedAt === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    worktree: task.attemptWorktree ?? "",
+    branch: task.attemptBranch ?? "",
+    baseCommit: task.attemptBaseCommit ?? "",
+    startedAt: task.attemptStartedAt ?? "",
+    rejectedAt: task.attemptRejectedAt ?? "",
+  };
+}
+
+/**
+ * A task records a rejection when it is marked rejected (or still carries
+ * attemptRejectedAt) and has at least one attempt field to inspect.
+ */
+export function isRejectedAttempt(task: RunTaskState): boolean {
+  return (
+    !task.accepted &&
+    (task.status === "rejected" || task.attemptRejectedAt !== undefined) &&
+    recordedAttempt(task) !== undefined
+  );
+}
+
+export type AttemptInspection =
+  | { ok: true; attempt: ReusableAttempt }
+  | { ok: false; reason: string };
+
+/**
+ * Validate a recorded rejected attempt before attaching a worker to it.
+ *
+ * Fail-closed by design: a path outside `.cliyard/worktrees`, an unregistered
+ * worktree, a branch mismatch, a moved HEAD or missing rejection metadata all
+ * reject reuse. The explicit recovery is a fresh attempt.
+ */
+export async function inspectRejectedAttempt(
+  repoRoot: string,
+  manifest: RunManifest,
+  task: RunTaskState,
+): Promise<AttemptInspection> {
+  const fields = recordedAttempt(task);
+  if (!fields) return { ok: false, reason: "no attempt was recorded" };
+
+  const missing: string[] = [];
+  if (!fields.worktree) missing.push("attemptWorktree");
+  if (!fields.branch) missing.push("attemptBranch");
+  if (!fields.baseCommit) missing.push("attemptBaseCommit");
+  if (!fields.startedAt) missing.push("attemptStartedAt");
+  if (!fields.rejectedAt) missing.push("attemptRejectedAt");
+  if (missing.length > 0) {
+    return { ok: false, reason: `missing ${missing.join(", ")}` };
+  }
+
+  if (task.accepted) {
+    return { ok: false, reason: "task is already accepted" };
+  }
+  if (task.runId && task.runId !== manifest.runId) {
+    return {
+      ok: false,
+      reason: `attempt is associated with run ${task.runId}, not ${manifest.runId}`,
+    };
+  }
+  if (Number.isNaN(Date.parse(fields.startedAt))) {
+    return { ok: false, reason: "attemptStartedAt is not a timestamp" };
+  }
+  if (Number.isNaN(Date.parse(fields.rejectedAt))) {
+    return { ok: false, reason: "attemptRejectedAt is not a timestamp" };
+  }
+  if (!/^[0-9a-f]{40,64}$/i.test(fields.baseCommit)) {
+    return {
+      ok: false,
+      reason: `attemptBaseCommit is not a full commit sha: ${fields.baseCommit}`,
+    };
+  }
+  if (
+    fields.branch.startsWith("-") ||
+    fields.branch.startsWith("refs/") ||
+    /\s/.test(fields.branch)
+  ) {
+    return {
+      ok: false,
+      reason: `invalid attempt branch ${JSON.stringify(fields.branch)}`,
+    };
+  }
+
+  const root = resolve(repoRoot);
+  const worktreesRoot = resolve(root, ".cliyard", "worktrees");
+  const worktree = resolve(root, fields.worktree);
+  if (!isPathInside(worktreesRoot, worktree)) {
+    return {
+      ok: false,
+      reason: `attempt worktree ${worktree} is outside ${worktreesRoot}`,
+    };
+  }
+  if (!existsSync(worktree) || !statSync(worktree).isDirectory()) {
+    return {
+      ok: false,
+      reason: `attempt worktree ${worktree} is not a directory`,
+    };
+  }
+
+  // A draft belongs to one task. Sharing a path or branch would let two
+  // workers mutate the same worktree.
+  for (const other of Object.values(manifest.tasks)) {
+    if (other.taskId === task.taskId) continue;
+    if (
+      other.attemptWorktree &&
+      samePath(resolve(root, other.attemptWorktree), worktree)
+    ) {
+      return {
+        ok: false,
+        reason: `attempt worktree is also recorded for task ${other.taskId}`,
+      };
+    }
+    if (other.attemptBranch && other.attemptBranch === fields.branch) {
+      return {
+        ok: false,
+        reason: `attempt branch is also recorded for task ${other.taskId}`,
+      };
+    }
+  }
+
+  // A worktree belongs to exactly one stored run. Sharing one across run
+  // manifests would let a second supervisor attach to the same draft.
+  const otherRun = findAttemptInOtherRun(root, manifest, worktree, fields.branch);
+  if (otherRun) {
+    return {
+      ok: false,
+      reason:
+        `attempt is associated with run ${otherRun.runId} ` +
+        `(task ${otherRun.taskId}), not ${manifest.runId}`,
+    };
+  }
+
+  const registered = (await listWorktrees(root)).find((entry) =>
+    samePath(entry.path, worktree),
+  );
+  const branchRef = `refs/heads/${fields.branch}`;
+  if (!registered) {
+    return {
+      ok: false,
+      reason: `attempt worktree ${worktree} is not a registered git worktree`,
+    };
+  }
+  if (registered.branch !== branchRef) {
+    return {
+      ok: false,
+      reason:
+        `attempt worktree branch ${registered.branch ?? "<detached>"} ` +
+        `does not match recorded branch ${fields.branch}`,
+    };
+  }
+
+  const head = await gitRaw(worktree, [
+    "rev-parse",
+    "--verify",
+    "HEAD^{commit}",
+  ]);
+  if (head.exitCode !== 0) {
+    return {
+      ok: false,
+      reason:
+        `cannot read attempt worktree HEAD: ` +
+        `${(head.stderr || head.stdout).trim() || `git exited ${head.exitCode}`}`,
+    };
+  }
+  const headCommit = head.stdout.trim().toLowerCase();
+  if (headCommit !== fields.baseCommit.toLowerCase()) {
+    return {
+      ok: false,
+      reason:
+        `attempt worktree HEAD ${headCommit} does not match recorded ` +
+        `base ${fields.baseCommit}`,
+    };
+  }
+
+  return {
+    ok: true,
+    attempt: {
+      taskId: task.taskId,
+      worktree,
+      branch: fields.branch,
+      baseCommit: fields.baseCommit.toLowerCase(),
+      startedAt: fields.startedAt,
+      rejectedAt: fields.rejectedAt,
+    },
+  };
+}
+
+/** Read-only helper for `supervisor status`; invalid attempts are omitted. */
+export async function listReusableAttempts(
+  repoRoot: string,
+  manifest: RunManifest,
+): Promise<ReusableAttempt[]> {
+  const attempts: ReusableAttempt[] = [];
+  for (const task of Object.values(manifest.tasks)) {
+    if (!isRejectedAttempt(task)) continue;
+    const inspection = await inspectRejectedAttempt(repoRoot, manifest, task);
+    if (inspection.ok) attempts.push(inspection.attempt);
+  }
+  return attempts.sort((left, right) =>
+    left.taskId.localeCompare(right.taskId),
+  );
+}
+
+/** Look for the same worktree/branch recorded by a different run manifest. */
+function findAttemptInOtherRun(
+  root: string,
+  manifest: RunManifest,
+  worktree: string,
+  branch: string,
+): { runId: string; taskId: string } | undefined {
+  const runsDir = join(root, ".cliyard", "runs");
+  let entries: string[];
+  try {
+    entries = readdirSync(runsDir);
+  } catch {
+    return undefined;
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith(".json") || entry === "active.json") continue;
+    if (entry === `${manifest.runId}.json`) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(join(runsDir, entry), "utf8"));
+    } catch {
+      continue;
+    }
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      continue;
+    }
+    const record = parsed as {
+      runId?: unknown;
+      tasks?: unknown;
+    };
+    if (typeof record.runId !== "string" || !record.tasks) continue;
+    if (record.runId === manifest.runId) continue;
+    if (typeof record.tasks !== "object" || Array.isArray(record.tasks)) {
+      continue;
+    }
+    for (const [taskId, rawTask] of Object.entries(
+      record.tasks as Record<string, unknown>,
+    )) {
+      if (typeof rawTask !== "object" || rawTask === null) continue;
+      const task = rawTask as Record<string, unknown>;
+      const otherTaskId =
+        typeof task.taskId === "string" ? task.taskId : taskId;
+      if (
+        typeof task.attemptWorktree === "string" &&
+        task.attemptWorktree.trim() !== "" &&
+        samePath(resolve(root, task.attemptWorktree), worktree)
+      ) {
+        return { runId: record.runId, taskId: otherTaskId };
+      }
+      if (
+        typeof task.attemptBranch === "string" &&
+        task.attemptBranch !== "" &&
+        task.attemptBranch === branch
+      ) {
+        return { runId: record.runId, taskId: otherTaskId };
+      }
+    }
+  }
+  return undefined;
+}
+
+function canonicalPath(path: string): string {
+  const resolved = resolve(path);
+  try {
+    return realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function samePath(left: string, right: string): boolean {
+  return canonicalPath(left) === canonicalPath(right);
+}
+
+function isPathInside(parent: string, child: string): boolean {
+  const rel = relative(canonicalPath(parent), canonicalPath(child));
+  return (
+    rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)
+  );
 }
 
 export async function runCodexBatch(
@@ -109,7 +433,41 @@ export async function runCodexBatch(
   if (requestedManifest) {
     validateManifestTasks(requestedManifest, contracts, sharedBase);
   }
+
+  // Validate every reusable rejected attempt before creating the integration
+  // worktree or dispatching any worker, so a tampered draft fails closed
+  // without side effects. `reuseAttempts: false` is the explicit fresh path
+  // and intentionally skips validation.
+  const reuseAttempts = opts.reuseAttempts === true;
+  const reusable = new Map<string, ReusableAttempt>();
+  if (requestedManifest && reuseAttempts) {
+    for (const contract of contracts) {
+      const task = requestedManifest.tasks[contract.taskId];
+      if (!task || !isRejectedAttempt(task)) continue;
+      const inspection = await inspectRejectedAttempt(
+        repoRoot,
+        requestedManifest,
+        task,
+      );
+      if (!inspection.ok) {
+        throw new Error(
+          `worker-batch: task ${contract.taskId} has an invalid rejected ` +
+            `attempt (${inspection.reason}); rerun with --fresh-attempt to ` +
+            "discard the recorded draft",
+        );
+      }
+      reusable.set(contract.taskId, inspection.attempt);
+    }
+  }
+
   const handles = new Map<string, WorktreeHandle>();
+  /** Worktrees whose dirty draft must survive this invocation's cleanup. */
+  const retained = new Set<string>();
+  /** Exact attempt metadata checkpointed before each worker starts. */
+  const attemptRecords = new Map<
+    string,
+    { worktree: string; branch: string; baseCommit: string; startedAt: string }
+  >();
   const workerKind = opts.worker ?? "codex";
   const dryRun = opts.dryRun === true;
   const log = opts.verbose
@@ -151,8 +509,10 @@ export async function runCodexBatch(
             status: "ready",
             accepted: false,
           };
-          if (!task.accepted) {
+          if (!task.accepted && task.status !== "rejected") {
             // A previous owner may have died mid-task; rebuild it as ready.
+            // Rejected status is kept so resume can decide whether to reuse or
+            // discard the recorded attempt before this dispatch overwrites it.
             task.status = "ready";
             delete task.reason;
           }
@@ -201,23 +561,74 @@ export async function runCodexBatch(
       const integrationBase = await gitHead(integration.worktreePath);
       waves.push([...ready]);
       for (const id of ready) {
-        const handle = await addWorktree({
-          repoRoot,
-          taskId: id,
-          baseCommit: integrationBase,
-        });
+        const reuse = reusable.get(id);
+        let handle: WorktreeHandle;
+        if (reuse) {
+          handle = {
+            taskId: id,
+            branch: reuse.branch,
+            worktreePath: reuse.worktree,
+            repoRoot,
+          };
+          // Keep the pre-existing draft if this invocation fails before a new
+          // result is checkpointed.
+          retained.add(id);
+          log(
+            `[${workerKind}-batch] reuse attempt worktree ${id} → ` +
+              handle.worktreePath,
+          );
+        } else {
+          handle = await addWorktree({
+            repoRoot,
+            taskId: id,
+            baseCommit: integrationBase,
+          });
+          log(
+            `[${workerKind}-batch] worktree ${id} → ${handle.worktreePath}`,
+          );
+        }
         handles.set(id, handle);
+
+        // Checkpoint the exact worktree, branch and base before the worker
+        // starts. A reused worktree keeps its original base, which may be
+        // older than the current integration head; acceptance merges it like
+        // any other task branch.
+        const attemptBaseCommit = reuse
+          ? reuse.baseCommit
+          : await gitHead(handle.worktreePath);
+        const attemptStartedAt = new Date().toISOString();
+        attemptRecords.set(id, {
+          worktree: handle.worktreePath,
+          branch: handle.branch,
+          baseCommit: attemptBaseCommit,
+          startedAt: attemptStartedAt,
+        });
+        if (checkpoint) {
+          checkpoint = checkpointManifest(repoRoot, checkpoint, (manifest) => {
+            const task: RunTaskState = manifest.tasks[id] ?? {
+              taskId: id,
+              status: "ready",
+              accepted: false,
+            };
+            task.status = "running";
+            task.accepted = false;
+            delete task.reason;
+            task.attemptWorktree = handle.worktreePath;
+            task.attemptBranch = handle.branch;
+            task.attemptBaseCommit = attemptBaseCommit;
+            task.attemptStartedAt = attemptStartedAt;
+            delete task.attemptRejectedAt;
+            manifest.tasks[id] = task;
+          });
+        }
         await linkDependencies(repoRoot, handle.worktreePath, log);
-        log(
-          `[${workerKind}-batch] worktree ${id} → ${handle.worktreePath}`,
-        );
       }
 
       const waveResults = await Promise.all(
         ready.map(async (id) => {
           const contract = {
             ...byId.get(id)!,
-            baseCommit: integrationBase,
+            baseCommit: attemptRecords.get(id)!.baseCommit,
           };
           const wt = handles.get(id)!;
           const worker =
@@ -279,6 +690,8 @@ export async function runCodexBatch(
               repoRoot,
               checkpoint,
               (manifest) => {
+                // Acceptance clears every attempt field; the snapshot is the
+                // durable result and the worktree has no further value.
                 manifest.tasks[id] = {
                   taskId: id,
                   status: "accepted",
@@ -289,21 +702,36 @@ export async function runCodexBatch(
               },
             );
           }
+          retained.delete(id);
           log(`[${workerKind}-batch] accepted ${id}`);
         } else {
+          // Every dispatched task was prepared above and has exact metadata.
+          const attempt = attemptRecords.get(id)!;
+          const rejectedAt = new Date().toISOString();
           if (checkpoint) {
             checkpoint = checkpointManifest(
               repoRoot,
               checkpoint,
               (manifest) => {
-                manifest.tasks[id] = {
+                // Keep the dirty worktree and exact attempt metadata so a
+                // later resume can reuse this draft.
+                const task: RunTaskState = {
                   taskId: id,
                   status: result.status,
                   accepted: false,
                   reason: result.reason,
+                  attemptWorktree: attempt.worktree,
+                  attemptBranch: attempt.branch,
+                  attemptBaseCommit: attempt.baseCommit,
+                  attemptStartedAt: attempt.startedAt,
+                  attemptRejectedAt: rejectedAt,
                 };
+                manifest.tasks[id] = task;
               },
             );
+            // Only a Supervisor checkpoint makes a draft durable state. A
+            // plain batch keeps its existing --keep-worktrees behavior.
+            retained.add(id);
           }
           log(`[${workerKind}-batch] rejected ${id}: ${result.reason}`);
         }
@@ -353,6 +781,9 @@ export async function runCodexBatch(
   } finally {
     if (!opts.keepWorktrees) {
       for (const h of handles.values()) {
+        // A rejected (or reused, not-yet-accepted) draft is durable run
+        // state. It survives cleanup even without --keep-worktrees.
+        if (retained.has(h.taskId)) continue;
         await removeWorktree(h, { force: true }).catch(() => undefined);
       }
       if (requestedManifest) {
