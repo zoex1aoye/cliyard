@@ -244,6 +244,9 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
                 : 0,
             touchedPaths: changed.paths,
             logTail: `${output}${changedLog}`,
+            ...(typeof parsed?.result === "string" && parsed.result
+              ? { finalText: parsed.result }
+              : {}),
           };
         } catch (e) {
           const message = e instanceof Error ? e.message : String(e);
@@ -335,7 +338,9 @@ function buildPrompt(input: AgentStartInput): string {
       ? `Non-goals:\n- ${input.contract.nonGoals.join("\n- ")}`
       : "",
     `Read first:\n- ${input.contract.readPaths.join("\n- ")}`,
-    `Write only under:\n- ${input.contract.writePaths.join("\n- ")}`,
+    input.contract.writePaths.length > 0
+      ? `Write only under:\n- ${input.contract.writePaths.join("\n- ")}`
+      : "Write only under: nothing — this is a read-only task; do not create or modify files.",
     "Do not modify paths outside writePaths.",
     "Do not commit, push, merge, or change the design authority files.",
     "Do not start a long-running dev server. Run only finite build, typecheck or test commands; the Verifier owns runtime services.",

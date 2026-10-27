@@ -12,6 +12,7 @@ import {
 } from "./scheduler/codex-batch.js";
 import { runPlanDispatchCli } from "./planner/cli.js";
 import { runEstimatePlanCli } from "./planner/estimate-cli.js";
+import { runArchitectCli } from "./architect/cli.js";
 import { runRuntimeDrillCli } from "./runtime/failure-drills.js";
 import { runSupervisorCli } from "./supervisor/cli.js";
 import type { PermissionIntent, WorkerId } from "./types.js";
@@ -35,6 +36,9 @@ Usage:
   cliyard plan-dispatch <plan.json|-> --repo path [--dispatch]
                        [--worker claude|codex|mock] [--model id] [--out path]
                        [--ledger path] [--dry-run] [--cleanup]
+  cliyard architect --repo <target-repo> --design <repo-relative-design.md>
+                    --plan-id <safe-plan-id> [--worker claude] [--model id]
+                    [--out <plan.json>] [--json]
   cliyard estimate-plan <plan.json|->
   cliyard runtime-drill [--out <directory>] [--port-base <start>] [--json]
   cliyard supervisor start <contracts.json> --repo <path> [--worker claude|codex]
@@ -139,6 +143,11 @@ async function main(): Promise<void> {
 
   if (cmd === "plan-dispatch") {
     await runPlanDispatchCli(argv.slice(1));
+    return;
+  }
+
+  if (cmd === "architect") {
+    await runArchitectCli(argv.slice(1));
     return;
   }
 
