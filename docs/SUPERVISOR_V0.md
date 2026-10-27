@@ -2,13 +2,18 @@
 
 > Status: implemented (Supervisor v0 slice) — 2026-10-26
 > Attempt continuity and worker progress added 2026-10-27
+> Foreground orchestration queue added 2026-10-27 (separate upstream command)
 > Design authority: [design/supervisor-v0.md](../design/supervisor-v0.md)
 > Attempt continuity / progress design:
 > [design/attempt-continuity-progress-v0.md](../design/attempt-continuity-progress-v0.md)
 > Task Architect (read-only Plan producer):
 > [design/task-architect-v0.md](../design/task-architect-v0.md) and
 > [docs/evidence/TASK_ARCHITECT.md](evidence/TASK_ARCHITECT.md)
-> Scope: one local git repository, one supervisor at a time
+> Orchestration queue design:
+> [design/durable-orchestration-v0.md](../design/durable-orchestration-v0.md) and
+> [docs/evidence/ORCHESTRATION_QUEUE.md](evidence/ORCHESTRATION_QUEUE.md)
+> Scope: one local git repository, one supervisor at a time; one foreground
+> queue dispatches at a time
 
 Supervisor v0 makes a worker batch resumable. It persists a **RunManifest** in
 the target repository, checkpoints every accepted task and the integration
@@ -22,6 +27,11 @@ it never freezes the contracts this supervisor consumes, creates a run, or
 dispatches a worker. The supervisor does not invoke the architect. After a
 human reviews/edits the Plan, the existing plan compiler/`plan-dispatch` path
 produces frozen contracts, and `start` is an explicit later action.
+
+The separate foreground orchestration queue section is also explicit and
+upstream. It holds already-approved frozen contracts, dispatches them one at a
+time through `start`/`resume`, and never writes a RunManifest. It is not a
+daemon and does not change the supervisor's task-level authority.
 
 Attempt continuity is **worktree continuity**, not provider-conversation
 resume. Worker progress is **advisory**, not run authority. Neither addition
@@ -225,6 +235,8 @@ sequence; an error (wrong run, unresponsive owner, still-held lock without
 <repo>/.cliyard/runs/<runId>.json      RunManifest checkpoint
 <repo>/.cliyard/runs/active.json       pointer to the run used by default
 <repo>/.cliyard/supervisor.lock        exclusive supervisor ownership
+<repo>/.cliyard/queue.json             foreground queue items (queue v0)
+<repo>/.cliyard/queue.lock             exclusive queue ownership (queue v0)
 <repo>/.cliyard/ledger.json            dispatch ledger (default)
 <repo>/.cliyard/worker-events/<runId>/<taskId>.jsonl   advisory progress
 <repo>/.cliyard/worktrees/<id>-…       transient task / integration worktrees
@@ -235,7 +247,9 @@ sequence; an error (wrong run, unresponsive owner, still-held lock without
 a same-directory temp file plus `rename`, with `fsync` before the rename. A
 reader sees either the previous complete checkpoint or the new one, never a
 partially written JSON file. The lock file is created directly with `O_EXCL`
-and mode `0600`, then populated with the owner record.
+and mode `0600`, then populated with the owner record. The queue files belong
+to the separate queue command (the orchestration queue section): Supervisor commands do not read or
+write them, and the queue never writes a RunManifest.
 
 ### RunManifest
 
@@ -545,7 +559,106 @@ Behavior:
 Measured live events, heartbeat output and read-only status:
 [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md).
 
-## 8. Limitations
+## Orchestration queue (foreground v0)
+
+The orchestration queue is a separate upstream command, not a Supervisor mode.
+It stores an explicit-approval list of contracts the operator has already
+approved and frozen, and dispatches them sequentially through this Supervisor. **The RunManifest remains
+the task-level authority**: the queue records item state, chooses `start` vs
+`resume`, and classifies the outcome by reading the manifest. It never approves
+contracts, creates contracts, or rewrites a RunManifest.
+
+It is **not a daemon**. `queue run` is a foreground command that holds a queue
+lock, dispatches one item at a time, and exits. There is no background
+scheduler, no parallel dispatch, and no 24h unattended claim.
+
+```bash
+cliyard queue add <contracts.json> --repo <path> --id <queue-id>
+               [--depends-on <id>]... [--worker claude|codex] [--model id]
+               [--plan-id id] [--max-attempts n] [--json]
+cliyard queue list --repo <path> [--json]
+cliyard queue retry <queue-id> --repo <path> [--json]
+cliyard queue cancel <queue-id> --repo <path> [--json]
+cliyard queue run --repo <path> [--continue-on-blocked]
+                  [--max-dispatches n] [--json]
+```
+
+### Semantics
+
+- `queue add` resolves the contracts path against `--repo`, freezes its exact
+  SHA-256, and rejects duplicate/unsafe ids, unknown dependencies and cycles.
+  The queue does not validate that the contracts are frozen; the Supervisor
+  does that at dispatch time, and a failure becomes a blocked item.
+- An item is ready when it is `pending`, every dependency is `completed`, the
+  current contracts bytes still match the frozen hash, and `attempts <
+  maxAttempts` (default `3`).
+- Dispatch is sequential. The queue persists `running` and increments
+  `attempts` **before** calling the Supervisor. It invokes
+  `supervisor start <contracts> --repo <repo> --worker <worker>` for a new
+  item, or `supervisor resume --run <lastRunId> --retry-rejected` for a
+  recorded run. A completed item requires Supervisor exit `0` **and** a
+  `completed` RunManifest.
+- A failed/interrupted/blocked dispatch marks the item `blocked`, keeps
+  `lastRunId` and `runIds`, and records the exact manifest-derived reason.
+  Blocked work is not retried automatically.
+- Default `queue run` stops after the first blocked item; later ready items
+  stay `pending`. With `--continue-on-blocked`, independent items continue and
+  pending dependants of a blocked/cancelled item are marked `blocked` with
+  `dependency "<id>" is blocked`.
+- `queue retry` returns a blocked item to `pending`; `nextAction` is `resume`
+  when a run id is recorded, otherwise `start`. It does not rewrite a
+  RunManifest. Completed and cancelled items are monotonic and cannot be
+  retried. Retry applies to the whole Supervisor run (`--retry-rejected`), not
+  one task.
+- A dependency gates dispatch and failure propagation only. It does **not**
+  chain integration branches: each Supervisor run uses the `baseCommit` frozen
+  in its own contracts file. A dependant therefore does not automatically
+  contain its dependency's accepted commits.
+- `queue run` exits `1` when any item is blocked after the invocation, and
+  `0` otherwise. Pending work left by `--max-dispatches` does not make it exit
+  non-zero (focused test).
+- The queue has no `--dry-run`. Every dispatch is a real Supervisor
+  `start`/`resume`.
+
+### Queue lock and crash recovery
+
+- `<repo>/.cliyard/queue.lock` serializes mutations and foreground dispatch. A
+  live same-host owner is waited on for up to 5 s by `queue run`; after that
+  the command fails and dispatches nothing. A same-host lock whose owner PID
+  is dead is stale and is reclaimed. Foreign-host and unreadable/corrupt locks
+  fail closed.
+- `queue list` is read-only and does not take the queue lock.
+- If a runner dies while an item is `running`, the next `queue run` (after
+  reclaiming the stale lock) reconciles the item against its **recorded** run:
+  completed manifest → `completed`; resumable interrupted/blocked manifest and
+  attempts remaining → `pending` with `nextAction=resume`; missing evidence,
+  attempts exhausted, or an owner that is still live/remote → `blocked`.
+- If the queue died after persisting `running` but **before recording the run
+  id**, reconciliation is fail-closed: the item becomes `blocked` with
+  `running item has no recorded run id`. The queue does not discover the
+  manifest through `.cliyard/runs/active.json`, and a retry with no run id
+  starts a new run. This crash window was measured with a real `SIGKILL`
+  (section 8 of the evidence document).
+- Reconciliation never rewrites the RunManifest. A later Supervisor `resume`
+  is what advances the run.
+
+### Storage
+
+```text
+<repo>/.cliyard/queue.json   ordered queue items (atomic replace)
+<repo>/.cliyard/queue.lock   exclusive queue ownership (O_EXCL, 0600)
+```
+
+Both are gitignored. Queue ids are labels, not RunManifest foreign keys; the
+recorded `runIds`/`lastRunId` are the only run correlation. There is no queue
+history, compaction, id reuse or in-place contract update.
+
+Measured commands, queue JSON, dependency order, completion, blocked
+stop/continue, retry/resume, stale-running crash windows, changed-contract
+fail-closed behavior, lock evidence and final test counts:
+[docs/evidence/ORCHESTRATION_QUEUE.md](evidence/ORCHESTRATION_QUEUE.md).
+
+## 9. Limitations
 
 - **Foreground only.** The supervisor process is the run. Closing the terminal
   or losing the host stops it; no daemon restarts it. V0 is not 24h unattended
@@ -597,24 +710,42 @@ Measured live events, heartbeat output and read-only status:
   candidate only; it never freezes contracts or dispatches. Review the Plan, run
   the compiler/freeze path, then `start` the supervisor explicitly. The
   supervisor does not invoke the architect.
+- **The queue is explicit approval, not automatic orchestration.** Items must
+  already be frozen contracts added by an operator. The queue does not create,
+  approve, edit or re-freeze them; changed/missing bytes block dispatch.
+- **Queue dependencies gate dispatch, not code state.** Each queued run uses
+  its own frozen `baseCommit`; a dependant's integration branch does not
+  automatically include its dependency's accepted work. Human review/merge and
+  a new approved contract are required to build on earlier work.
+- **Queue crash recovery is fail-closed at the start boundary.** A `SIGKILL`
+  after the queue persists `running` but before it records the run id leaves a
+  stale `running` item that reconciles to `blocked`; the existing RunManifest
+  is not discovered through `active.json`, and retry starts a new run. Resume
+  crashes with a recorded run id do reconcile and resume.
+- **The queue is sequential, same-host and foreground.** No parallel items, no
+  cross-host lock recovery, no queue dry-run, live-run stop command, history,
+  compaction or garbage collection. Queue ids cannot be reused and contracts
+  cannot be updated in place.
 - **No backgrounding, multi-tenant, remote execution, Web/GUI or
-  RuntimeManager.** These remain outside v0.
+  RuntimeManager.** These remain outside v0; the queue does not add them.
 
-## 9. Verification evidence
+## 10. Verification evidence
 
-On 2026-10-27 in this checkout (HEAD `3bc56e4`):
+On 2026-10-27 in this checkout (HEAD `20b9a64`):
 
 ```text
 npm run build                                             → pass
-focused architect file (tests/architect.test.ts)          → 14/14 pass (2193.3 ms)
-npm test (full suite)                                     → 191/191 pass (11236.8 ms)
+focused queue file (tests/orchestration-queue.test.ts)    → 13/13 pass (1892.0 ms)
+npm test (full suite)                                     → 205/205 pass (11022.6 ms)
 ```
 
 These are single local runs, not a repeated-run flake rate or CI claim. The
-191-test run includes the prior 13-test attempt/progress/drill group and the
-supervisor suites; those groups were not separately re-run this round. Task
-Architect measurements (fake-worker guards and one real Claude Code + DeepSeek
-smoke) are recorded in
+205-test run includes the prior attempt/progress/drill, Task Architect and
+supervisor suites plus the new queue tests; those other groups were not
+separately re-run this round. The earlier HEAD `3bc56e4` measurement recorded
+the focused architect file at 14/14 (2193.3 ms) and the full suite at 191/191;
+the architect CLI measurements (fake-worker guards and one real Claude Code +
+DeepSeek smoke) are recorded in
 [docs/evidence/TASK_ARCHITECT.md](evidence/TASK_ARCHITECT.md).
 
 The supervisor suites cover manifest durability, active pointer, atomic writes,
@@ -622,6 +753,18 @@ lock exclusivity/staleness, contracts/base rejection, `start`/`status`/
 `resume`/`stop`, and an interruption scenario where the first wave is accepted,
 the second wave's dispatch fails, a new scheduler invocation reloads the
 manifest from disk, and only unfinished tasks run.
+
+Queue coverage is in `tests/orchestration-queue.test.ts`: add-time hash, id and
+dependency validation; `running`/attempts persisted before dispatch;
+`--max-dispatches`; cancel monotonicity; blocked stop and
+`--continue-on-blocked` propagation; retry `start`/`resume` selection;
+changed/missing contracts; reconciliation of completed, interrupted, capped,
+rejected and live-owner manifests; foreign/invalid/stale lock behavior; and
+concurrent-run serialization. Real CLI measurements with a local fixture
+provider plus one real Claude Code + DeepSeek smoke are in
+[docs/evidence/ORCHESTRATION_QUEUE.md](evidence/ORCHESTRATION_QUEUE.md). They
+include a real `SIGKILL` during start (no recorded run id → `blocked`) and
+during resume (recorded run id → `pending` → same-run resume → `completed`).
 
 Attempt continuity and progress coverage is in
 `tests/supervisor-attempt-reuse.test.ts`,
@@ -644,7 +787,7 @@ running, then sends `SIGKILL` to the whole process group. A new process reads
 starts only the unfinished task, preserves the accepted task commit, and
 finishes with the integration branch containing both outputs.
 
-## 10. Safe tool self-hosting procedure
+## 11. Safe tool self-hosting procedure
 
 Goal: use the **stable** cliyard to change cliyard itself, with reviewable
 diffs and a rollback path. This remains a manual merge procedure. The first
@@ -902,9 +1045,11 @@ review/edit Plan
   → explicit Supervisor start
 ```
 
-Measured on 2026-10-27: `npm run build` passed; the focused architect file was
-14/14 (a later doc-repair re-run on the same HEAD was also 14/14); the full
-suite was 191/191 in one run. Fake-worker CLI measurements covered dirty
+Measured on 2026-10-27 at HEAD `3bc56e4`: `npm run build` passed; the focused
+architect file was 14/14 (a later doc-repair re-run on the same HEAD was also
+14/14); the full suite was 191/191 in one run. (The queue work moved HEAD to
+`20b9a64`; the current full suite is 205/205, section 10.) Fake-worker CLI
+measurements covered dirty
 preflight with zero worker invocations, touched paths, a moved `HEAD`, an
 untracked or escaping design, an invalid plan id, a non-git target, invalid
 JSON, empty schema, dependency cycles, overlapping writes, a `planId` mismatch,
@@ -923,24 +1068,34 @@ evade it); only the Claude worker is supported; design input is truncated at
 64 KiB; no plan retention/GC or quality benchmark exists. Most importantly,
 Task Architect **never freezes contracts or dispatches automatically** — the
 Plan is an artifact for human review, and the later compiler/freeze and
-Supervisor start remain manual, explicit actions. The next independent gap is
-**durable continuous orchestration**; daemon/background service, cross-host
-recovery, SQLite manifests, browser evidence and admission scheduling remain
-non-goals.
+Supervisor start remain manual, explicit actions. The **foreground
+orchestration queue** (the Orchestration queue section) is now implemented over those explicit runs;
+it is still explicit-approval, sequential and not a daemon. The **next step is
+a supervised foreground long-run controller/daemon decision** after queue
+semantics are proven. Daemon/background service, cross-host recovery, SQLite
+manifests, browser evidence, parallel admission and automatic `main` merge
+remain non-goals.
 
-## 11. Related documents
+## 12. Related documents
 
 - [design/supervisor-v0.md](../design/supervisor-v0.md) — design authority.
 - [design/attempt-continuity-progress-v0.md](../design/attempt-continuity-progress-v0.md)
   — attempt continuity and worker progress design.
 - [design/task-architect-v0.md](../design/task-architect-v0.md) — read-only
   Task Architect design authority.
+- [design/durable-orchestration-v0.md](../design/durable-orchestration-v0.md) —
+  foreground orchestration queue design authority.
 - [docs/evidence/TASK_ARCHITECT.md](evidence/TASK_ARCHITECT.md) — measured
   architect guards, real DeepSeek smoke and the human review gate.
+- [docs/evidence/ORCHESTRATION_QUEUE.md](evidence/ORCHESTRATION_QUEUE.md) —
+  measured queue add/run/retry/cancel, blocked stop/continue, stale-running
+  crash windows, changed-contract fail-closed behavior, lock evidence and the
+  real provider smoke.
 - [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md)
   — measured reuse, fresh-attempt, live stream, heartbeat and drill-recovery
   evidence.
-- [docs/NEXT_ITERATION.md](NEXT_ITERATION.md) — current status; durable
-  continuous orchestration is the next gap after the completed Task Architect.
+- [docs/NEXT_ITERATION.md](NEXT_ITERATION.md) — current status; the foreground
+  queue is complete, and the next step is a supervised foreground long-run
+  controller/daemon decision after queue semantics are proven.
 - [README.md](../README.md) — command overview.
 - [docs/KEY_MIND.md](KEY_MIND.md) — product thesis and the supervisor's role.

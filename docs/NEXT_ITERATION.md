@@ -1,26 +1,27 @@
-# 下一迭代：持久化持续编排（Task Architect 已完成）
+# 下一迭代：受监督的前台长时控制器/daemon 决策（orchestration queue 已完成）
 
 > 日期：2026-10-27（更新）
 >
 > 结论：RuntimeManager v0、Runtime Orphan Reaper v0、orphan hardening、
 > **runtime failure drills v0**、**attempt continuity / worker progress /
-> drill abnormal recovery v0**，以及 **Task Architect v0（只读 Plan 生产者）**
-> 均已实现。本轮实测：`npm run build` 通过；architect focused
-> `tests/architect.test.ts` **14/14**（2193.3 ms）；完整套件 **191/191**
-> （11236.8 ms）。fake worker 实测了 dirty、touched-path、moved-HEAD、
-> 未跟踪/越界 design、非法 JSON/schema/cycle/overlap、planId 不符和 worker
-> 失败等 fail-closed 路径；一份真实 Claude Code + DeepSeek smoke 在 16 s 内
-> 生成合法的两任务 Plan，`touchedPaths` 为空，HEAD、worktree status 和 design
-> hash 均未改变。Task Architect 只产出供人类审查的 Plan，**不会自动冻结契约，
-> 也不会自动派发**。
+> drill abnormal recovery v0**、**Task Architect v0（只读 Plan 生产者）**，
+> 以及 **Foreground Orchestration Queue v0（显式批准、前台队列）** 均已实现。
+> 本轮实测：`npm run build` 通过；queue focused
+> `tests/orchestration-queue.test.ts` **13/13**（1892.0 ms）；完整套件
+> **205/205**（11022.6 ms）。队列通过 injected runner 和真实 CLI 路径测量
+> （本地 fixture provider），并做了一次真实 Claude Code + DeepSeek smoke
+> （4.810 s）；覆盖冻结 hash、依赖顺序、完成单调性、blocked 停止/继续、
+> retry/resume、真实 SIGKILL 的 stale running 恢复、changed/missing contracts
+> fail closed 和 queue lock 证据。Task Architect 只产出供人类审查的 Plan；
+> queue 只消费已批准、已冻结的 contracts 文件，**不会自动批准或冻结契约**。
 >
-> 下一具体能力/缺口：**持久化持续编排（durable continuous orchestration）**。
-> 它是 Task Architect 之后独立的缺口，尚未实现，需要独立设计与验收。
+> 下一步：在队列语义已被实测证明并接受后，对 **受监督的前台长时运行
+> 控制器/daemon 做出决策**。本轮不实现 daemon，也不声称 24 小时无人值守。
 >
-> 本轮明确不引入 daemon、跨主机回收、浏览器证据、SQLite、准入调度或
-> 24 小时无人值守声明。attempt reuse 只是 worktree 连续性（不是 provider
-> 会话续跑）；worker progress 只是观察信息；drill 异常回收只走既有精确
-> reaper 规则，不改变 `needs_human` 规则。
+> 明确非目标保持不变：daemon/后台服务、跨主机回收、浏览器证据、SQLite、
+> 并行准入调度、自动 push 或自动合入 main。attempt reuse 只是 worktree
+> 连续性（不是 provider 会话续跑）；worker progress 只是观察信息；drill
+> 异常回收只走既有精确 reaper 规则，不改变 `needs_human` 规则。
 
 ## 0. 当前状态
 
@@ -89,6 +90,34 @@
     [docs/evidence/TASK_ARCHITECT.md](evidence/TASK_ARCHITECT.md)。
   - Human gate：Plan 必须经过 review/edit → 既有 plan compiler/freeze →
     显式 Supervisor start；Task Architect 不自动冻结契约或派发。
+- **Foreground Orchestration Queue v0（显式批准的前台队列）**
+  - `cliyard queue add/list/retry/cancel/run`；`add` 将 contracts path 解析为
+    绝对路径并冻结精确字节的 SHA-256；拒绝重复/非法 id、未知依赖和环；
+    不校验 contracts 是否 frozen（由 Supervisor 在派发时 fail closed）；
+  - 存储 `<repo>/.cliyard/queue.json` + `<repo>/.cliyard/queue.lock`
+    （均 gitignored）；queue JSON 原子替换，mutation 和 dispatch 由同主机
+    `O_EXCL` 锁串行化；
+  - `queue run` 是前台、顺序命令：一个 invocation 一次派发一个 item，
+    先持久化 `running` 并递增 `attempts`，再调用既有 Supervisor CLI
+    （新 item 用 `start`，已有 run 用 `resume --retry-rejected`）；
+    完成要求 Supervisor exit `0` 且 RunManifest `completed`；
+  - 默认在第一个 blocked item 停止；`--continue-on-blocked` 继续独立
+    item，并把 blocked/cancelled 的依赖者传递标记为 blocked；
+  - `queue retry` 把 blocked 恢复为 pending：有 run id 时
+    `nextAction=resume`，否则 `start`；不改写 RunManifest；
+    completed/cancelled 永不重跑；
+  - 同主机 stale queue lock 可回收；stale `running` item 按已记录的 run id
+    对账：completed→completed、可恢复的 interrupted/blocked→pending/resume、
+    缺失/attempts 用尽/owner 仍活或远端→blocked；若崩溃发生在记录 run id
+    之前则 fail closed 为 blocked（真实 SIGKILL 实测的 start 崩溃窗口），
+    queue 不会通过 `active.json` 猜测 run；
+  - changed/missing contracts 在派发前 blocked，`attempts` 保持 0；
+    依赖只决定派发顺序和失败传播，**不会串联 integration branch 或 base**；
+  - 明确非 daemon、非并行、单仓库单主机、JSON 而非 SQLite；
+    `RunManifest` 仍是 task-level authority，queue 从不写 RunManifest；
+  - 实测命令、queue JSON、真实 SIGKILL 恢复、lock 证据、真实 DeepSeek
+    smoke 与限制见
+    [docs/evidence/ORCHESTRATION_QUEUE.md](evidence/ORCHESTRATION_QUEUE.md)。
 - **PortAllocator**
   - 默认端口范围 `19000-19999`，可用 `CLIYARD_PORT_RANGE="start-end"` 覆盖；
   - `.cliyard/runtime/port-leases.json` + `.cliyard/runtime/port-leases.lock`；
@@ -189,11 +218,19 @@
 
 明确未落地 / 已知限制：
 
-- **durable continuous orchestration**（持久化持续编排）：Task Architect
-  之后的独立缺口，需要独立设计与验收；
+- **受监督的前台长时控制器/daemon（下一步决策，未实现）**：本轮只证明了
+  前台、显式批准、顺序 queue 的语义；没有 daemon、后台调度、周期扫描、
+  自动推进或 24 小时无人值守。是否引入由队列语义被接受后的独立决策与验收
+  决定，不能从本轮结果反推；
+- **queue v0 的已知限制**：一次一个 item，无并行准入；依赖只决定派发/失败
+  传播，不串联 integration branch 或 base；没有 queue 级 `--dry-run`、
+  活动 run 的 stop 命令、history/compaction/GC 或 contract 原地更新；
+  start 阶段若在记录 run id 前崩溃，stale item 会 fail closed 为 blocked；
+  同主机锁可回收，外来主机锁 fail closed；状态是 JSON，不是 SQLite；
 - **自动契约冻结 / 自动派发（明确非目标）**：Task Architect 只产出
   human-reviewable Plan；必须经人类 review/edit → 原 plan compiler/freeze →
-  显式 Supervisor start，不存在自动 freeze 或自动 dispatch；
+  显式 Supervisor start，不存在自动 freeze 或自动 dispatch；queue 也只接受
+  已显式加入的 frozen contracts，不会自动批准或创建；
 - **相对 `--out` 的 target-relative 语义（v0 限制）**：v0 按调用者 CWD
   解析；非默认位置应传绝对路径（见 evidence 的 caveat）；
 - provider 会话续跑：attempt reuse 只复用 worktree/draft，不恢复 provider
@@ -228,7 +265,10 @@
 [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md)；
 attempt continuity、worker progress 与异常 drill 回收的实测结果见
 [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md)。
-Supervisor 的 attempt/progress 操作语义见
+Orchestration queue 的实测命令、queue JSON、崩溃窗口、lock 证据与真实
+provider smoke 见
+[docs/evidence/ORCHESTRATION_QUEUE.md](evidence/ORCHESTRATION_QUEUE.md)。
+Supervisor 的 attempt/progress 以及 queue 的操作语义见
 [docs/SUPERVISOR_V0.md](SUPERVISOR_V0.md)。
 
 ## 1. 孤儿回收验收对照
@@ -265,7 +305,7 @@ failure drill 的设计验收对照
 | 4 | cleanup release 失败拒绝、`cleanup: "failed"`、绝不 accepted | 已实现 | `RuntimeCleanupError`；failureReason 含注入故障；`cleanup: "failed"` |
 | 5 | 每个场景服务端口事后可绑定 | 已实现 | 22800 / 22830 / 22860 均 `portFree=true`；事后 `lsof` 无监听 |
 | 6 | 机器可读报告 + 每场景证据 | 已实现 | `runtime-failure-drills.json`、`child.log`、`child-result.json`、manifest/log/lease |
-| 7 | focused drill、full suite 与 build 通过 | 已实现 | drill 文件 3/3、当时 full suite 177/177、build pass；当前完整套件 191/191 |
+| 7 | focused drill、full suite 与 build 通过 | 已实现 | drill 文件 3/3、当时 full suite 177/177、build pass；当前完整套件 205/205 |
 | 8 | 文档只记录实测结果、不扩大能力 | 已实现 | [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md) 与本轮文档更新 |
 
 本轮 attempt continuity / worker progress / drill abnormal recovery 的设计验收
@@ -283,7 +323,7 @@ failure drill 的设计验收对照
 | 8 | `status` 读取 progress 而不改变 run state | 已实现 | live status 前后 manifest sha256 相同；focused test 断言 manifest/event 字节不变 |
 | 9 | 超时 drill child 的已证明 service 在 child 退出后被回收 | 已实现 | child SIGKILL(6009 ms)；executor scanned 1 / reaped 1 / needs_human 0 |
 | 10 | drill report 保留异常回收并证明端口 free | 已实现 | `abnormalRecovery` 持久化；manifest `cleanup=complete`+`reaped`；lease 0；24860 free |
-| 11 | focused tests、full suite、TypeScript build 通过 | 已实现 | 该切片 13/13；当时完整套件 177/177、build pass；新增 Task Architect 后当前完整套件 191/191 |
+| 11 | focused tests、full suite、TypeScript build 通过 | 已实现 | 该切片 13/13；当时完整套件 177/177、build pass；新增 Task Architect 后当时 191/191，当前 205/205 |
 | 12 | 文档只记录实测行为并保留全部非目标 | 已实现 | [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md) 与四份文档更新 |
 
 本轮 Task Architect v0 的设计验收对照
@@ -297,30 +337,52 @@ failure drill 的设计验收对照
 | 4 | invalid JSON/schema/cycles/overlapping writes rejected | 已实现 | 四种错误均 exit 1、stage `validation`、无 artifact；错误文本见 evidence |
 | 5 | never creates contracts/worktrees/runs/integration branches | 已实现 | 最终只有 3 个 plan artifact；HEAD、refs、worktree list 不变；contracts/runs/worktrees/runtime/ledger 均 absent |
 | 6 | JSON summary and human-readable help/output | 已实现 | `--json`、human 输出、`--help` 均实测；另有 focused CLI tests |
-| 7 | existing plan/Supervisor/progress tests remain green | 已实现 | 完整套件 191/191；`npm run build` 通过 |
+| 7 | existing plan/Supervisor/progress tests remain green | 已实现 | 当时完整套件 191/191；当前 205/205；`npm run build` 通过 |
 | 8 | documentation records measured real-worker behavior and limitations | 已实现 | [docs/evidence/TASK_ARCHITECT.md](evidence/TASK_ARCHITECT.md) 与 README/NEXT_ITERATION/SUPERVISOR_V0 更新 |
 | 9 | additional fail-closed guards | 已实现 | 未跟踪/越界 design、非法 plan id、非 git target、planId mismatch、worker 非零退出、design overwrite；preflight 失败均 0 次 worker 调用 |
 | 10 | real Claude Code + DeepSeek smoke | 已实现（单次） | 16 s、exit 0、两任务 Plan、`touchedPaths=[]`；HEAD/status/design hash 不变；cost 未由 CLI 报告，仅记录 $1 budget cap |
 
 Task Architect v0 已实现；它只产出 human-reviewable Plan，不自动冻结契约或
-派发。未覆盖的能力不会被写成“已实现”：跨主机回收、leader-dead 自动 kill、
+派发。Foreground Orchestration Queue v0 也已实现；它只消费显式加入的 frozen
+contracts，不自动批准、冻结或改写 contracts，也不写 RunManifest。
+
+本轮 orchestration queue v0 的设计验收对照
+（[design/durable-orchestration-v0.md](../design/durable-orchestration-v0.md)）：
+
+| # | 设计要求 | 状态 | 实测覆盖 |
+|---|----------|------|----------|
+| 1 | queue add 冻结 contracts hash，并拒绝 id/依赖/环错误 | 已实现 | add 冻结 SHA-256；未知依赖 exit 1；focused 覆盖重复/非法 id、环和缺失文件；changed/missing 在派发前 blocked 且 attempts=0 |
+| 2 | queue run 按依赖顺序启动 ready item | 已实现 | 真实 CLI worker 顺序 `setup-task → build-task → solo-task`；未完成的依赖者不派发 |
+| 3 | completed item 永不重跑 | 已实现 | 第二次 run dispatched=0、stopped=idle，queue 文件 SHA-256 不变 |
+| 4 | blocked 默认停止；显式继续独立工作 | 已实现 | 默认 1 次派发后 stopped=blocked；`--continue-on-blocked` 完成 independent |
+| 5 | blocked 的依赖者变为 blocked | 已实现 | dependent 记录 `dependency "blocker" is blocked`，未派发 |
+| 6 | queue retry 尽可能 resume 已有 run | 已实现 | retry → pending/resume；下一次 run 用同一 run id `resume --retry-rejected` 并完成；focused 覆盖无 run id 时回退 start |
+| 7 | stale running item 按 RunManifest 对账 | 已实现（含 fail-closed 窗口） | 真实 SIGKILL：有 run id 时 running→pending→同 run resume→completed；无 run id 时 running→blocked（见限制） |
+| 8 | changed contracts fail closed | 已实现 | 修改/删除后 0 次派发、attempts=0、无 worker log、无 runs 目录 |
+| 9 | queue lock 串行化并回收同主机 stale lock | 已实现 | live lock 下第二次 run 等待 5072 ms 后 exit 1；SIGKILL 后 stale lock 被下一次 run 回收；foreign/invalid 由 focused test 覆盖 |
+| 10 | 既有 Supervisor/continuity/progress/Task Architect/drill 测试保持绿色 | 已实现 | 完整套件 205/205；`npm run build` 通过 |
+
+未覆盖的能力不会被写成“已实现”：跨主机回收、leader-dead 自动 kill、
 daemon 周期回收、Windows 进程身份、生产或跨仓库端口协调、自动契约冻结/自动
-派发、durable continuous orchestration、provider 会话续跑、自动 worktree GC。
+派发、自动 push/合入 main、provider 会话续跑、自动 worktree GC，以及本轮
+未实现的受监督前台长时控制器/daemon。
 
 ## 2. 验证（2026-10-27，本工作树，macOS）
 
-当前套件（包含 Task Architect、attempt continuity / worker progress 与 failure
-drill 测试）：
+当前套件（包含 queue、Task Architect、attempt continuity / worker progress 与
+failure drill 测试）：
 
 ```text
-npm run build                                       → 通过
-focused architect file（tests/architect.test.ts）   → 14/14 通过（2193.3 ms）
-npm test（完整套件）                                → 191/191 通过（11236.8 ms）
+npm run build                                          → 通过
+focused queue file（tests/orchestration-queue.test.ts）→ 13/13 通过（1892.0 ms）
+npm test（完整套件）                                   → 205/205 通过（11022.6 ms）
 ```
 
 以上均为本机单次运行；这是本机 macOS 证据，不是长期 flake 率、CI 或跨主机
-结论。完整套件包含此前的 13 项 attempt/progress/drill 组和 81 项 runtime/
-恢复组；这两组本轮未单独重跑，全部 191 项在完整运行中通过。failure drill
+结论。完整套件包含此前的 attempt/progress/drill 组、runtime/恢复组、Task
+Architect 组和本轮 queue 组；这些组本轮未单独重跑，全部 205 项在完整运行中
+通过。更早 HEAD `3bc56e4` 的记录是 architect focused 14/14（2193.3 ms）与
+full suite 191/191（11236.8 ms）；本轮没有重跑 architect focused。failure drill
 实测细节（子进程、场景、端口、lease）见
 [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md)；
 attempt continuity、worker progress 与异常 drill 回收的实测细节见
@@ -349,6 +411,35 @@ heartbeat，且 status 前后 manifest hash 不变。异常 drill 以
 `childTimeoutMs 5000`、`portBase 24800` 运行：报告 2/3（超时场景按设计
 fail），child 被 SIGKILL，exact executor `scanned=1/reaped=1/needs_human=0/
 skipped=0`，manifest `cleanup=complete` + `reaped`，lease 0，端口 24860 free。
+
+本轮 orchestration queue 的 CLI 级实测（`/tmp` scratch repos；除最后一项外
+均使用本地 fixture provider，不是真实 DeepSeek/Claude provider）：
+
+- 依赖/完成：真实 CLI worker 顺序 `setup-task → build-task → solo-task`，
+  3/3 completed；第二次 run dispatched=0 且 queue 文件 SHA-256 不变；三个
+  item 各生成独立 integration branch；
+- 依赖只决定派发：`build` 的 integration branch 不含 `setup` 的 accepted
+  commit（两者基于同一 base，但 setup head 不是 build head 的祖先）；
+- blocked：默认只派发 blocker 后停止（dependent/independent 保持 pending）；
+  `--continue-on-blocked` 完成 independent，dependent 记录
+  `dependency "blocker" is blocked`；
+- retry/resume：blocked item（attempts 1、run id 已记录）→ `queue retry` →
+  pending/resume → 下一次 run 用**同一 run id** `resume --retry-rejected`
+  并 completed（attempts 2）；
+- 真实 SIGKILL：start 阶段（尚未记录 run id）对账为 blocked
+  `running item has no recorded run id`；resume 阶段（已记录 run id）对账为
+  pending，并继续同一 run → completed（attempts 3）；两次 stale 同主机 lock
+  均被下一次 run 回收；
+- lock：live 同主机 owner 持锁时，第二个 `queue run` 等待 **5072 ms** 后
+  exit 1，不派发；`queue list` 在持锁期间可只读；
+- changed/missing contracts：0 次派发、attempts 0、无 worker log、无 runs
+  目录；
+- 真实 Claude Code + DeepSeek（`claude-ds`、`deepseek-flash[1m]`，$1 cap）：
+  4810 ms、completed，integration branch 含 `real.txt` 内容 `queue-real`；
+  CLI 不报告实际费用。
+
+完整命令、queue JSON、lock 证据和崩溃窗口见
+[docs/evidence/ORCHESTRATION_QUEUE.md](evidence/ORCHESTRATION_QUEUE.md)。
 
 历史基线：drill 前的 hardening 阶段（同日）5 次独立 `npm test` 顺序执行，
 均为 164/164：
@@ -410,24 +501,33 @@ Worker 验收演练，因此不把它们当作 drill、reaper 或跨主机证据
 ## 3. 下一迭代范围
 
 已完成的 RuntimeManager v0、Orphan Reaper v0、hardening、failure drills v0、
-attempt continuity / worker progress / drill abnormal recovery v0，以及
-**Task Architect v0** 不在下一迭代重复。下一具体能力/缺口是 **持久化持续编排
-（durable continuous orchestration）**：
+attempt continuity / worker progress / drill abnormal recovery v0、Task
+Architect v0，以及 **Foreground Orchestration Queue v0** 不在下一迭代重复。
+下一具体步骤是在队列语义被接受后，对 **受监督的前台长时运行控制器/daemon
+做出决策**：
 
-1. **持久化持续编排（下一具体能力/缺口）**
-   - 跨 wave 的持久状态与连续推进；
-   - 需要独立设计与验收；本轮不把它写成已完成能力。
-2. **Task Architect 的人类门禁保持不变**
+1. **受监督的前台长时控制器/daemon（下一步决策，未实现）**
+   - queue v0 已证明前台、显式批准、顺序、可恢复的队列语义；
+   - 下一步先做独立的设计与验收决策：是否需要、以及如何做一个受监督的
+     前台长时控制器/daemon；
+   - 本轮不把它写成已完成能力，也不声称 24 小时无人值守。
+2. **显式批准的人类门禁保持不变**
    - Task Architect 只产出 human-reviewable Plan，不自动冻结契约、不自动
      派发、不 merge、不 push；
    - 路径仍是 review/edit Plan → 既有 plan compiler/freeze → 显式
      Supervisor start；
-   - 它不是 contract/run authority，也不是长期 architect agent。
+   - queue 只接受显式加入的 frozen contracts；不自动批准、冻结或创建契约；
+   - Task Architect 和 queue 都不是 contract/run authority。
+3. **queue v0 的前台限制不扩展**
+   - 一次一个 item；不新增并行准入；
+   - 依赖只决定派发/失败传播，不串联 integration branch/base；
+   - 不新增 queue dry-run、活动 run 的 stop、history/GC 或 contract 原地更新；
+   - 不新增 daemon、跨主机锁或 SQLite。
 
-对本轮已完成的 Task Architect / attempt continuity / progress / drill 切片，
-以下仍是明确非目标，不得用本轮结果反推为已实现：
+对本轮已完成的 Task Architect / queue / attempt continuity / progress / drill
+切片，以下仍是明确非目标，不得用本轮结果反推为已实现：
 
-- daemon、周期扫描、后台常驻或 24 小时无人值守；
+- daemon、周期扫描、后台常驻或 24 小时无人值守（须先有上述独立决策）；
 - 跨主机回收、远程 kill 或共享租约存储；
 - Playwright、axe、截图或无障碍证据；
 - SQLite 或其他状态存储迁移；
@@ -438,16 +538,16 @@ attempt continuity / worker progress / drill abnormal recovery v0，以及
 - worker event 的 retention/rotation 或作为 acceptance authority；
 - leader-dead 进程组的启发式回收；
 - Docker / 远程沙箱 / 多租户 / 云执行；
-- 自动契约冻结或自动派发；Task Architect 只写 Plan；
+- 自动契约冻结或自动派发；Task Architect 只写 Plan，queue 只消费已批准项；
 - 自动合入 main 或自动 push；
 - HTTPS / 认证 / TCP-only readiness；
 - Windows POSIX 进程组等价清理；
 - 自定义优雅关闭命令或日志轮转。
 
 Attempt reuse 是 worktree 连续性，不是 provider 会话续跑；worker progress 是
-观察信息，不是验收依据；Task Architect 只产出 Plan，不是契约或运行权威；
-“持久化持续编排”仍是后续独立缺口，不是本轮 daemon 声明。若未来设计需要后台
-执行模型，必须单独设计和验收，不能从本切片的单机前台证据推导出来。
+观察信息，不是验收依据；Task Architect 只产出 Plan；queue 是前台、显式批准、
+顺序队列，不是契约或运行权威，也不是 daemon。下一步的控制器/daemon 必须
+单独设计和验收，不能从本切片的单机前台证据推导出来。
 
 ## 4. 完成标准
 
@@ -528,10 +628,31 @@ Task Architect v0（已完成）：
     `touchedPaths=[]`、HEAD/status/design hash 不变。
 31. [已完成] 文档只记录实测行为与限制，保留全部非目标。
 
+Foreground Orchestration Queue v0（已完成）：
+
+32. [已完成] `queue add/list/retry/cancel/run`；add 冻结 contracts path 与
+    SHA-256，拒绝重复/非法 id、未知依赖和环。
+33. [已完成] `queue run` 前台顺序派发 ready item；`running`/`attempts` 在
+    调用 Supervisor 前持久化；完成要求 exit 0 且 RunManifest completed。
+34. [已完成] 默认 blocked 停止；`--continue-on-blocked` 继续独立 item，并将
+    blocked/cancelled 的依赖者传递标记为 blocked。
+35. [已完成] completed/cancelled 单调；retry 有 run id 时 resume 同一 run，
+    无 run id 时 start；queue 不改写 RunManifest。
+36. [已完成] 同主机 stale queue lock 回收；live lock 串行化（第二个 run
+    5072 ms 后 exit 1）；foreign/invalid lock fail closed（focused test）。
+37. [已完成] stale running 对账：有 run id → pending/resume 并完成同一 run；
+    无 run id → blocked fail closed（两处真实 SIGKILL）。
+38. [已完成] changed/missing contracts 在派发前 blocked，attempts=0，
+    无 worker log、无 runs 目录。
+39. [已完成] queue focused 13/13、完整套件 205/205、`npm run build` 通过；
+    真实 Claude Code + DeepSeek smoke 4810 ms completed。
+40. [已完成] 文档只记录实测行为与限制，保留全部非目标，并明确 queue 是
+    前台显式批准队列，不是 daemon；RunManifest 仍是 task authority。
+
 下一缺口（未完成）：
 
-32. [未完成] 持久化持续编排（durable continuous orchestration）：独立设计与
-    验收。
+41. [未完成] 在队列语义被接受后，对受监督的前台长时运行控制器/daemon 做出
+    决策（独立设计与验收）。
 
 ## 5. 下一步顺序
 
@@ -553,10 +674,17 @@ Task Architect v0（已完成）：
 8. [已完成] Task Architect v0：只读 preflight/worker/post-run guards、
             deterministic Plan validation、仅 plan artifact；focused 14/14、
             full 191/191、build 通过；真实 Claude Code + DeepSeek 16 s smoke
-9. [已完成] 本轮文档更新：README / NEXT_ITERATION / SUPERVISOR_V0 /
-            docs/evidence/TASK_ARCHITECT.md
-10. 下一迭代：durable continuous orchestration（独立设计与验收）
-11. 不重复已完成切片；不新增 daemon、跨主机、浏览器证据、SQLite、准入调度、
+9. [已完成] Task Architect 本轮文档更新：README / NEXT_ITERATION /
+            SUPERVISOR_V0 / docs/evidence/TASK_ARCHITECT.md
+10. [已完成] Foreground Orchestration Queue v0：frozen contracts hash、
+            依赖顺序、blocked 停止/继续、retry/resume、stale running 对账、
+            queue lock；focused 13/13、full 205/205、build 通过；
+            真实 SIGKILL 两处崩溃窗口 + 真实 DeepSeek smoke
+11. [已完成] 本轮文档更新：README / NEXT_ITERATION / SUPERVISOR_V0 /
+            docs/evidence/ORCHESTRATION_QUEUE.md
+12. 下一步：在队列语义被接受后，对受监督的前台长时运行控制器/daemon 做出
+            决策（独立设计与验收）
+13. 不重复已完成切片；不新增 daemon、跨主机、浏览器证据、SQLite、准入调度、
     provider 会话续跑、自动 worktree GC、自动契约冻结/自动派发或 24 小时声明
 ```
 
@@ -564,9 +692,11 @@ Task Architect v0（已完成）：
 
 Supervisor v0（前台、原子 JSON RunManifest、进程级 SIGKILL 恢复）已完成，
 其操作语义与自举手册见 [docs/SUPERVISOR_V0.md](SUPERVISOR_V0.md)。当前完整套件
-包含 Task Architect、supervisor、attempt continuity/progress 与 runtime/drill
-测试（191/191 通过）。本轮没有引入 daemon 或 SQLite，也没有把 supervisor 的
-后台化列入计划。attempt reuse 是 worktree 连续性，worker progress 是观察
-信息；Task Architect 只产出 Plan；三者都不改变验收权威。RuntimeManager、
-Orphan Reaper、hardening、failure drills、attempt continuity/progress/异常
-drill 回收与 Task Architect 均已收口；下一具体能力/缺口是持久化持续编排。
+包含 queue、Task Architect、supervisor、attempt continuity/progress 与
+runtime/drill 测试（205/205 通过）。本轮没有引入 daemon 或 SQLite，也没有把
+supervisor 或 queue 的后台化列入计划。attempt reuse 是 worktree 连续性，
+worker progress 是观察信息；Task Architect 只产出 Plan；queue 只消费显式
+加入的 frozen contracts；三者都不改变验收权威。RuntimeManager、Orphan
+Reaper、hardening、failure drills、attempt continuity/progress/异常 drill
+回收、Task Architect 与 Foreground Orchestration Queue 均已收口；下一步是在
+队列语义被接受后，对受监督的前台长时运行控制器/daemon 做出决策。
