@@ -1,4 +1,4 @@
-# 下一迭代：观测底座 → 前台长时控制器（Plan-backed chain 已完成）
+# 下一迭代：观测、执行路由与有界并行（Controller 后置）
 
 > 日期：2026-10-27（更新）
 >
@@ -28,12 +28,18 @@
 >
 > **2026-10-27 后续记录：** 自举运行暴露了 progress/status 聚合、provider
 > 失败分类、预算可见性和 attempts 变更审计缺口。执行顺序调整为
-> **`queue status` 观测底座 → failure taxonomy → audited retry policy →
-> foreground controller → bounded soak → daemon 决策**。详细记录见
+> **`queue status` 观测底座 → failure taxonomy/cost → CLI + 模型执行组合路由
+> → 并行 Supervisor/queue admission → Control API + DSH 薄 cockpit →
+> DesignRevision/EvidenceBundle → foreground controller → bounded soak →
+> daemon 决策**。controller 被有意后置，避免自动化尚未可信的验收。
+> 产品定位、并行动机和替换入口见
+> [PRODUCT_STRATEGY_V2.md](PRODUCT_STRATEGY_V2.md)，运行缺口见
 > [NEXT_STEP_CONTROLLER.md](NEXT_STEP_CONTROLLER.md)。
 >
-> 明确非目标保持不变：daemon/后台服务、跨主机回收、浏览器证据、SQLite、
-> 并行准入调度、多父 integration/merge queue、自动 push 或自动合入 main。
+> 当前已完成能力仍不包含 daemon/后台服务、跨主机回收、浏览器证据、SQLite、
+> 有界并行准入和多父 integration/merge queue；其中 **CLI + 模型路由、有界
+> 并行派发和 EvidenceBundle 已升级为下一阶段目标**，不代表当前已经实现。
+> 自动 push 或自动合入 main 仍是长期人工门禁。
 > attempt reuse 只是 worktree 连续性（不是 provider 会话续跑）；worker
 > progress 只是观察信息；drill 异常回收只走既有精确 reaper 规则。
 
@@ -322,7 +328,8 @@
 - SQLite（仍为原子 JSON）；
 - Playwright、axe、截图或无障碍证据；
 - Docker / 远程沙箱；
-- CPU/内存/浏览器并发准入调度或“无限并行 runtime”；
+- “无限并行 runtime”仍是明确非目标；**有界 CPU/内存/runtime/provider
+  并发准入已升级为下一阶段 P0**，当前未实现；
 - 自动合入 main、自动 push；
 - HTTPS、TCP-only readiness、自定义优雅关闭命令或日志轮转；
 - 生产级、跨 run 或跨仓库端口协调（测试端口池不是该能力）；
@@ -647,16 +654,26 @@ Architect v0、**Foreground Orchestration Queue v0**、
    - 因此先实现只读 `queue status` 聚合、queue-level event journal、bounded
      provider failure taxonomy 与可审计的 attempts 变更；
    - progress/heartbeat/controller state 仍然只是观察信息，不是验收权威。
-2. **受监督的前台长时控制器（观测底座之后，未实现）**
-   - queue v0 已证明前台、显式批准、顺序、可恢复的队列语义，Plan-backed
-     v0 已证明单条线性 base 串联语义；Chained Read Context v0 已证明
-     downstream 显式 `readPaths` 按同一 pinned base 验证；
+2. **CLI + 模型执行组合路由与有界并行派发（P0，未实现）**
+   - 支持三类现实场景：多模型 + 多 CLI、单 CLI + 多模型、单模型 + 多 CLI；
+   - 持久化 `ExecutionProfile`、路由硬约束、评分依据、fallback 和实际成本；
+   - 将有界并行列为首要用户价值，替代人工维护多个终端/branch；
+   - 并行前检查独立依赖、非重叠 write scope、provider/model 并发、runtime
+     slot 和端口 lease；依赖任务仍按上游 integrationHead 串行；
+   - Supervisor 当前 repo-global lock / single active-run 模型必须先做独立
+     架构 spike，不能直接并发调用现有 `runQueue`。
+3. **Control API、可替换入口与外部 UI（P0/P1，未实现）**
+   - CLI 与版本化本地 Control API / event stream 是稳定入口；
+   - DSH 只做薄 cockpit，优先注册 `dsh-better-sidebar` tab；
+   - 后续最小自有 Web UI 复用同一 API，DSH 停止维护不影响控制面；
+   - 不自研完整编辑器、终端、diff、Git 或聊天客户端。
+4. **受监督的前台长时控制器（路由/并行/证据之后，未实现）**
    - controller 每轮从磁盘 rehydrate，不依赖 LLM 长上下文；空闲时释放
      queue lock，并等待新批准 item 或显式 retry；
-   - 先证明 foreground watch、controller lock/heartbeat、clean shutdown 和
-     bounded soak，再做 daemon/launchd/systemd 决策；
+   - 先证明 foreground look-ahead scheduling、controller lock/heartbeat、
+     clean shutdown 和 bounded soak，再做 daemon/launchd/systemd 决策；
    - 本轮不把它写成已完成能力，也不声称 24 小时无人值守。
-3. **显式批准的人类门禁保持不变**
+5. **显式批准的人类门禁保持不变**
    - Task Architect 只产出 human-reviewable Plan，不自动冻结契约、不自动
      派发、不 merge、不 push；
    - 路径仍是 review/edit Plan → 既有 plan compiler/freeze → 显式
@@ -664,11 +681,12 @@ Architect v0、**Foreground Orchestration Queue v0**、
    - queue 只接受显式加入的 frozen contracts 或显式加入的已批准 Plan；
      不自动批准、冻结或创建契约/Plan；
    - Task Architect 和 queue 都不是 contract/run authority。
-4. **queue v0 的前台限制不扩展**
-   - 一次一个 item；不新增并行准入；
+6. **queue v0 的顺序限制进入下一阶段改造**
+   - 当前一次一个 item 是已完成 v0 的事实，不是最终产品约束；
+   - 下一阶段新增有界并行准入，但不承诺无限并行；
    - **contract-backed** 依赖仍只决定派发/失败传播，不串联 integration
-     branch/base；**Plan-backed** 已实现单条线性依赖的 base 串联，但本迭代
-     不把它扩展为多父 integration、merge queue 或并行准入；
+     branch/base；**Plan-backed** 已实现单条线性依赖的 base 串联；多父
+     integration/merge queue 仍后置；
    - 不新增 queue dry-run、活动 run 的 stop、history/GC 或 contract 原地更新；
    - 不新增 daemon、跨主机锁或 SQLite。
 
@@ -695,8 +713,9 @@ continuity / progress / drill 切片，以下仍是明确非目标，不得用�
 
 Attempt reuse 是 worktree 连续性，不是 provider 会话续跑；worker progress 是
 观察信息，不是验收依据；Task Architect 只产出 Plan；queue 是前台、显式批准、
-顺序队列，不是契约或运行权威，也不是 daemon。下一步的控制器/daemon 必须
-单独设计和验收，不能从本切片的单机前台证据推导出来。
+顺序队列，不是契约或运行权威，也不是 daemon。下一步先补执行路由和有界并行
+调度，再实现 EvidenceBundle 与 look-ahead controller；daemon 必须最后经过
+独立设计、soak 和验收，不能从当前单机顺序队列证据推导出来。
 
 ## 4. 完成标准
 
@@ -853,15 +872,21 @@ Chained Read Context v0（已完成）：
 
 下一缺口（未完成）：
 
-56. [未完成] 在 **Plan-backed chain 语义被接受后**，对受监督的前台长时运行
-    控制器/daemon 做出决策（独立设计与验收）。
-57. [未完成] 先实现只读 `queue status` 聚合与 queue event journal，避免继续
+56. [未完成] 先实现只读 `queue status` 聚合与 queue event journal，避免继续
     人工拼接 queue、RunManifest、worker events、ledger 和 Git refs。
-58. [未完成] 对 provider 失败做 bounded taxonomy（budget、timeout、transient、
+57. [未完成] 对 provider 失败做 bounded taxonomy（budget、timeout、transient、
     auth、protocol、worker exit、verifier rejection、policy block、unknown），
     保留 machine-readable reason。
-59. [未完成] 增加 audited attempt-policy 操作，禁止依赖手工修改
+58. [未完成] 增加 audited attempt-policy 操作，禁止依赖手工修改
     `.cliyard/queue.json` 扩大 attempts。
+59. [未完成] 实现 CLI + 模型 `ExecutionProfile` 路由，覆盖多模型/多 CLI 的
+    三种真实部署场景。
+60. [未完成] 完成并行 Supervisor/queue 架构 spike，再实现有界并行派发：
+    独立 branch/worktree/run/evidence、资源准入和分别恢复。
+61. [未完成] 先稳定本地 Control API/event stream；DSH 只做薄 cockpit，
+    最小自有 Web UI 作为平台不可用时的后备入口。
+62. [未完成] 在路由和并行语义稳定后，实现 DesignRevision/EvidenceBundle，
+    再引入 look-ahead foreground controller、bounded soak 和 daemon 决策。
 
 ## 5. 下一步顺序
 
@@ -908,12 +933,13 @@ Chained Read Context v0（已完成）：
             design/chained-read-context-v0.md /
             docs/evidence/PLAN_BACKED_CHAIN.md /
             docs/evidence/CHAINED_READ_CONTEXT.md
-16. 下一步 P0：queue status/event journal、worker failure taxonomy、
-            audited attempt-policy；见 docs/NEXT_STEP_CONTROLLER.md
-17. 观测底座之后再实现 foreground controller、bounded soak，最后才决策
-            daemon/launchd/systemd
-18. 不重复已完成切片；不新增 daemon、跨主机、浏览器证据、SQLite、准入调度、
-    provider 会话续跑、自动 worktree GC、自动契约冻结/自动派发或 24 小时声明
+16. 下一步 P0：ControlSnapshot/event journal、failure taxonomy/cost、
+            CLI + 模型路由、并行 Supervisor/queue spike
+17. 然后：有界并行 queue、Control API、DSH thin cockpit、最小自有 Web UI
+18. 再然后：DesignRevision/EvidenceBundle、look-ahead controller、soak、
+            daemon 决策
+19. 不重复已完成切片；不新增 daemon、跨主机、SQLite、无限并行、自动合入
+    main、provider 会话续跑、自动契约冻结或 24 小时声明
 ```
 
 ## 6. 上一迭代状态
@@ -929,5 +955,6 @@ supervisor、attempt continuity/progress 与 runtime/drill 测试（240/240
 Orphan Reaper、hardening、failure drills、attempt continuity/progress/异常
 drill 回收、Task Architect、Foreground Orchestration Queue、
 Plan-backed Chained Queue Base 与 Chained Read Context 均已收口；
-下一步是在 **Plan-backed chain 语义被接受后**，对受监督的前台长时运行
-控制器/daemon 做出决策。
+下一阶段先收口 ControlSnapshot/event、provider failure/cost、CLI + 模型
+ExecutionProfile、并行 Supervisor/queue admission 和可替换 Control API；
+DesignRevision/EvidenceBundle 之后才引入 look-ahead controller 与 daemon 决策。

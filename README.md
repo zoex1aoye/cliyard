@@ -2,11 +2,12 @@
 
 Thin orchestrator for coding CLIs: **Windows entry → WSL workers**, capability-based, **no Docker required**.
 
-North star: stop babysitting AI. **Master 壳 = DeepSeek Harness GUI**；**cliyard = 控制面**（契约 / 隔离 / 门禁 / ledger）。State lives on disk—not in a collapsing chat.
+North star: stop babysitting AI. **CLI + local Control API = stable product boundary**；**DSH = current MVP cockpit, not the control plane**；cliyard owns contracts, routing, isolation, gates and ledger. State lives on disk—not in a collapsing chat.
 
 **第一步用户故事：** [docs/USER_STORY_STEP1.md](docs/USER_STORY_STEP1.md)  
 **End state (Linus-shaped):** [docs/VISION.md](docs/VISION.md) §3.
 **Product thesis / competitive boundary:** [docs/KEY_MIND.md](docs/KEY_MIND.md).
+**Strategy v2 / routing, parallel dispatch and replaceable entry:** [docs/PRODUCT_STRATEGY_V2.md](docs/PRODUCT_STRATEGY_V2.md).
 **V1 walking skeleton:** [docs/KEY_MIND_MVP.md](docs/KEY_MIND_MVP.md).
 **Continuous multi-wave trial:** [docs/CONTINUOUS_TRIAL.md](docs/CONTINUOUS_TRIAL.md).
 **WinUI 3 × TDesign pilot:** [docs/WINUI3_TDESIGN_PILOT.md](docs/WINUI3_TDESIGN_PILOT.md).
@@ -21,16 +22,16 @@ North star: stop babysitting AI. **Master 壳 = DeepSeek Harness GUI**；**cliya
 **Runtime failure drills:** [docs/evidence/RUNTIME_FAILURE_DRILLS.md](docs/evidence/RUNTIME_FAILURE_DRILLS.md) — three measured failure scenarios in independent child processes, report, leases, ports.
 **Attempt continuity, worker progress, abnormal drill recovery:** [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md) — measured rejected-attempt reuse, `--fresh-attempt`, live stream events, heartbeats, read-only status, and timed-out drill recovery.
 **Task Architect evidence:** [docs/evidence/TASK_ARCHITECT.md](docs/evidence/TASK_ARCHITECT.md) — measured read-only Plan production (fake-worker guards plus one real Claude Code + DeepSeek smoke), human review gate and limitations.
-**Next iteration:** [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md) — Task Architect v0, the foreground orchestration queue, the Plan-backed chained queue base and pinned-base read context are implemented. Before the supervised foreground long-run controller, close the operational visibility gap: unified `queue status`, queue-level event journal, bounded provider-failure taxonomy and audited attempt-policy changes. The ordered gap register and acceptance gate are in [docs/NEXT_STEP_CONTROLLER.md](docs/NEXT_STEP_CONTROLLER.md). Daemon, cross-host, browser evidence, SQLite, parallel admission, multi-parent integration and automatic main merge remain non-goals.
+**Next iteration:** [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md) — the revised order is ControlSnapshot/event observability, CLI+model execution-profile routing, parallel Supervisor/queue admission, a stable local Control API with a thin DSH cockpit, then DesignRevision/EvidenceBundle and finally look-ahead control. The product rationale and build-vs-borrow boundaries are in [docs/PRODUCT_STRATEGY_V2.md](docs/PRODUCT_STRATEGY_V2.md), with the operational gap register in [docs/NEXT_STEP_CONTROLLER.md](docs/NEXT_STEP_CONTROLLER.md). Daemon, cross-host execution, SQLite, automatic main merge and unlimited concurrency remain non-goals.
 
 ## What we want (ideal)
 
 ```text
-Human: requirements + prototype in DeepSeek Harness
-   → Master plugin (dsh-cliyard): Plan → TaskContract → dispatch
-   → cliyard: pick CLI → worktree isolation → gates → accept | repair≤N
-   → Monitor: ledger statuses
-   → Human returns: review-worthy diffs
+Human: versioned requirements + visual/design evidence
+   → UI client (DSH now; own/Paseo-compatible later): review Plan
+   → cliyard Control API: freeze contracts + select CLI/model profile
+   → parallel admission: isolated worktrees/runs → independent evidence
+   → human/integration gate: review-worthy accepted diffs
 ```
 
 ## What works today
@@ -52,7 +53,7 @@ Human: requirements + prototype in DeepSeek Harness
 - **Runtime failure drills v0:** `npm run runtime-drill` runs readiness-timeout, verify-failure and cleanup-failure in three independent child processes, writes a versioned JSON report plus per-scenario manifests/logs/leases, and verifies the service/port is clean afterward. A timed-out/abnormal child is terminated (SIGTERM → bounded SIGKILL) and its proven orphan runtime is reconciled by the exact reaper; the recovery is persisted in the report, while the abnormal scenario itself still reports failure. Diagnostic only — no daemon
 - **Windows track:** `doctor` / `run` / `batch` via WSL (deferred for CodeBuddy E2E)
 
-Not yet: **a supervised foreground long-run controller/daemon decision** (the next gap after Plan-backed chain semantics are accepted), Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, Multica runtime, Supervisor daemon/background service, daemon-based or periodic orphan cleanup, cross-host runtime recovery, automatic reaping of leader-dead process groups, cross-repository port coordination, SQLite manifests, Playwright/axe/screenshot or a11y evidence, unlimited parallel runtimes, multi-parent integration or a merge queue, and a resumed provider conversation (attempt reuse is worktree continuity only). The queue is explicit-approval, sequential, same-host and foreground; it adds no daemon, background scheduler, parallel admission, cross-host coordination or automatic `main` merge. Plan-backed items deterministically compile contracts from an already-approved Plan; they do not generate or approve Plans, and v0 supports only one linear queue dependency. Explicit downstream `readPaths` are now validated at the pinned contracts base; the earlier control-checkout caveat is fixed. Task Architect produces a human-reviewable Plan only; it does **not** freeze contracts or dispatch automatically. The completed Task Architect, queue, Plan-backed chain, pinned-base read-context, attempt-continuity/progress and failure-drill slices add none of the other items.
+Not yet: CLI+model execution-profile routing, bounded parallel admission, a stable local Control API, a reusable DesignRevision/EvidenceBundle, a self-owned fallback UI, or a supervised look-ahead controller/daemon. Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, cross-host execution, SQLite manifests, unlimited parallel runtimes, multi-parent integration/merge queue and provider-conversation resume also remain unclaimed. The current queue is explicit-approval, sequential, same-host and foreground; it adds no daemon, background scheduler, parallel admission, cross-host coordination or automatic `main` merge. Plan-backed items deterministically compile contracts from an already-approved Plan; they do not generate or approve Plans, and v0 supports only one linear queue dependency. Explicit downstream `readPaths` are validated at the pinned contracts base. Task Architect produces a human-reviewable Plan only; it does **not** freeze contracts or dispatch automatically.
 
 Measured suite (2026-10-27, HEAD `390d61e`): `npm run build` exit `0`; the
 focused read-context file is **5/5** (1174.5 ms), Plan-backed queue core

@@ -20,12 +20,17 @@ Key Mind 是一层可恢复的工程控制面：
 
 **设计到证据的 AI 工程交付控制面**
 
+2026-10-27 战略补充把“并行派发”和“CLI + 模型执行组合路由”提升为核心产品能力，
+并把 DSH 明确降为可替换 UI Client。修订后的完整定义、三种订阅/API 场景、
+并行队列和自有入口决策见
+[PRODUCT_STRATEGY_V2.md](./PRODUCT_STRATEGY_V2.md)。
+
 Harness / Master Shell / Key Mind 的边界、DSH 的可替换性和开源选型见
 [HARNESS_BOUNDARIES.md](./HARNESS_BOUNDARIES.md)。
 
 一句话记忆：
 
-> **Codex / Claude Code / Qwen Code 负责做事，WorkBuddy / DSH 负责交互；Key Mind 负责让一群可替换的做事者，在人的设计权威下持续交付可验收结果。**
+> **Codex / Claude Code / Qwen Code 负责做事，WorkBuddy / DSH / 自有 Web UI 负责交互；Key Mind 负责根据设计与当前可用 CLI + 模型组合，并行派发一群可替换的做事者，并在人的设计权威下持续交付可验收结果。**
 
 ## 2. 五条不可妥协的原则
 

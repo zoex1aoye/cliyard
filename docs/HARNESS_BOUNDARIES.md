@@ -23,6 +23,11 @@ Key Mind / cliyard 不是又一个 Agent Harness。
 
 DSH 当前适合做 MVP 人机面，但不是最终架构的可靠性边界。
 
+2026-10-27 的入口决策进一步明确：先稳定 CLI + 本地 Control API / SSE，
+DSH 只做薄客户端；之后增加最小自有 Web UI 作为 DSH 停止维护时的后备。
+并行调度、CLI + 模型路由和产品边界见
+[PRODUCT_STRATEGY_V2.md](./PRODUCT_STRATEGY_V2.md)。
+
 ## 2. 四类能力不能混为一谈
 
 | 层 | 解决的问题 | 代表 |
@@ -193,6 +198,17 @@ DSH GUI
 | 接入 WorkBuddy/QwenWork 类工作台 | 现成办公生态 | 商业锁定、能力边界不透明 | 特定集成，不押注 |
 
 建议：控制 API 先稳定，UI 后决定。DSH 和自研 Web UI 都只是 UI Client。
+
+推荐入口顺序：
+
+1. CLI 始终可独立运行；
+2. 本地版本化 Control API + event stream；
+3. DSH `dsh-better-sidebar` 薄插件作为第一 cockpit；
+4. 最小自有浏览器 UI 作为平台替代与恢复入口；
+5. 需要桌面集成时，用 Tauri/Electron 包装同一 Web UI，不重写业务层。
+
+自有入口只做项目状态、队列、run、证据和人工动作，不重做编辑器、终端、
+diff、Git 或通用聊天。
 
 ## 7. 稳定接口设计
 

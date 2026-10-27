@@ -1,4 +1,4 @@
-# Next Step: Observability Before Foreground Controller
+# Next Steps: Observability, Routing and Parallel Delivery
 
 > Recorded: 2026-10-27
 >
@@ -6,24 +6,29 @@
 
 ## Decision
 
-The next capability is still a **foreground long-run controller**, not an
-unbounded autonomous agent and not yet a production daemon.
+The next capability is **design-aware parallel delivery with deterministic
+CLI + model routing**. A foreground long-run controller remains valuable, but
+it is neither the first product milestone nor a substitute for parallel
+scheduling and trustworthy acceptance.
 
-However, the controller should not be the first edit. The self-hosting runs
-showed that the control plane needs a stronger read-only operational view and
-machine-readable failure classification first. Without those, a controller
-would repeatedly poll durable state but still require a human to manually join
-queue items, RunManifests, worker events, provider sessions, attempt limits and
-block reasons.
+The self-hosting runs also showed that the control plane needs a stronger
+read-only operational view and machine-readable failure classification first.
+Without those, both a controller and a parallel scheduler would still require
+a human to manually join queue items, RunManifests, worker events, provider
+sessions, execution bindings, attempt limits and block reasons.
 
-The implementation order is therefore:
+The implementation order was revised after the competitive and entry review:
 
 ```text
 queue observe / status
-  -> worker failure taxonomy
-  -> audited attempt-policy recovery
-  -> foreground queue controller
-  -> bounded long-run soak
+  -> worker failure taxonomy + cost/usage truth
+  -> CLI + model ExecutionProfile routing
+  -> parallel Supervisor/queue architecture spike
+  -> parallel queue v0 with admission and independent recovery
+  -> stable local Control API + DSH better-sidebar cockpit
+  -> DesignRevision + EvidenceBundle/verdict
+  -> look-ahead foreground controller
+  -> bounded soak
   -> daemon/launchd/systemd decision
 ```
 
@@ -31,6 +36,11 @@ The controller is an event-loop over durable files. It must rehydrate from
 disk on every cycle and must not depend on an LLM's context staying alive.
 Queue JSON and RunManifest remain the authorities; controller state, progress,
 events and heartbeats are observational.
+
+The controller is deliberately late: it automates scheduling and acceptance,
+so those semantics must be correct first. Routing, parallel admission and
+entry selection are specified in
+[PRODUCT_STRATEGY_V2.md](PRODUCT_STRATEGY_V2.md).
 
 ## Immediate next slices
 
@@ -121,7 +131,33 @@ cliyard queue extend-attempts <id> --to <n> --reason <text>
 It should persist who/what changed the policy, old/new values, timestamp and
 reason, while still requiring `queue retry` before another dispatch.
 
-### 5. `foreground-controller-v0` (P1)
+### 5. `execution-profile-routing-v0` (P0)
+
+Model the three real deployment shapes:
+
+- many models + many CLIs;
+- many models + one usable CLI;
+- one model + many CLIs.
+
+Routing is deterministic feasibility filtering, scoring and binding selection;
+an LLM may recommend but does not own the decision. Persist runtime, endpoint,
+model, capabilities, health, quota/concurrency, estimated cost and fallback in
+the dispatch provenance. See
+[PRODUCT_STRATEGY_V2.md](PRODUCT_STRATEGY_V2.md#4-execution-model).
+
+### 6. Parallel Supervisor/queue spike (P0)
+
+Current queue and Supervisor are sequential and repo-global. Before implementing
+parallel dispatch, choose between per-item isolated control clones and
+per-run Supervisor ownership with short Git-control locks. Define multiple
+`running` items, independent run manifests/worktrees/branches, provider/model
+slots, runtime/port leases, blocked isolation and independent crash recovery.
+
+This is the direct replacement for the developer's multiple terminal-tab
+workflow. See
+[PRODUCT_STRATEGY_V2.md](PRODUCT_STRATEGY_V2.md#5-parallel-queue-v0-requirement).
+
+### 7. `foreground-controller-v0` (P1)
 
 Add a finite-process controller command, tentatively:
 
@@ -146,7 +182,7 @@ V0 should not auto-retry verifier rejections. Automatic retry is introduced
 only after the failure taxonomy can prove an infrastructure failure and only
 within an explicit attempt policy.
 
-### 6. Long-run verification
+### 8. Long-run verification
 
 Before any daemon claim:
 
@@ -165,6 +201,9 @@ considered as an external process-lifecycle concern.
 | Priority | Gap | Observed evidence | Consequence | Planned closure |
 |----------|-----|-------------------|-------------|-----------------|
 | P0 | Queue has no single live status projection | Needed to manually join `queue.json`, RunManifest, `worker-events`, ledger and Git refs | Human must run forensics to know what is happening | `queue status` projection |
+| P0 | Queue is sequential although the original pain is managing several terminal/branch lines | Current queue and Supervisor allow one item and one repo-global run at a time | Throughput remains limited by manual terminal switching or by a serial queue | parallel Supervisor/queue spike + bounded parallel v0 |
+| P0 | Worker/model binding is fixed too early | Queue items store `worker` and optional `model` at add time | Cannot route across multi-model subscriptions, single-CLI limits or one-model/multi-CLI availability | `ExecutionProfile` feasibility + scoring |
+| P0 | No stable client-neutral Control API | Current DSH plugin reads a batch ledger and starts its own monitor | DSH becomes a de facto entry dependency and cannot show complete authority state | versioned local API + SSE/NDJSON |
 | P0 | Provider failures are not machine-classified | Three documentation attempts ended after several minutes with only `worker failed`; no final `is_error` or budget classification was retained | Cannot distinguish budget, network, provider protocol or worker failure automatically | failure taxonomy + bounded final provider detail |
 | P0 | The default `$5` budget limit was discovered by repeated provider exits | The same docs task completed only after increasing budget to `$12` | Wasted attempts/time and nearly exhausted queue retry budget | expose configured budget in status; classify budget exhaustion |
 | P0 | Attempt maximum cannot be changed through an audited command | During recovery, `maxAttempts` was manually changed from 3 to 4 in `.cliyard/queue.json` | Operator recovery bypasses a first-class control-plane path | audited `extend-attempts` command |
@@ -203,3 +242,7 @@ The controller slice is ready to start when:
    itself.
 4. The monitoring projection is demonstrably read-only.
 5. The existing 240-test suite remains green.
+6. Execution routing can select CLI and model separately from current
+   endpoint/model/runtime capability and availability.
+7. Multiple queue items can be recovered independently and bounded by explicit
+   provider/model/runtime/resource admission.

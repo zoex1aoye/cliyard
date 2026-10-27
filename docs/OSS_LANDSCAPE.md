@@ -4,6 +4,8 @@
 > 与 [VISION.md](./VISION.md)、[MVP_IMPLEMENTATION_PLAN.md](./MVP_IMPLEMENTATION_PLAN.md) 配套。
 > 产品命题、Codex/Claude Code/WorkBuddy/Qwen 边界与更完整的开源支撑矩阵见 [KEY_MIND.md](./KEY_MIND.md)。
 > Harness、Master Shell 与控制面的分层及 DSH 替换策略见 [HARNESS_BOUNDARIES.md](./HARNESS_BOUNDARIES.md)。
+> 2026-10-27 的并行派发、CLI+模型路由、入口与 DSH 插件复用决策见
+> [PRODUCT_STRATEGY_V2.md](./PRODUCT_STRATEGY_V2.md)。
 
 ## 三类能力层
 
