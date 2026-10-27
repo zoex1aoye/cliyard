@@ -233,9 +233,19 @@ export async function runCodexBatch(
                   model: opts.model,
                   dryRun,
                 }));
+          // Dry-run stays on the mock verifier, so it never starts a runtime.
+          // Real verification gets both the control repository (manifest,
+          // logs, leases) and the exact task worktree (service cwd).
           const verifier = dryRun
             ? createMockVerifier()
-            : createShellVerifier({ cwd: wt.worktreePath });
+            : createShellVerifier({
+                cwd: wt.worktreePath,
+                repoRoot,
+                worktree: wt.worktreePath,
+                ...(requestedManifest !== undefined
+                  ? { runtimeIdPrefix: requestedManifest.runId }
+                  : {}),
+              });
           return runClosedLoop({
             contract,
             worker,
