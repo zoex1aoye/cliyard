@@ -1,0 +1,100 @@
+{
+  "planId": "runtime-failure-drills-v0",
+  "contracts": [
+    {
+      "taskId": "failure-drill-runner",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Implement a repeatable `cliyard runtime-drill` diagnostic that runs readiness-timeout, verifier-command failure and cleanup-failure scenarios in three separate OS child processes. Add src/runtime/failure-drills.ts as the orchestrator/report layer and a child entry that creates isolated scratch control/worktree directories, starts real finite services with RuntimeManager or the shell Verifier, detects the expected rejection, and exits 0 only when the observed evidence matches. The readiness timeout case must skip verifyCommands; the verify failure case must preserve a non-zero exit code; the cleanup failure case must use an injected allocator release failure and persist cleanup=failed while never reporting acceptance. Every case must prove the service process is gone and its port is bindable afterward. Retain runtime manifests, logs, pid/pgid, lease count, command results and failure reasons under a gitignored output directory, and emit a versioned runtime-failure-drills.json report. Add a focused test that drives the public CLI/test seam and checks the report and artifacts. Add a disjoint runtime-failure-drills port pool to tests/test-port-ranges.ts, a package.json script, and top-level CLI/help wiring. Do not add dependencies."
+      ],
+      "nonGoals": [
+        "No daemon or periodic execution",
+        "No changes to reaper ownership rules",
+        "No browser, Playwright, screenshot or axe integration",
+        "No SQLite, cloud execution or admission scheduler",
+        "No automatic merge to main",
+        "No broad refactor of RuntimeManager"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "design/runtime-failure-drills-v0.md",
+        "docs/RUNTIME_MANAGER.md",
+        "docs/RUNTIME_ORPHAN_RECOVERY.md",
+        "src/cli.ts",
+        "src/runtime/manager.ts",
+        "src/runtime/ports.ts",
+        "src/runtime/types.ts",
+        "src/verification/verifier.ts",
+        "tests/runtime-manager.test.ts",
+        "tests/runtime-verifier.test.ts",
+        "tests/test-port-ranges.ts",
+        "package.json",
+        "tsconfig.json"
+      ],
+      "writePaths": [
+        "src/cli.ts",
+        "src/runtime/failure-drills.ts",
+        "src/runtime/failure-drill-child.ts",
+        "tests/runtime-failure-drills.test.ts",
+        "tests/test-port-ranges.ts",
+        "package.json"
+      ],
+      "sharedResources": [],
+      "baseCommit": "23607f5ab2adcc58f18f30c4c3ed20b35c715171",
+      "verifyCommands": [
+        "npx tsx --test tests/runtime-failure-drills.test.ts",
+        "npm test",
+        "npm run build",
+        "npx tsx src/cli.ts runtime-drill --out \".cliyard/runtime-drills/selfhost-$(date +%s)-$$\" --port-base 22700 --json"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "failure-drill-docs",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Run the implemented runtime-drill against a fresh evidence directory, inspect the machine-readable report and artifacts, and update the checked-in documentation with only the measured results. Add docs/evidence/RUNTIME_FAILURE_DRILLS.md containing the date, command, child-process evidence, three scenario verdicts, cleanup/failure states, port-release results, lease behavior and final focused/full/build test counts. Update RUNTIME_MANAGER with usage and artifact layout, RUNTIME_ORPHAN_RECOVERY with how drills relate to incident evidence while preserving needs_human rules, README and NEXT_ITERATION so future work does not repeat this slice. Name the next concrete gap explicitly: Task Architect plus durable continuous orchestration, while keeping daemon, cross-host, browser evidence, SQLite and admission scheduling as non-goals for this completed slice."
+      ],
+      "nonGoals": [
+        "No source or test behavior changes",
+        "No claim of daemon, cross-host, browser or production port coordination",
+        "No invented test counts or evidence",
+        "No automatic merge to main"
+      ],
+      "dependsOn": [
+        "failure-drill-runner"
+      ],
+      "readPaths": [
+        "README.md",
+        "docs/NEXT_ITERATION.md",
+        "docs/RUNTIME_MANAGER.md",
+        "docs/RUNTIME_ORPHAN_RECOVERY.md",
+        "design/runtime-failure-drills-v0.md",
+        "src/runtime/failure-drills.ts",
+        "src/runtime/failure-drill-child.ts",
+        "tests/runtime-failure-drills.test.ts"
+      ],
+      "writePaths": [
+        "README.md",
+        "docs/NEXT_ITERATION.md",
+        "docs/RUNTIME_MANAGER.md",
+        "docs/RUNTIME_ORPHAN_RECOVERY.md",
+        "docs/evidence/RUNTIME_FAILURE_DRILLS.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "23607f5ab2adcc58f18f30c4c3ed20b35c715171",
+      "verifyCommands": [
+        "npx tsx src/cli.ts runtime-drill --out \".cliyard/runtime-drills/doc-check-$(date +%s)-$$\" --port-base 22710 --json",
+        "npx tsx --test tests/runtime-failure-drills.test.ts",
+        "npm test",
+        "npm run build",
+        "test -s docs/evidence/RUNTIME_FAILURE_DRILLS.md",
+        "rg -q '^## Runtime failure drills' docs/RUNTIME_MANAGER.md"
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
