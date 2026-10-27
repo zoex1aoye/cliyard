@@ -5,6 +5,9 @@
 > Design authority: [design/supervisor-v0.md](../design/supervisor-v0.md)
 > Attempt continuity / progress design:
 > [design/attempt-continuity-progress-v0.md](../design/attempt-continuity-progress-v0.md)
+> Task Architect (read-only Plan producer):
+> [design/task-architect-v0.md](../design/task-architect-v0.md) and
+> [docs/evidence/TASK_ARCHITECT.md](evidence/TASK_ARCHITECT.md)
 > Scope: one local git repository, one supervisor at a time
 
 Supervisor v0 makes a worker batch resumable. It persists a **RunManifest** in
@@ -12,6 +15,13 @@ the target repository, checkpoints every accepted task and the integration
 head, and after a crash replays only the unfinished part of the contract DAG.
 A rejected attempt also keeps its exact dirty worktree, and Claude stream-json
 progress is appended for read-only observation while the worker runs.
+
+Task Architect is a separate upstream command. By default it writes only a Plan
+candidate under `<repo>/.cliyard/plans/` (`--out` can select another path), and
+it never freezes the contracts this supervisor consumes, creates a run, or
+dispatches a worker. The supervisor does not invoke the architect. After a
+human reviews/edits the Plan, the existing plan compiler/`plan-dispatch` path
+produces frozen contracts, and `start` is an explicit later action.
 
 Attempt continuity is **worktree continuity**, not provider-conversation
 resume. Worker progress is **advisory**, not run authority. Neither addition
@@ -583,20 +593,29 @@ Measured live events, heartbeat output and read-only status:
 - **PID-based liveness.** A recycled PID could be mistaken for the owner. Use
   `status --json` to inspect the lock's run id and acquisition timestamp when
   in doubt.
+- **Plan production is upstream and manual.** Task Architect writes a Plan
+  candidate only; it never freezes contracts or dispatches. Review the Plan, run
+  the compiler/freeze path, then `start` the supervisor explicitly. The
+  supervisor does not invoke the architect.
 - **No backgrounding, multi-tenant, remote execution, Web/GUI or
   RuntimeManager.** These remain outside v0.
 
 ## 9. Verification evidence
 
-On 2026-10-27 in this checkout (HEAD `3093508`):
+On 2026-10-27 in this checkout (HEAD `3bc56e4`):
 
 ```text
 npm run build                                             → pass
-focused attempt/progress/drill group (4 files)            → 13/13 pass (9769.2 ms)
-npm test (full suite)                                     → 177/177 pass (10887.8 ms)
+focused architect file (tests/architect.test.ts)          → 14/14 pass (2193.3 ms)
+npm test (full suite)                                     → 191/191 pass (11236.8 ms)
 ```
 
-These are single local runs, not a repeated-run flake rate or CI claim.
+These are single local runs, not a repeated-run flake rate or CI claim. The
+191-test run includes the prior 13-test attempt/progress/drill group and the
+supervisor suites; those groups were not separately re-run this round. Task
+Architect measurements (fake-worker guards and one real Claude Code + DeepSeek
+smoke) are recorded in
+[docs/evidence/TASK_ARCHITECT.md](evidence/TASK_ARCHITECT.md).
 
 The supervisor suites cover manifest durability, active pointer, atomic writes,
 lock exclusivity/staleness, contracts/base rejection, `start`/`status`/
@@ -850,15 +869,78 @@ it is allowed to own a real run.
 - The run cannot be trusted: `stop`, keep the manifests and branch for
   diagnosis, and start a fresh run from the old baseline.
 
+## Task Architect (read-only Plan producer)
+
+Task Architect v0 is an upstream, short-lived command — not a Supervisor mode,
+and the Supervisor never invokes it. It turns one committed design in a clean
+target repository into one deterministically validated Plan candidate for human
+review:
+
+```bash
+npm run architect -- --repo <target> \
+  --design <repo-relative-design.md> --plan-id <safe-id> \
+  [--worker claude] [--model <id>] [--out <plan.json>] [--json]
+```
+
+Preflight requires a git target, an empty `git status --porcelain`, a design
+that is tracked and inside the repository, and a resolved base commit. The
+Claude worker runs with `permission-mode=plan` and only `Read,Grep,Glob`. After
+it exits, the control plane requires exit code `0`, empty `touchedPaths`, a
+byte-identical worktree status, an unmoved `HEAD`, and a parseable Plan whose
+candidate then passes the existing deterministic `compilePlan` validation
+(ids, goals, repo-relative paths, dependency acyclicity, disjoint `writePaths`,
+unsupported shared resources and contract shape).
+
+By default the only write is `<target>/.cliyard/plans/<planId>.json`
+(`--out` can select another path). It writes no contracts and no contract base,
+creates no task worktree, Supervisor run, integration branch or runtime, and
+never dispatches, merges or pushes. The human gate remains explicit:
+
+```text
+review/edit Plan
+  → existing plan compiler / contract freeze
+  → explicit Supervisor start
+```
+
+Measured on 2026-10-27: `npm run build` passed; the focused architect file was
+14/14 (a later doc-repair re-run on the same HEAD was also 14/14); the full
+suite was 191/191 in one run. Fake-worker CLI measurements covered dirty
+preflight with zero worker invocations, touched paths, a moved `HEAD`, an
+untracked or escaping design, an invalid plan id, a non-git target, invalid
+JSON, empty schema, dependency cycles, overlapping writes, a `planId` mismatch,
+a non-zero worker exit and a design-overwrite collision. One real Claude Code +
+DeepSeek smoke used the real `claude-ds` launcher and model
+`deepseek-flash[1m]` under a `$1` budget cap; it exited `0` in 16 seconds,
+produced a valid two-task Plan, reported `touchedPaths=[]`, and left `HEAD`,
+`git status`, the design hash and the ref/worktree list unchanged. Exact
+commands, Plan output and remaining limits are in
+[docs/evidence/TASK_ARCHITECT.md](evidence/TASK_ARCHITECT.md). These are single
+local runs, not a CI or flake-rate claim.
+
+Known limits: the read-only guarantee is permission configuration plus
+post-run `touchedPaths`/status/HEAD checks (a write reverted before exit could
+evade it); only the Claude worker is supported; design input is truncated at
+64 KiB; no plan retention/GC or quality benchmark exists. Most importantly,
+Task Architect **never freezes contracts or dispatches automatically** — the
+Plan is an artifact for human review, and the later compiler/freeze and
+Supervisor start remain manual, explicit actions. The next independent gap is
+**durable continuous orchestration**; daemon/background service, cross-host
+recovery, SQLite manifests, browser evidence and admission scheduling remain
+non-goals.
+
 ## 11. Related documents
 
 - [design/supervisor-v0.md](../design/supervisor-v0.md) — design authority.
 - [design/attempt-continuity-progress-v0.md](../design/attempt-continuity-progress-v0.md)
   — attempt continuity and worker progress design.
+- [design/task-architect-v0.md](../design/task-architect-v0.md) — read-only
+  Task Architect design authority.
+- [docs/evidence/TASK_ARCHITECT.md](evidence/TASK_ARCHITECT.md) — measured
+  architect guards, real DeepSeek smoke and the human review gate.
 - [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md)
   — measured reuse, fresh-attempt, live stream, heartbeat and drill-recovery
   evidence.
-- [docs/NEXT_ITERATION.md](NEXT_ITERATION.md) — current status; Task Architect
-  is the next capability.
+- [docs/NEXT_ITERATION.md](NEXT_ITERATION.md) — current status; durable
+  continuous orchestration is the next gap after the completed Task Architect.
 - [README.md](../README.md) — command overview.
 - [docs/KEY_MIND.md](KEY_MIND.md) — product thesis and the supervisor's role.
