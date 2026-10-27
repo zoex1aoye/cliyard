@@ -113,6 +113,11 @@ export interface AgentResult {
   /** Mock / real: paths touched under writePaths */
   touchedPaths: string[];
   logTail: string;
+  /**
+   * Complete final provider result text, when the adapter captures one.
+   * Unlike logTail it is not truncated, so callers can parse a full Plan.
+   */
+  finalText?: string;
   /** Hint for mock verifier scenarios */
   mockMeta?: { intendedVerifyFail?: boolean };
 }
