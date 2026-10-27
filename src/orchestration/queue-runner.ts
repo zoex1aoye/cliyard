@@ -10,6 +10,9 @@
  * supervisor. The RunManifest remains the task-level authority: the queue
  * only reads it to classify an outcome and never rewrites it.
  */
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { runSupervisorCli } from "../supervisor/cli.js";
 import {
@@ -20,17 +23,25 @@ import {
 } from "../supervisor/store.js";
 import type { RunManifest, RunStatus } from "../supervisor/types.js";
 import {
+  materializePlan,
+  type PlanUpstreamEvidence,
+} from "./plan-materializer.js";
+import {
   checkQueueContracts,
+  isPlanBackedQueueItem,
   loadQueue,
   queueCounts,
+  queueItemContractsIdentity,
   QueueValidationError,
   saveQueue,
   withQueueLockWait,
+  type PlanBackedQueueItem,
   type QueueDocument,
   type QueueItem,
   type QueueItemStatus,
   type QueueNextAction,
   type QueueCounts,
+  type QueuePlanMaterialization,
 } from "./queue-store.js";
 
 export interface QueueSupervisorRequest {
@@ -142,6 +153,16 @@ export function createQueueSupervisorRunner(): QueueSupervisorRunner {
       };
     }
 
+    const contracts = queueItemContractsIdentity(item);
+    if (action === "start" && !contracts) {
+      return {
+        exitCode: 1,
+        reason:
+          `cannot start queue item ${JSON.stringify(item.id)}: ` +
+          "no frozen contracts identity is recorded",
+      };
+    }
+
     const args: string[] =
       action === "resume"
         ? [
@@ -154,7 +175,14 @@ export function createQueueSupervisorRunner(): QueueSupervisorRunner {
             item.worker,
             "--retry-rejected",
           ]
-        : ["start", item.contractsPath, "--repo", repoRoot, "--worker", item.worker];
+        : [
+            "start",
+            contracts!.contractsPath,
+            "--repo",
+            repoRoot,
+            "--worker",
+            item.worker,
+          ];
     if (item.model) args.push("--model", item.model);
     if (action === "start" && item.planId) {
       args.push("--plan-id", item.planId);
@@ -193,18 +221,21 @@ export function createQueueSupervisorRunner(): QueueSupervisorRunner {
             `run manifest ${runId} is unreadable: ${errorMessage(error)}`;
         }
       }
-      if (
-        manifest !== undefined &&
-        (manifest.contractsHash !== item.contractsHash ||
-          resolve(manifest.contractsPath) !== resolve(item.contractsPath))
-      ) {
-        // An active-pointer fallback can race a concurrent run. Never let a
-        // manifest for different frozen contracts classify this item.
-        if (!failure) {
-          failure =
-            `run ${runId} evidence does not match the item's frozen contracts`;
+      if (manifest !== undefined) {
+        const mismatch =
+          contracts === undefined ||
+          manifest.contractsHash !== contracts.contractsHash ||
+          resolve(manifest.contractsPath) !==
+            resolve(contracts.contractsPath);
+        if (mismatch) {
+          // An active-pointer fallback can race a concurrent run. Never let a
+          // manifest for different frozen contracts classify this item.
+          if (!failure) {
+            failure =
+              `run ${runId} evidence does not match the item's frozen contracts`;
+          }
+          manifest = undefined;
         }
-        manifest = undefined;
       }
     }
 
@@ -313,7 +344,18 @@ export async function runQueue(
           break;
         }
 
-        const blockedReason = preDispatchBlockReason(candidate);
+        let blockedReason = preDispatchBlockReason(candidate);
+        if (!blockedReason && isPlanBackedQueueItem(candidate)) {
+          // Plan materialization is queue work, not Supervisor work: it must
+          // finish and be durable before any attempt increment or start.
+          blockedReason = preparePlanDispatch(
+            repoRoot,
+            document,
+            candidate,
+            byId,
+            log,
+          );
+        }
         if (blockedReason) {
           blockItem(document, candidate, blockedReason);
           saveQueue(repoRoot, document);
@@ -332,7 +374,12 @@ export async function runQueue(
           `dispatch ${candidate.id}: ${candidate.nextAction}` +
             (candidate.nextAction === "resume"
               ? ` run ${candidate.lastRunId}`
-              : ` ${candidate.contractsPath}`),
+              : isPlanBackedQueueItem(candidate)
+                ? ""
+                : ` ${candidate.contractsPath}`) +
+            (isPlanBackedQueueItem(candidate)
+              ? ` ${planLineage(candidate)}`
+              : ""),
         );
         const record = await dispatchItem(
           repoRoot,
@@ -450,6 +497,9 @@ async function dispatchItem(
     ...item,
     dependsOn: [...item.dependsOn],
     runIds: [...item.runIds],
+    ...(item.materialization !== undefined
+      ? { materialization: { ...item.materialization } }
+      : {}),
   };
 
   let result: QueueSupervisorResult;
@@ -517,6 +567,9 @@ function preDispatchBlockReason(item: QueueItem): string | undefined {
   if (item.attempts >= item.maxAttempts) {
     return `attempt limit reached (${item.attempts}/${item.maxAttempts})`;
   }
+  // Plan items have no top-level contracts identity; their recorded
+  // materialization is verified (or created) by preparePlanDispatch.
+  if (isPlanBackedQueueItem(item)) return undefined;
   const contracts = checkQueueContracts(item);
   if (!contracts.ok) {
     return contracts.reason ?? "frozen contracts check failed";
@@ -577,6 +630,704 @@ function propagateBlockedDependants(
 }
 
 // ---------------------------------------------------------------------------
+// Plan-backed materialization
+// ---------------------------------------------------------------------------
+
+/**
+ * Materialize a new attempt chain or byte-verify the recorded one. This runs
+ * before `dispatchItem`, so any failure blocks with no attempt increment and no
+ * Supervisor call. Returns the exact blocked reason instead of throwing.
+ */
+function preparePlanDispatch(
+  repoRoot: string,
+  document: QueueDocument,
+  item: PlanBackedQueueItem,
+  byId: ReadonlyMap<string, QueueItem>,
+  log: (line: string) => void,
+): string | undefined {
+  if (item.materialization) {
+    try {
+      verifyRecordedPlanMaterialization(repoRoot, item, byId);
+      if (item.nextAction === "resume") {
+        const runId = item.lastRunId;
+        if (!runId) {
+          throw new Error("nextAction is resume but no run id is recorded");
+        }
+        verifyPlanRunManifest(repoRoot, item, item.materialization, runId);
+      }
+    } catch (error) {
+      return (
+        `plan materialization verification failed: ${errorMessage(error)}`
+      );
+    }
+    log(`reused materialization ${item.id}: ${planLineage(item)}`);
+    return undefined;
+  }
+
+  if (item.nextAction === "resume" || item.lastRunId !== undefined) {
+    // Never substitute freshly compiled contracts under a resumable run.
+    return (
+      `plan materialization failed: cannot resume queue item ` +
+      `${JSON.stringify(item.id)}: no plan materialization is recorded`
+    );
+  }
+
+  let materialization: QueuePlanMaterialization;
+  try {
+    materialization = createPlanMaterialization(repoRoot, item, byId);
+  } catch (error) {
+    return `plan materialization failed: ${errorMessage(error)}`;
+  }
+
+  const previous = item.materialization;
+  item.materialization = materialization;
+  const at = now();
+  item.updatedAt = at;
+  document.updatedAt = at;
+  try {
+    // Durable before `running` and the attempt increment.
+    saveQueue(repoRoot, document);
+  } catch (error) {
+    if (previous === undefined) delete item.materialization;
+    else item.materialization = previous;
+    return `plan materialization failed: ${errorMessage(error)}`;
+  }
+  log(`materialized ${item.id}: ${planLineage(item)}`);
+  return undefined;
+}
+
+function createPlanMaterialization(
+  repoRoot: string,
+  item: PlanBackedQueueItem,
+  byId: ReadonlyMap<string, QueueItem>,
+): QueuePlanMaterialization {
+  const materializedAt = now();
+  if (item.planBaseCommit !== undefined) {
+    return materializePlan({
+      repoRoot,
+      queueId: item.id,
+      planPath: item.planPath,
+      planHash: item.planHash,
+      planId: item.planId,
+      rootBaseCommit: item.planBaseCommit,
+      materializedAt,
+    });
+  }
+
+  const dependencyId = item.dependsOn[0];
+  if (item.dependsOn.length !== 1 || dependencyId === undefined) {
+    throw new Error(
+      `dependent plan-backed item ${JSON.stringify(item.id)} must have ` +
+        "exactly one dependency",
+    );
+  }
+  const upstream = byId.get(dependencyId);
+  if (!upstream) {
+    throw new Error(
+      `dependency ${JSON.stringify(dependencyId)} is missing from the queue`,
+    );
+  }
+  if (upstream.status !== "completed") {
+    throw new Error(
+      `dependency ${JSON.stringify(dependencyId)} is not completed ` +
+        `(status: ${upstream.status})`,
+    );
+  }
+  const upstreamRunId = lastRunIdOf(upstream);
+  if (!upstreamRunId) {
+    throw new Error(
+      `dependency ${JSON.stringify(dependencyId)} has no completed run id`,
+    );
+  }
+  const upstreamContracts = queueItemContractsIdentity(upstream);
+  if (!upstreamContracts) {
+    throw new Error(
+      `dependency ${JSON.stringify(dependencyId)} has no frozen contracts ` +
+        "identity",
+    );
+  }
+
+  const evidence: PlanUpstreamEvidence = {
+    queueId: dependencyId,
+    status: upstream.status,
+    lastRunId: upstreamRunId,
+    contractsPath: upstreamContracts.contractsPath,
+    contractsHash: upstreamContracts.contractsHash,
+  };
+  return materializePlan({
+    repoRoot,
+    queueId: item.id,
+    planPath: item.planPath,
+    planHash: item.planHash,
+    planId: item.planId,
+    upstream: evidence,
+    materializedAt,
+  });
+}
+
+/**
+ * Reuse-only verification for a recorded materialization: the Plan hash, the
+ * exact artifact bytes, the base and upstream evidence must all still match.
+ * It never compiles a Plan.
+ */
+function verifyRecordedPlanMaterialization(
+  repoRoot: string,
+  item: PlanBackedQueueItem,
+  byId: ReadonlyMap<string, QueueItem>,
+): void {
+  const materialization = item.materialization;
+  if (!materialization) {
+    throw new Error(
+      `plan materialization is not recorded for queue item ` +
+        JSON.stringify(item.id),
+    );
+  }
+
+  const planBytes = readBytesOrThrow(materialization.planPath, "Plan file");
+  const planHash = sha256Hex(planBytes);
+  if (planHash !== item.planHash.toLowerCase()) {
+    throw new Error(
+      `Plan hash mismatch for ${materialization.planPath}: expected sha256 ` +
+        `${item.planHash}, found ${planHash}`,
+    );
+  }
+  if (materialization.planHash.toLowerCase() !== item.planHash.toLowerCase()) {
+    throw new Error(
+      `recorded materialization plan hash ${materialization.planHash} does ` +
+        `not match the item plan hash ${item.planHash}`,
+    );
+  }
+
+  if (item.dependsOn.length === 0) {
+    if (item.planBaseCommit === undefined) {
+      throw new Error(
+        `root plan-backed item ${JSON.stringify(item.id)} has no recorded ` +
+          "planBaseCommit",
+      );
+    }
+    if (
+      materialization.baseCommit.toLowerCase() !==
+      item.planBaseCommit.toLowerCase()
+    ) {
+      throw new Error(
+        `recorded materialization base ${materialization.baseCommit} does ` +
+          `not match the root planBaseCommit ${item.planBaseCommit}`,
+      );
+    }
+    resolveExactCommit(
+      repoRoot,
+      materialization.baseCommit,
+      "materialization baseCommit",
+    );
+  } else {
+    verifyRecordedUpstreamEvidence(repoRoot, item, materialization, byId);
+  }
+
+  const artifactBytes = readBytesOrThrow(
+    materialization.contractsPath,
+    "materialized contracts artifact",
+  );
+  const actualHash = sha256Hex(artifactBytes);
+  const identity = queueItemContractsIdentity(item);
+  if (!identity) {
+    throw new Error(
+      `plan-backed item ${JSON.stringify(item.id)} has no contracts identity`,
+    );
+  }
+  if (
+    actualHash !== materialization.contractsHash.toLowerCase() ||
+    identity.contractsHash.toLowerCase() !==
+      materialization.contractsHash.toLowerCase()
+  ) {
+    throw new Error(
+      `materialized contracts artifact changed: ` +
+        `${materialization.contractsPath} (expected sha256 ` +
+        `${materialization.contractsHash}, found ${actualHash})`,
+    );
+  }
+  verifyArtifactProvenance(item, materialization, artifactBytes);
+}
+
+/**
+ * A dependent base must equal the completed upstream RunManifest integration
+ * head, and that manifest must still describe the upstream item's frozen
+ * contracts identity.
+ */
+function verifyRecordedUpstreamEvidence(
+  repoRoot: string,
+  item: PlanBackedQueueItem,
+  materialization: QueuePlanMaterialization,
+  byId: ReadonlyMap<string, QueueItem>,
+): void {
+  const dependencyId = item.dependsOn[0];
+  if (item.dependsOn.length !== 1 || dependencyId === undefined) {
+    throw new Error(
+      `dependent plan-backed item ${JSON.stringify(item.id)} must have ` +
+        "exactly one dependency",
+    );
+  }
+  const upstream = byId.get(dependencyId);
+  if (!upstream) {
+    throw new Error(
+      `dependency ${JSON.stringify(dependencyId)} is missing from the queue`,
+    );
+  }
+  if (upstream.status !== "completed") {
+    throw new Error(
+      `dependency ${JSON.stringify(dependencyId)} is not completed ` +
+        `(status: ${upstream.status})`,
+    );
+  }
+  const upstreamRunId = lastRunIdOf(upstream);
+  if (!upstreamRunId) {
+    throw new Error(
+      `dependency ${JSON.stringify(dependencyId)} has no completed run id`,
+    );
+  }
+  if (materialization.upstreamQueueId !== dependencyId) {
+    throw new Error(
+      `recorded materialization upstream ${String(
+        materialization.upstreamQueueId,
+      )} does not match the item dependency ${JSON.stringify(dependencyId)}`,
+    );
+  }
+  if (materialization.upstreamRunId !== upstreamRunId) {
+    throw new Error(
+      `recorded materialization upstream run ${String(
+        materialization.upstreamRunId,
+      )} does not match the upstream item run ${upstreamRunId}`,
+    );
+  }
+  if (materialization.upstreamIntegrationHead === undefined) {
+    throw new Error(
+      "recorded materialization is missing upstreamIntegrationHead",
+    );
+  }
+  if (
+    materialization.baseCommit.toLowerCase() !==
+    materialization.upstreamIntegrationHead.toLowerCase()
+  ) {
+    throw new Error(
+      `recorded materialization base ${materialization.baseCommit} does not ` +
+        `match upstreamIntegrationHead ` +
+        `${materialization.upstreamIntegrationHead}`,
+    );
+  }
+
+  const upstreamContracts = queueItemContractsIdentity(upstream);
+  if (!upstreamContracts) {
+    throw new Error(
+      `dependency ${JSON.stringify(dependencyId)} has no frozen contracts ` +
+        "identity",
+    );
+  }
+  let manifest: RunManifest;
+  try {
+    manifest = loadRunManifest(repoRoot, upstreamRunId);
+  } catch (error) {
+    throw new Error(
+      `cannot load upstream RunManifest ${JSON.stringify(upstreamRunId)}: ` +
+        `${errorMessage(error)}`,
+    );
+  }
+  if (manifest.status !== "completed") {
+    throw new Error(
+      `upstream RunManifest ${JSON.stringify(upstreamRunId)} is not ` +
+        `completed (status: ${manifest.status})`,
+    );
+  }
+  if (manifest.runId !== upstreamRunId) {
+    throw new Error(
+      `upstream RunManifest run id ${JSON.stringify(manifest.runId)} does ` +
+        `not match recorded lastRunId ${JSON.stringify(upstreamRunId)}`,
+    );
+  }
+  if (
+    resolve(manifest.contractsPath) !==
+      resolve(upstreamContracts.contractsPath) ||
+    manifest.contractsHash.toLowerCase() !==
+      upstreamContracts.contractsHash.toLowerCase()
+  ) {
+    throw new Error(
+      `upstream RunManifest ${JSON.stringify(upstreamRunId)} contracts ` +
+        "identity does not match the frozen upstream evidence",
+    );
+  }
+
+  const materializedHead = resolveExactCommit(
+    repoRoot,
+    materialization.upstreamIntegrationHead,
+    "materialization upstreamIntegrationHead",
+  );
+  if (materializedHead !== materialization.baseCommit.toLowerCase()) {
+    throw new Error(
+      `recorded materialization base ${materialization.baseCommit} does not ` +
+        `equal the exact upstream integration head ${materializedHead}`,
+    );
+  }
+  const manifestHead = resolveExactCommit(
+    repoRoot,
+    manifest.integrationHead,
+    "upstream manifest integrationHead",
+  );
+  if (manifestHead !== materializedHead) {
+    throw new Error(
+      `recorded materialization integration head ${materializedHead} does ` +
+        `not match upstream RunManifest ${JSON.stringify(upstreamRunId)}`,
+    );
+  }
+  const manifestBase = resolveExactCommit(
+    repoRoot,
+    manifest.baseCommit,
+    "upstream manifest baseCommit",
+  );
+  assertAncestorCommit(repoRoot, manifestBase, manifestHead);
+}
+
+/** A resumed run must still describe this Plan item and its artifact/base. */
+function verifyPlanRunManifest(
+  repoRoot: string,
+  item: PlanBackedQueueItem,
+  materialization: QueuePlanMaterialization,
+  runId: string,
+  knownManifest?: RunManifest,
+): void {
+  let manifest = knownManifest;
+  if (!manifest) {
+    try {
+      manifest = loadRunManifest(repoRoot, runId);
+    } catch (error) {
+      throw new Error(
+        `cannot load RunManifest ${JSON.stringify(runId)}: ` +
+          `${errorMessage(error)}`,
+      );
+    }
+  }
+  if (manifest.runId !== runId) {
+    throw new Error(
+      `RunManifest run id ${JSON.stringify(manifest.runId)} does not match ` +
+        `recorded run ${JSON.stringify(runId)}`,
+    );
+  }
+  if (resolve(manifest.repoRoot) !== resolve(repoRoot)) {
+    throw new Error(
+      `run ${runId} belongs to ${resolve(manifest.repoRoot)}, not ${repoRoot}`,
+    );
+  }
+  if (manifest.planId !== item.planId) {
+    throw new Error(
+      `run ${runId} planId ${JSON.stringify(manifest.planId)} does not ` +
+        `match plan item id ${JSON.stringify(item.planId)}`,
+    );
+  }
+  if (
+    resolve(manifest.contractsPath) !== resolve(materialization.contractsPath)
+  ) {
+    throw new Error(
+      `run ${runId} contracts path ${manifest.contractsPath} does not match ` +
+        `the recorded materialization ${materialization.contractsPath}`,
+    );
+  }
+  if (
+    manifest.contractsHash.toLowerCase() !==
+    materialization.contractsHash.toLowerCase()
+  ) {
+    throw new Error(
+      `run ${runId} contracts hash ${manifest.contractsHash} does not match ` +
+        `the recorded materialization ${materialization.contractsHash}`,
+    );
+  }
+  if (
+    manifest.baseCommit.toLowerCase() !==
+    materialization.baseCommit.toLowerCase()
+  ) {
+    throw new Error(
+      `run ${runId} base commit ${manifest.baseCommit} does not match the ` +
+        `materialized base ${materialization.baseCommit}`,
+    );
+  }
+}
+
+/** Prove the artifact bytes still describe exactly this Plan lineage. */
+function verifyArtifactProvenance(
+  item: PlanBackedQueueItem,
+  materialization: QueuePlanMaterialization,
+  bytes: Buffer,
+): void {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bytes.toString("utf8")) as unknown;
+  } catch (error) {
+    throw new Error(
+      `materialized contracts artifact is not valid JSON: ` +
+        `${errorMessage(error)}`,
+    );
+  }
+  if (!isRecord(parsed)) {
+    throw new Error("materialized contracts artifact must be an object");
+  }
+  if (parsed.planId !== item.planId) {
+    throw new Error(
+      `materialized contracts artifact planId ${JSON.stringify(
+        parsed.planId,
+      )} does not match ${JSON.stringify(item.planId)}`,
+    );
+  }
+  if (!Array.isArray(parsed.contracts)) {
+    throw new Error(
+      "materialized contracts artifact contracts must be an array",
+    );
+  }
+  if (!isRecord(parsed.provenance)) {
+    throw new Error(
+      "materialized contracts artifact is missing provenance",
+    );
+  }
+  const provenance = parsed.provenance;
+  if (provenance.queueId !== item.id) {
+    throw new Error(
+      "materialized contracts artifact provenance.queueId does not match " +
+        `the queue item ${JSON.stringify(item.id)}`,
+    );
+  }
+  if (
+    typeof provenance.planPath !== "string" ||
+    resolve(provenance.planPath) !== resolve(item.planPath)
+  ) {
+    throw new Error(
+      "materialized contracts artifact provenance.planPath does not match " +
+        "the item planPath",
+    );
+  }
+  if (
+    typeof provenance.planHash !== "string" ||
+    provenance.planHash.toLowerCase() !== item.planHash.toLowerCase()
+  ) {
+    throw new Error(
+      "materialized contracts artifact provenance.planHash does not match " +
+        "the item planHash",
+    );
+  }
+  if (provenance.planId !== item.planId) {
+    throw new Error(
+      "materialized contracts artifact provenance.planId does not match " +
+        "the item planId",
+    );
+  }
+  if (
+    typeof provenance.baseCommit !== "string" ||
+    provenance.baseCommit.toLowerCase() !==
+      materialization.baseCommit.toLowerCase()
+  ) {
+    throw new Error(
+      "materialized contracts artifact provenance.baseCommit does not " +
+        "match the materialized base",
+    );
+  }
+
+  const upstreamQueueId = optionalArtifactString(
+    provenance.upstreamQueueId,
+    "upstreamQueueId",
+  );
+  const upstreamRunId = optionalArtifactString(
+    provenance.upstreamRunId,
+    "upstreamRunId",
+  );
+  const upstreamIntegrationHead = optionalArtifactString(
+    provenance.upstreamIntegrationHead,
+    "upstreamIntegrationHead",
+  );
+  if (materialization.upstreamQueueId === undefined) {
+    if (
+      upstreamQueueId !== undefined ||
+      upstreamRunId !== undefined ||
+      upstreamIntegrationHead !== undefined
+    ) {
+      throw new Error(
+        "materialized contracts artifact records upstream lineage for a " +
+          "root plan item",
+      );
+    }
+    return;
+  }
+  if (
+    upstreamQueueId !== materialization.upstreamQueueId ||
+    upstreamRunId !== materialization.upstreamRunId ||
+    upstreamIntegrationHead === undefined ||
+    materialization.upstreamIntegrationHead === undefined ||
+    upstreamIntegrationHead.toLowerCase() !==
+      materialization.upstreamIntegrationHead.toLowerCase()
+  ) {
+    throw new Error(
+      "materialized contracts artifact upstream provenance does not match " +
+        "the recorded materialization",
+    );
+  }
+}
+
+function planLineage(item: PlanBackedQueueItem): string {
+  const materialization = item.materialization;
+  const base =
+    materialization?.baseCommit ?? item.planBaseCommit ?? "<pending>";
+  const upstream =
+    materialization?.upstreamQueueId !== undefined
+      ? ` upstream ${materialization.upstreamQueueId}#${materialization.upstreamRunId ?? "-"} integrationHead ${materialization.upstreamIntegrationHead ?? "-"}`
+      : "";
+  const contracts = materialization
+    ? ` contracts ${materialization.contractsPath} (sha256 ${materialization.contractsHash})`
+    : "";
+  return (
+    `plan ${item.planId} sha256 ${item.planHash} base ${base}` +
+    `${upstream}${contracts}`
+  );
+}
+
+function planReconcileEvidence(
+  repoRoot: string,
+  item: PlanBackedQueueItem,
+  byId: ReadonlyMap<string, QueueItem>,
+  runId: string,
+  manifest: RunManifest,
+): string | undefined {
+  try {
+    if (!item.materialization) {
+      throw new Error(
+        `plan materialization is not recorded for queue item ` +
+          JSON.stringify(item.id),
+      );
+    }
+    verifyRecordedPlanMaterialization(repoRoot, item, byId);
+    verifyPlanRunManifest(
+      repoRoot,
+      item,
+      item.materialization,
+      runId,
+      manifest,
+    );
+    return undefined;
+  } catch (error) {
+    return `plan materialization verification failed: ${errorMessage(error)}`;
+  }
+}
+
+function contractEvidenceReason(
+  item: QueueItem,
+  runId: string,
+  manifest: RunManifest,
+): string | undefined {
+  if (
+    typeof item.contractsPath !== "string" ||
+    manifest.contractsHash !== item.contractsHash ||
+    resolve(manifest.contractsPath) !== resolve(item.contractsPath)
+  ) {
+    return (
+      `run ${runId} evidence does not match the item's frozen contracts`
+    );
+  }
+  return undefined;
+}
+
+function lastRunIdOf(item: QueueItem): string | undefined {
+  return item.lastRunId ?? item.runIds[item.runIds.length - 1] ?? undefined;
+}
+
+function readBytesOrThrow(path: string, label: string): Buffer {
+  try {
+    return readFileSync(path);
+  } catch (error) {
+    throw new Error(
+      `${label} is missing or unreadable: ${path} (${errorMessage(error)})`,
+    );
+  }
+}
+
+function sha256Hex(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** Require an exact full commit hash and prove git resolves it unchanged. */
+function resolveExactCommit(
+  repoRoot: string,
+  value: string,
+  label: string,
+): string {
+  const candidate = value.trim().toLowerCase();
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(candidate)) {
+    throw new Error(
+      `${label} must be an exact full git commit hash ` +
+        `(40 or 64 hex characters), got ${JSON.stringify(value)}`,
+    );
+  }
+  const result = spawnSync(
+    "git",
+    ["rev-parse", "--verify", "--quiet", `${candidate}^{commit}`],
+    { cwd: repoRoot, encoding: "utf8" },
+  );
+  if (result.error !== undefined || result.status !== 0) {
+    throw new Error(
+      `cannot resolve ${label} ${JSON.stringify(candidate)} as a commit in ` +
+        repoRoot,
+    );
+  }
+  const resolved = result.stdout.trim().toLowerCase();
+  if (resolved !== candidate) {
+    throw new Error(
+      `${label} ${JSON.stringify(candidate)} did not resolve to the exact ` +
+        `commit (got ${JSON.stringify(resolved)})`,
+    );
+  }
+  return resolved;
+}
+
+function assertAncestorCommit(
+  repoRoot: string,
+  ancestor: string,
+  descendant: string,
+): void {
+  const result = spawnSync(
+    "git",
+    ["merge-base", "--is-ancestor", ancestor, descendant],
+    { cwd: repoRoot, encoding: "utf8" },
+  );
+  if (result.error !== undefined || result.status === null) {
+    throw new Error(
+      `cannot prove ancestry of ${ancestor} in ${descendant}: ` +
+        `${result.error?.message ?? "git did not run"}`,
+    );
+  }
+  if (result.status === 1) {
+    throw new Error(
+      `upstream manifest base ${ancestor} is not an ancestor of integration ` +
+        `head ${descendant}`,
+    );
+  }
+  if (result.status !== 0) {
+    throw new Error(
+      `cannot prove ancestry of ${ancestor} in ${descendant} ` +
+        `(git exited ${result.status})`,
+    );
+  }
+}
+
+function optionalArtifactString(
+  value: unknown,
+  field: string,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(
+      `materialized contracts artifact provenance.${field} must be a ` +
+        "non-empty string",
+    );
+  }
+  return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// ---------------------------------------------------------------------------
 // Stale running reconciliation
 // ---------------------------------------------------------------------------
 
@@ -590,6 +1341,7 @@ function reconcileRunningItems(
   document: QueueDocument,
 ): QueueReconcileRecord[] {
   const records: QueueReconcileRecord[] = [];
+  const byId = new Map(document.items.map((item) => [item.id, item]));
   for (const item of document.items) {
     if (item.status !== "running") continue;
 
@@ -611,14 +1363,12 @@ function reconcileRunningItems(
         reason = `cannot reconcile run ${runId}: ${errorMessage(error)}`;
       }
       if (manifest) {
-        if (
-          manifest.contractsHash !== item.contractsHash ||
-          resolve(manifest.contractsPath) !== resolve(item.contractsPath)
-        ) {
+        const evidenceReason = isPlanBackedQueueItem(item)
+          ? planReconcileEvidence(repoRoot, item, byId, runId, manifest)
+          : contractEvidenceReason(item, runId, manifest);
+        if (evidenceReason !== undefined) {
           to = "blocked";
-          reason =
-            `run ${runId} evidence does not match the item's frozen ` +
-            "contracts";
+          reason = evidenceReason;
         } else if (manifest.status === "completed") {
           // Completed is terminal even if stale attempt metadata looks odd.
           to = "completed";
