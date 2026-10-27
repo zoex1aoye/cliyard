@@ -135,6 +135,11 @@ export interface FailureSignals {
   verifierRejected?: boolean;
   /** Deterministic control-plane rejection before dispatch. */
   policyBlocked?: boolean;
+  /**
+   * Provider result subtype, for example `error_max_budget_usd`. Bounded and
+   * credential-free before it can reach a failure record code.
+   */
+  subtype?: string;
   /** Explicit stage override. */
   stage?: FailureStage;
   /** Explicit machine code override, bounded to 64 characters. */
@@ -181,6 +186,10 @@ const PROTOCOL_TEXT =
  *
  * timeout > budget > auth > resource > transient > protocol >
  * worker process exit > verifier > policy > unknown.
+ *
+ * A provider subtype is a direct signal, but it never outranks an explicit
+ * wall-clock timeout. Only the known budget subtype changes the category;
+ * unknown subtypes remain codes for the normal signal-based classification.
  */
 export function classifyFailure(
   signals: FailureSignals = {},
@@ -197,6 +206,7 @@ export function classifyFailure(
     typeof signals.signal === "string" && signals.signal.trim()
       ? signals.signal.trim()
       : null;
+  const subtype = normalizeFailureCode(signals.subtype);
   const transient = TRANSIENT_TEXT.test(text);
   const explicitTimeout =
     signals.timedOut === true ||
@@ -210,6 +220,8 @@ export function classifyFailure(
   let category: FailureCategory;
   if (explicitTimeout) {
     category = "timeout";
+  } else if (subtype === "error_max_budget_usd") {
+    category = "budget_exhausted";
   } else if (BUDGET_TEXT.test(text)) {
     category = "budget_exhausted";
   } else if (AUTH_TEXT.test(text)) {
@@ -358,11 +370,14 @@ function failureCode(
   category: FailureCategory,
   signals: FailureSignals,
 ): string | undefined {
-  if (typeof signals.code === "string" && signals.code.trim()) {
-    const explicit = sanitizeCode(signals.code);
-    if (explicit) return explicit;
-  }
+  const explicit = normalizeFailureCode(signals.code);
+  if (explicit) return explicit;
+  // A wall-clock timeout outranks a provider subtype, including in the code.
   if (category === "timeout") return "timeout";
+  // Preserve an unknown provider subtype as the bounded code without deriving
+  // a category from it. A success subtype is not a failure code.
+  const subtype = normalizeFailureCode(signals.subtype);
+  if (subtype && subtype !== "success") return subtype;
   if (signals.spawnFailed === true) return "spawn_error";
   if (typeof signals.signal === "string" && signals.signal.trim()) {
     return sanitizeCode(`signal_${signals.signal}`);
@@ -377,8 +392,25 @@ function failureCode(
   return undefined;
 }
 
+/**
+ * Normalize an untrusted subtype or code into the bounded, credential-free
+ * code space. Raw provider subtypes are never retained beyond this shape.
+ */
+export function normalizeFailureCode(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const code = sanitizeCode(trimmed);
+  return code || undefined;
+}
+
 function sanitizeCode(value: string): string {
-  const redacted = redactFailureSecrets(value);
+  const redacted = redactFailureSecrets(value).replace(
+    // A subtype can glue a token directly to an identifier separator, where
+    // the shared word-boundary patterns would miss it.
+    /(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})/g,
+    "[redacted]",
+  );
   return redacted
     .replace(/\s+/g, "_")
     .replace(/[^A-Za-z0-9_.:-]/g, "_")
@@ -636,7 +668,15 @@ export function parseCostObservation(value: unknown): CostObservation | null {
 
   switch (value.state) {
     case "provider-reported":
-      if (value.source !== "provider" || amount.value === null) return null;
+      // A provider amount without a currency is not attributable and must not
+      // be presented as provider-reported.
+      if (
+        value.source !== "provider" ||
+        amount.value === null ||
+        currency.value === null
+      ) {
+        return null;
+      }
       break;
     case "cli-estimated":
       if (value.source !== "cli" || amount.value === null) return null;
@@ -712,6 +752,24 @@ export function parseCostTruth(value: unknown): CostTruth | null {
   switch (value.state) {
     case "provider-reported":
       if (value.source !== "provider" || amount.value === null) return null;
+      if (value.authoritative) {
+        // An authoritative provider total needs complete provenance: a known
+        // currency, no amount/currency gap and no non-provider observation.
+        if (currency.value === null) return null;
+        if (
+          missing.value.includes("cost.amount") ||
+          missing.value.includes("cost.currency")
+        ) {
+          return null;
+        }
+        if (
+          observations.some(
+            (observation) => observation.state !== "provider-reported",
+          )
+        ) {
+          return null;
+        }
+      }
       break;
     case "cli-estimated":
       if (
@@ -790,10 +848,19 @@ export function createCostObservation(
     throw new Error("cost observation requires a non-empty sessionId");
   }
 
-  const amount = parseCostAmount(input.amount);
+  const parsedAmount = parseCostAmount(input.amount);
   const usage = parseTokenUsage(input.usage);
+  const providerRequested = input.source === "provider";
+  const parsedCurrency = normalizeCurrency(input.currency);
+  // Provider-reported truth must be attributable. Without a currency the
+  // amount is unusable, so fail closed to usage-only/unavailable instead of
+  // emitting a provider observation the parser would reject.
+  const amount =
+    parsedAmount !== null && (!providerRequested || parsedCurrency !== null)
+      ? parsedAmount
+      : null;
   const source: CostSource =
-    amount !== null ? (input.source === "provider" ? "provider" : "cli") : "none";
+    amount !== null ? (providerRequested ? "provider" : "cli") : "none";
   const state: CostState =
     amount !== null
       ? source === "provider"
@@ -802,7 +869,7 @@ export function createCostObservation(
       : usage !== null
         ? "usage-only"
         : "unavailable";
-  const currency = amount !== null ? normalizeCurrency(input.currency) : null;
+  const currency = amount !== null ? parsedCurrency : null;
   const note =
     input.note === undefined
       ? ""
@@ -927,6 +994,9 @@ export function createCostTruth(input: CostTruthInput = {}): CostTruth {
     amountObservations.every(
       (observation) => observation.state === "provider-reported",
     );
+  const providerOnlyObservations = observations.every(
+    (observation) => observation.state === "provider-reported",
+  );
 
   let state: CostState;
   let source: CostSource;
@@ -936,6 +1006,8 @@ export function createCostTruth(input: CostTruthInput = {}): CostTruth {
     source = allProviderAmounts ? "provider" : "cli";
     authoritative =
       allProviderAmounts &&
+      providerOnlyObservations &&
+      currency !== null &&
       !missing.has("cost.amount") &&
       !missing.has("cost.currency");
   } else if (usage !== null) {

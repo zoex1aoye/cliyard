@@ -14,6 +14,7 @@ import {
   createCostObservation,
   createCostTruth,
   createFailureRecord,
+  normalizeFailureCode,
   parseCostAmount,
   parseTokenUsage,
   sumTokenUsage,
@@ -431,6 +432,7 @@ function buildClaudeFailure(input: {
     signal: input.res.signal,
     timeoutMs: input.timeoutMs,
     text,
+    ...(input.parsed?.subtype ? { subtype: input.parsed.subtype } : {}),
     providerError: input.parsed?.is_error === true && input.res.code === 0,
     postCheckFailed:
       Boolean(input.changedError) &&
@@ -444,11 +446,13 @@ function buildClaudeFailure(input: {
 
 /** Extract only the known result fields; raw provider payloads are dropped. */
 function toClaudeResult(record: Record<string, unknown>): ClaudeResult {
+  const subtype = normalizeFailureCode(record.subtype);
   return {
     ...(typeof record.is_error === "boolean"
       ? { is_error: record.is_error }
       : {}),
     ...(typeof record.result === "string" ? { result: record.result } : {}),
+    ...(subtype ? { subtype } : {}),
     usage: parseClaudeUsage(record),
     totalCostUsd: parseCostAmount(record.total_cost_usd),
   };
@@ -503,6 +507,11 @@ function buildPrompt(input: AgentStartInput): string {
 interface ClaudeResult {
   is_error?: boolean;
   result?: string;
+  /**
+   * Bounded, credential-free result subtype (for example
+   * `error_max_budget_usd`). The raw provider value is never retained.
+   */
+  subtype?: string;
   /** Parsed token usage; null when the record carried none. */
   usage: TokenUsage | null;
   /** `total_cost_usd` as emitted by the CLI; null when absent or malformed. */
