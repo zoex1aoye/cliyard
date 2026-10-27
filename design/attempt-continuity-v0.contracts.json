@@ -37,7 +37,7 @@
         "tests/supervisor-attempt-reuse.test.ts"
       ],
       "sharedResources": [],
-      "baseCommit": "e224eff364745c49c71f72dc438c537e169291d8",
+      "baseCommit": "23a1563b59ae5286f0a8deae2806f88213c35ec9",
       "verifyCommands": [
         "npx tsx --test tests/supervisor-attempt-reuse.test.ts",
         "npm run build"
@@ -75,7 +75,7 @@
         "tests/runtime-failure-drills.test.ts"
       ],
       "sharedResources": [],
-      "baseCommit": "e224eff364745c49c71f72dc438c537e169291d8",
+      "baseCommit": "23a1563b59ae5286f0a8deae2806f88213c35ec9",
       "verifyCommands": [
         "npx tsx --test tests/runtime-failure-drills.test.ts",
         "npm run build"
