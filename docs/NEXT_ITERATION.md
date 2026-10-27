@@ -6,14 +6,20 @@
 > **runtime failure drills v0**、**attempt continuity / worker progress /
 > drill abnormal recovery v0**、**Task Architect v0（只读 Plan 生产者）**、
 > **Foreground Orchestration Queue v0（显式批准、前台队列）**、
-> **Plan-backed Chained Queue Base v0（单条线性依赖）**，以及
-> **Chained Read Context v0（readPaths 对齐 pinned base）** 均已实现；
-> **ControlSnapshot/event/resource v0** 已完成。
-> 最终实测（2026-10-27，HEAD `390d61e`）：`npm run build` exit `0`；
-> read-context focused **5/5**（1174.5 ms）、Plan-backed queue core **10/10**
-> （2824.9 ms）、materializer **16/16**（1613.6 ms）、queue CLI **5/5**
-> （718.2 ms）；完整套件 **240/240**（12730.5 ms）。同一 HEAD 新跑一次真实
-> Claude Code + DeepSeek 两 item chain，downstream
+> **Plan-backed Chained Queue Base v0（单条线性依赖）**、
+> **Chained Read Context v0（readPaths 对齐 pinned base）**、
+> **ControlSnapshot/event/resource v0**，以及
+> **Worker Failure Taxonomy / Cost Truth v0** 均已实现。
+> 最终实测（2026-10-27，failure/cost 工作树，代码 HEAD `69f62de`）：
+> `npm run build` exit `0`；failure taxonomy focused **14/14**（85.7 ms）、
+> Claude failure/cost **17/17**（11694.1 ms）、supervisor failure/cost
+> **12/12**（1134.9 ms）、queue control **7/7**（733.3 ms）；combined
+> focused **50/50**（9991.6 ms）；完整套件 **290/290**（14175.8 ms）。
+> 计数在第二次 focused 运行中复现；本地耗时会有波动。
+> 较早 HEAD `390d61e` 的 read-context focused 5/5（1174.5 ms）、Plan-backed
+> queue core 10/10（2824.9 ms）、materializer 16/16（1613.6 ms）、queue CLI
+> 5/5（718.2 ms）、完整套件 240/240（12730.5 ms）保留为历史实测；同一 HEAD
+> 新跑一次真实 Claude Code + DeepSeek 两 item chain，downstream
 > `readPaths: ["foundation.txt"]`，**13.953 s 完成 2/2**；在 foundation
 > `integrationHead` 上实时捕获 downstream worktree：`foundation.txt` 存在、
 > `upper.txt` 尚不存在；worker 随后从该 worktree 读取 `foundation.txt` 再写
@@ -23,16 +29,17 @@
 > 供人类审查的 Plan；Plan-backed queue 只对**已批准** Plan 做确定性编译，
 > **不会自动生成或批准 Plan**。
 >
-> 下一步：在 **Plan-backed chain 语义被实测证明并接受后**，对 **受监督的
-> 前台长时运行控制器/daemon 做出决策**。本轮不实现 daemon，也不声称 24
-> 小时无人值守。
+> 当时的下一步：在 **Plan-backed chain 语义被实测证明并接受后**，对
+> **受监督的前台长时运行控制器/daemon 做出决策**；该顺序已被下一条后续记录
+> 调整。本轮不实现 daemon，也不声称 24 小时无人值守。
 >
 > **2026-10-27 后续记录：** 自举运行暴露了 progress/status 聚合、provider
 > 失败分类、预算可见性和 attempts 变更审计缺口。执行顺序调整为
-> **`queue status` 观测底座 → failure taxonomy/cost → CLI + 模型执行组合路由
-> → 并行 Supervisor/queue admission → Control API + DSH 薄 cockpit →
-> DesignRevision/EvidenceBundle → foreground controller → bounded soak →
-> daemon 决策**。controller 被有意后置，避免自动化尚未可信的验收。
+> **`queue status` 观测底座 → failure taxonomy/cost（已完成）→ CLI + 模型
+> 执行组合路由 → 并行 Supervisor/queue admission → Control API + DSH 薄
+> cockpit → DesignRevision/EvidenceBundle → foreground controller →
+> bounded soak → daemon 决策**。controller 被有意后置，避免自动化尚未可信
+> 的验收。
 > 产品定位、并行动机和替换入口见
 > [PRODUCT_STRATEGY_V2.md](PRODUCT_STRATEGY_V2.md)，运行缺口见
 > [NEXT_STEP_CONTROLLER.md](NEXT_STEP_CONTROLLER.md)。
@@ -44,6 +51,15 @@
 > 并发或价格。本轮 `npm run build` exit 0，queue-control focused 5/5，
 > 完整套件连续三次 245/245（12714.5 / 12842.7 / 12601.6 ms）。证据见
 > [evidence/CONTROL_SNAPSHOT.md](evidence/CONTROL_SNAPSHOT.md)。
+>
+> **2026-10-27 failure/cost v0 已完成：** 十类 failure taxonomy、四态
+> `CostTruth`、RunManifest task checkpoint、`supervisor status` /
+> `queue status` 观察面、queue `run.blocked` bounded 字段与 fail-closed
+> 解析均已实现。Claude Code `total_cost_usd` 明确为 non-authoritative
+> `cli-estimated`；`guardBudgetUsd` 是保护上限而不是花费；缺失成本保持
+> `unavailable`/`missing`，绝不写成 0；没有自动重试、路由、准入或并行派发。
+> 下一步是 CLI + 模型执行组合路由。证据见
+> [evidence/FAILURE_COST_TRUTH.md](evidence/FAILURE_COST_TRUTH.md)。
 >
 > 当前已完成能力仍不包含 daemon/后台服务、跨主机回收、浏览器证据、SQLite、
 > 有界并行准入和多父 integration/merge queue；其中 **CLI + 模型路由、有界
@@ -186,7 +202,7 @@
     文件同样拒绝；不从 control checkout 复制任何文件。
   - 实测：read-context focused 5/5、Plan-backed queue core 10/10（含
     downstream 显式 readPaths 的本地 Supervisor chain）、materializer 16/16、
-    queue CLI 5/5、full 240/240、build exit 0；一次真实 Claude Code +
+    queue CLI 5/5、当时 full 240/240、build exit 0；一次真实 Claude Code +
     DeepSeek 2-item chain（downstream `readPaths: ["foundation.txt"]`）
     13.953 s 完成 2/2，实时捕获的 downstream worktree HEAD 为 upstream
     `integrationHead`，含 `foundation.txt`、无 `upper.txt`；worker 先在
@@ -208,10 +224,57 @@
   - provider 容量、quota、balance、pricing 按未解析的 worker/model binding
     保持 `null/unknown`；公开的 provider 并发数字不进入默认容量。未知绑定
     后续准入先走单并发探针，再依据 provider 反馈和实测窗口增长。
-  - 实测：queue-control focused 5/5、focused 20 次压力循环通过、full
+  - 实测：queue-control focused 5/5、focused 20 次压力循环通过、当时 full
     连续三次 245/245（12714.5 / 12842.7 / 12601.6 ms）、build exit 0；
-    证据见
+    本轮 full 290/290；证据见
     [docs/evidence/CONTROL_SNAPSHOT.md](evidence/CONTROL_SNAPSHOT.md)。
+- **Worker Failure Taxonomy / Cost Truth v0**
+  - `src/failures.ts` 是唯一来源。十类 `FailureCategory` 精确为
+    `budget_exhausted`、`timeout`、`provider_transient`、`provider_auth`、
+    `provider_protocol`、`worker_process_exit`、`verifier_rejected`、
+    `policy_blocked`、`resource_exhausted`、`unknown`；八个 stage 为
+    `contract`、`preflight`、`spawn`、`provider`、`worker`、`verifier`、
+    `policy`、`unknown`。优先级为 timeout > budget > auth > resource >
+    transient > protocol > worker process exit > verifier > policy > unknown。
+    worker 进程失败不会因为 verifier 随后也失败而被改写成
+    `verifier_rejected`。
+  - `FailureRecord` 只包含 version、category、stage、可选 code、≤400 字符
+    message、observedAt 和 advisory `retryableHint`。文本只扫描尾部
+    8,000 字符并折叠、脱敏、截断；不保留 raw payload、prompt、文件内容、
+    认证头或完整 transcript，未知字段不会离开构造函数。`retryableHint`
+    只是提示，不能触发重试。
+  - `CostTruth` 只有四态：`provider-reported`、`cli-estimated`、
+    `usage-only`、`unavailable`；source 为 `provider`/`cli`/`none`。
+    每条记录保留 per-session `observations`、token usage、显式 `missing`
+    reasons 和 `guardBudgetUsd`。
+  - Claude Code `total_cost_usd` 记为 `cli-estimated` 且
+    `authoritative: false`，不是 DeepSeek 账单、余额或额度；token usage
+    独立保留；CLI 显式输出的 0 保留为 0 但仍非权威；缺失或畸形成本为
+    `unavailable`/`null`，绝不写成 0。顶层 usage 缺失时聚合
+    `modelUsage`。重试和 repair 的每个 provider session 都进入
+    observation；已知金额只在同币种内合并为非权威 subtotal，未知项保留在
+    `missing`，混合币种绝不相加。
+  - Codex 只在能检测到时返回 `worker_process_exit`/`timeout`，成本为
+    `unavailable`。adapter 原有的有限 transient retry 保持不变（默认 2
+    次、指数退避、仅针对连接重置/超时/429/5xx）；taxonomy 不增加也不
+    移除重试，重试耗尽后返回最终结构化失败。
+  - RunManifest task 增加可选 `failure`/`cost`：accepted 只保留 cost；
+    rejected 同时保留 failure 和 cost；dependency-blocked 为
+    `policy_blocked`/`policy`/`dependency_blocked` 且不伪造 cost；新
+    attempt 清除上一 attempt 的 observation。旧 manifest/ledger/queue
+    记录仍可读，malformed 字段 fail closed 并给出明确 parse error。
+  - queue 的 `run.blocked` journal 只携带 bounded
+    `failureCategory`/`failureStage`/`failureCode`/`costState`；
+    RunManifest 仍是 task authority，dispatched run 的 failure 不复制到
+    QueueItem。`supervisor status` 与 `queue status` 只读展示 failure/cost，
+    金额只在观测到时显示，非权威 subtotal 永不冒充 run-level 权威成本。
+  - 没有自动 retry、路由、准入或并行派发：queue 需要显式 `queue retry`，
+    Supervisor 需要显式 `resume --retry-rejected`；controller/daemon 仍
+    未实现。
+  - 实测：failure taxonomy focused 14/14、Claude failure/cost 17/17、
+    supervisor failure/cost 12/12、queue control 7/7、combined 50/50；
+    完整套件 290/290；`npm run build` exit 0。证据见
+    [docs/evidence/FAILURE_COST_TRUTH.md](evidence/FAILURE_COST_TRUTH.md)。
 - **PortAllocator**
   - 默认端口范围 `19000-19999`，可用 `CLIYARD_PORT_RANGE="start-end"` 覆盖；
   - `.cliyard/runtime/port-leases.json` + `.cliyard/runtime/port-leases.lock`；
@@ -340,6 +403,13 @@
   worktree、run/branch/manifest 都会累积，需手工清理；
 - worker event 的 retention/rotation 或长期查询；事件只是 append-only 观察
   信息，不是 run authority；
+- **failure/cost 的边界**：`cli-estimated` 是 Claude Code 的
+  `total_cost_usd`，不是 DeepSeek 账单、余额或额度；当前内置 adapter 不产生
+  `provider-reported`，也没有 run-level 权威总成本。`guardBudgetUsd` 是配置的
+  保护上限，不是实际花费；逐 session/task 相加不是预计账单。分类是基于进程
+  信号和有限文本的启发式，未知会落到 `unknown`；缺失成本保持
+  `unavailable`/`missing`，绝不写成 0。失败/成本只是观察信息，不授权自动
+  retry、路由或准入；
 - 跨主机 runtime 回收或远程 kill；外来 host 的 runtime 只会 `skip`，主机名变化
   也会使旧 manifest 看起来属于外来 host；
 - 第三方 dead owner 租约的自动回收（按 hardening 规则只能 `needs_human` 并保留
@@ -407,7 +477,7 @@ failure drill 的设计验收对照
 | 4 | cleanup release 失败拒绝、`cleanup: "failed"`、绝不 accepted | 已实现 | `RuntimeCleanupError`；failureReason 含注入故障；`cleanup: "failed"` |
 | 5 | 每个场景服务端口事后可绑定 | 已实现 | 22800 / 22830 / 22860 均 `portFree=true`；事后 `lsof` 无监听 |
 | 6 | 机器可读报告 + 每场景证据 | 已实现 | `runtime-failure-drills.json`、`child.log`、`child-result.json`、manifest/log/lease |
-| 7 | focused drill、full suite 与 build 通过 | 已实现 | drill 文件 3/3、当时 full suite 177/177、build pass；本轮完整套件 240/240 |
+| 7 | focused drill、full suite 与 build 通过 | 已实现 | drill 文件 3/3、当时 full suite 177/177、build pass；该切片当时完整套件 240/240；本轮 full 290/290 |
 | 8 | 文档只记录实测结果、不扩大能力 | 已实现 | [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md) 与本轮文档更新 |
 
 本轮 attempt continuity / worker progress / drill abnormal recovery 的设计验收
@@ -425,7 +495,7 @@ failure drill 的设计验收对照
 | 8 | `status` 读取 progress 而不改变 run state | 已实现 | live status 前后 manifest sha256 相同；focused test 断言 manifest/event 字节不变 |
 | 9 | 超时 drill child 的已证明 service 在 child 退出后被回收 | 已实现 | child SIGKILL(6009 ms)；executor scanned 1 / reaped 1 / needs_human 0 |
 | 10 | drill report 保留异常回收并证明端口 free | 已实现 | `abnormalRecovery` 持久化；manifest `cleanup=complete`+`reaped`；lease 0；24860 free |
-| 11 | focused tests、full suite、TypeScript build 通过 | 已实现 | 该切片 13/13；当时完整套件 177/177、build pass；新增 Task Architect 后当时 191/191；本轮 240/240 |
+| 11 | focused tests、full suite、TypeScript build 通过 | 已实现 | 该切片 13/13；当时完整套件 177/177、build pass；新增 Task Architect 后当时 191/191；该切片当时 240/240；本轮 290/290 |
 | 12 | 文档只记录实测行为并保留全部非目标 | 已实现 | [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md) 与四份文档更新 |
 
 本轮 Task Architect v0 的设计验收对照
@@ -439,7 +509,7 @@ failure drill 的设计验收对照
 | 4 | invalid JSON/schema/cycles/overlapping writes rejected | 已实现 | 四种错误均 exit 1、stage `validation`、无 artifact；错误文本见 evidence |
 | 5 | never creates contracts/worktrees/runs/integration branches | 已实现 | 最终只有 3 个 plan artifact；HEAD、refs、worktree list 不变；contracts/runs/worktrees/runtime/ledger 均 absent |
 | 6 | JSON summary and human-readable help/output | 已实现 | `--json`、human 输出、`--help` 均实测；另有 focused CLI tests |
-| 7 | existing plan/Supervisor/progress tests remain green | 已实现 | 当时完整套件 191/191；本轮 240/240；`npm run build` 通过 |
+| 7 | existing plan/Supervisor/progress tests remain green | 已实现 | 当时完整套件 191/191；该切片当时 240/240；本轮 290/290；`npm run build` 通过 |
 | 8 | documentation records measured real-worker behavior and limitations | 已实现 | [docs/evidence/TASK_ARCHITECT.md](evidence/TASK_ARCHITECT.md) 与 README/NEXT_ITERATION/SUPERVISOR_V0 更新 |
 | 9 | additional fail-closed guards | 已实现 | 未跟踪/越界 design、非法 plan id、非 git target、planId mismatch、worker 非零退出、design overwrite；preflight 失败均 0 次 worker 调用 |
 | 10 | real Claude Code + DeepSeek smoke | 已实现（单次） | 16 s、exit 0、两任务 Plan、`touchedPaths=[]`；HEAD/status/design hash 不变；cost 未由 CLI 报告，仅记录 $1 budget cap |
@@ -462,7 +532,7 @@ contracts，不自动批准、冻结或改写 contracts，也不写 RunManifest�
 | 7 | stale running item 按 RunManifest 对账 | 已实现（含 fail-closed 窗口） | 真实 SIGKILL：有 run id 时 running→pending→同 run resume→completed；无 run id 时 running→blocked（见限制） |
 | 8 | changed contracts fail closed | 已实现 | 修改/删除后 0 次派发、attempts=0、无 worker log、无 runs 目录 |
 | 9 | queue lock 串行化并回收同主机 stale lock | 已实现 | live lock 下第二次 run 等待 5072 ms 后 exit 1；SIGKILL 后 stale lock 被下一次 run 回收；foreign/invalid 由 focused test 覆盖 |
-| 10 | 既有 Supervisor/continuity/progress/Task Architect/drill 测试保持绿色 | 已实现 | 当时完整套件 205/205；加入 Plan-backed 后当时 236/236；本轮 240/240；`npm run build` 通过 |
+| 10 | 既有 Supervisor/continuity/progress/Task Architect/drill 测试保持绿色 | 已实现 | 当时完整套件 205/205；加入 Plan-backed 后当时 236/236；该切片当时 240/240；本轮 290/290；`npm run build` 通过 |
 
 本轮 Plan-backed chained queue base v0 的设计验收对照
 （[design/plan-backed-chain-v0.md](../design/plan-backed-chain-v0.md)）：
@@ -477,7 +547,7 @@ contracts，不自动批准、冻结或改写 contracts，也不写 RunManifest�
 | 6 | blocked/cancelled/missing/interrupted/ambiguous 上游不合成 base、不派发 | 已实现 | focused 覆盖 blocked/cancelled/missing 队列项与非 completed/ambiguous manifest；无真实 interrupted 上游演练 |
 | 7 | changed approved Plan 在 Supervisor start 前 fail closed | 已实现 | CLI：`dispatched=0`、`attempts=0`、无 runs/materialized/worker events |
 | 8 | 已记录 materialization 在 retry 中 byte-identical；changed Plan 不可替换 | 已实现 | focused retry：bytes/inode 不变、same-run resume；不是真实 provider retry |
-| 9 | 既有 contract-backed 行为与全部旧测试保持绿色 | 已实现 | legacy parsing test + 当时 full suite 236/236；本轮 240/240；`npm run build` 通过 |
+| 9 | 既有 contract-backed 行为与全部旧测试保持绿色 | 已实现 | legacy parsing test + 当时 full suite 236/236；该切片当时 240/240；本轮 290/290；`npm run build` 通过 |
 | 10 | 真实 Claude Code + DeepSeek chain 证明 downstream worktree 与 ancestry | 已实现 | 三次真实 2/2（17.2 s、24.6 s、21.4 s）；第三次 live worktree `51e50a09…` 含 `foundation.txt`，ancestry exit 0 |
 
 本轮 Chained Read Context v0 的设计验收对照
@@ -492,7 +562,7 @@ contracts，不自动批准、冻结或改写 contracts，也不写 RunManifest�
 | 5 | `.` 与缺失可选 `AGENTS.md` 行为不变 | 已实现 | focused test |
 | 6 | 同一 contracts 文档内 task-produced read path 继续通过 | 已实现 | focused test |
 | 7 | Plan-backed 2-item chain 可在 downstream 显式声明 upstream 文件并通过真实 Supervisor + Claude Code + DeepSeek | 已实现 | 真实 chain 2/2、13.953 s、`readPaths: ["foundation.txt"]`、实时 worktree + worker Read event |
-| 8 | 既有 contract-backed 行为与全部旧测试保持绿色 | 已实现 | full 240/240、Plan-backed focused 31/31、`npm run build` exit 0 |
+| 8 | 既有 contract-backed 行为与全部旧测试保持绿色 | 已实现 | 该切片当时 full 240/240、Plan-backed focused 31/31、`npm run build` exit 0 |
 
 未覆盖的能力不会被写成“已实现”：跨主机回收、leader-dead 自动 kill、
 daemon 周期回收、Windows 进程身份、生产或跨仓库端口协调、自动契约冻结/自动
@@ -501,19 +571,23 @@ daemon 周期回收、Windows 进程身份、生产或跨仓库端口协调、�
 
 ## 2. 验证（2026-10-27，本工作树，macOS）
 
-当前套件（包含 chained read context、Plan-backed chain、queue、Task Architect、
-attempt continuity / worker progress 与 failure drill 测试）：
+当前套件（包含 failure/cost、chained read context、Plan-backed chain、queue、
+Task Architect、attempt continuity / worker progress 与 failure drill 测试）：
 
 ```text
 npm run build                                          → exit 0
-focused read-context                                   → 5/5 通过（1174.5 ms）
-focused plan-backed materializer                       → 16/16 通过（1613.6 ms）
-focused plan-backed queue core                         → 10/10 通过（2824.9 ms）
-focused plan-backed queue CLI                          → 5/5 通过（718.2 ms）
-npm test（完整套件）                                   → 240/240 通过（12730.5 ms）
+focused failure taxonomy                               → 14/14 通过（85.7 ms）
+focused Claude failure/cost                            → 17/17 通过（11694.1 ms）
+focused supervisor failure/cost                        → 12/12 通过（1134.9 ms）
+focused queue control snapshot                         → 7/7 通过（733.3 ms）
+focused failure/cost combined                          → 50/50 通过（9991.6 ms）
+npm test（完整套件）                                   → 290/290 通过（14175.8 ms）
 ```
 
-本轮 Chained Read Context v0 的真实 chain（HEAD `390d61e`）：scratch repo
+focused 计数在第二次运行中复现；本地耗时会有波动。290 项比上一
+ControlSnapshot 基线 245/245 多 45 项（14 taxonomy + 17 Claude adapter +
+12 durable supervisor/queue + 2 queue-control）。较早的
+Chained Read Context v0 真实 chain（HEAD `390d61e`）：scratch repo
 `/tmp/cliyard-crc-evidence.j5O3Hs/repo`，foundation plan base `a2b1e74…`，
 upper downstream `readPaths: ["foundation.txt"]`；13.953 s 完成 2/2。
 foundation `integrationHead e5a7af69…` 被 upper materialization/Supervisor
@@ -668,22 +742,18 @@ Worker 验收演练，因此不把它们当作 drill、reaper 或跨主机证据
 已完成的 RuntimeManager v0、Orphan Reaper v0、hardening、failure drills v0、
 attempt continuity / worker progress / drill abnormal recovery v0、Task
 Architect v0、**Foreground Orchestration Queue v0**、
-**Plan-backed Chained Queue Base v0**、**Chained Read Context v0**，以及
-**ControlSnapshot/event/resource v0**
+**Plan-backed Chained Queue Base v0**、**Chained Read Context v0**、
+**ControlSnapshot/event/resource v0**，以及
+**Worker Failure Taxonomy / Cost Truth v0**
 不在下一迭代重复。
-下一具体步骤是先补 failure taxonomy/cost truth，再进入执行路由和有界并行；
+下一具体步骤是 CLI + 模型执行组合路由和有界并行；
 controller/daemon 仍留到路由、准入和证据语义稳定之后。
 
-1. **运行观测已完成，下一步补失败分类与成本真相（P0，未实现）**
-   - 本轮之前，自举运行需要人工拼接 `queue.json`、RunManifest、
-     worker-events、ledger 和 Git refs；`queue status` 已收口这部分；
-   - `queue status` 聚合与 queue-level event journal 已完成；仍缺 bounded
-     provider failure taxonomy、实际/缺失成本表达与可审计的 attempts 变更；
-   - progress/heartbeat/controller state 仍然只是观察信息，不是验收权威。
-2. **CLI + 模型执行组合路由与有界并行派发（P0，未实现）**
+1. **CLI + 模型执行组合路由与有界并行派发（P0，未实现）**
    - 支持三类现实场景：多模型 + 多 CLI、单 CLI + 多模型、单模型 + 多 CLI；
    - 持久化 `ExecutionProfile`、endpoint/账号绑定、路由硬约束、评分依据、
-     fallback、provider-reported/estimated/missing 成本；
+     fallback，以及 `provider-reported`/`cli-estimated`/`usage-only`/
+     `unavailable` 四态成本；缺失成本保持 `missing`，不写成 0；
    - provider 并发、额度、余额和价格必须按执行绑定运行时探测；公开文档数字
      不是当前订阅容量。未知绑定先单并发探针；
    - 将有界并行列为首要用户价值，替代人工维护多个终端/branch；
@@ -693,18 +763,20 @@ controller/daemon 仍留到路由、准入和证据语义稳定之后。
      按序串行”，从而支持同模块子任务既并行又安全串行；
    - Supervisor 当前 repo-global lock / single active-run 模型必须先做独立
      架构 spike，不能直接并发调用现有 `runQueue`。
-3. **Control API、可替换入口与外部 UI（P0/P1，未实现）**
+2. **Control API、可替换入口与外部 UI（P0/P1，未实现）**
    - CLI 与版本化本地 Control API / event stream 是稳定入口；
    - DSH 只做薄 cockpit，优先注册 `dsh-better-sidebar` tab；
    - 后续最小自有 Web UI 复用同一 API，DSH 停止维护不影响控制面；
    - 不自研完整编辑器、终端、diff、Git 或聊天客户端。
-4. **受监督的前台长时控制器（路由/并行/证据之后，未实现）**
+3. **受监督的前台长时控制器（路由/并行/证据之后，未实现）**
    - controller 每轮从磁盘 rehydrate，不依赖 LLM 长上下文；空闲时释放
      queue lock，并等待新批准 item 或显式 retry；
+   - failure taxonomy 已可用，但没有自动 retry；自动 retry 仍需显式
+     attempt policy 和审计记录；
    - 先证明 foreground look-ahead scheduling、controller lock/heartbeat、
      clean shutdown 和 bounded soak，再做 daemon/launchd/systemd 决策；
    - 本轮不把它写成已完成能力，也不声称 24 小时无人值守。
-5. **显式批准的人类门禁保持不变**
+4. **显式批准的人类门禁保持不变**
    - Task Architect 只产出 human-reviewable Plan，不自动冻结契约、不自动
      派发、不 merge、不 push；
    - 路径仍是 review/edit Plan → 既有 plan compiler/freeze → 显式
@@ -712,7 +784,7 @@ controller/daemon 仍留到路由、准入和证据语义稳定之后。
    - queue 只接受显式加入的 frozen contracts 或显式加入的已批准 Plan；
      不自动批准、冻结或创建契约/Plan；
    - Task Architect 和 queue 都不是 contract/run authority。
-6. **queue v0 的顺序限制进入下一阶段改造**
+5. **queue v0 的顺序限制进入下一阶段改造**
    - 当前一次一个 item 是已完成 v0 的事实，不是最终产品约束；
    - 下一阶段新增有界并行准入，但不承诺无限并行；
    - **contract-backed** 依赖仍只决定派发/失败传播，不串联 integration
@@ -896,20 +968,27 @@ Chained Read Context v0（已完成）：
 53. [已完成] worker 在 `13:48:17.176Z` Read `foundation.txt`、在
     `13:48:18.352Z` Write `upper.txt`；最终 branch 含两文件，ancestry
     exit 0；artifact/queue/manifest hash 一致；no-op rerun byte-identical。
-54. [已完成] read-context focused 5/5、Plan-backed focused 31/31、完整套件
-    240/240、`npm run build` exit 0。
+54. [已完成] 该切片 read-context focused 5/5、Plan-backed focused 31/31、
+    当时完整套件 240/240、`npm run build` exit 0。
 55. [已完成] 文档只记录实测行为；PLAN_BACKED_CHAIN 的 readPaths caveat
     已替换为 measured fix 链接，非目标保持不变。
 
-当前缺口（未完成）：
+当前状态与缺口：
 
 56. [已完成] 只读 `queue status` 聚合、queue event journal 与 host/resource
-    snapshot；未知 provider 执行绑定不填并发、额度、余额或价格。queue-control
-    focused 5/5、full 245/245、build 通过；见
-    [evidence/CONTROL_SNAPSHOT.md](evidence/CONTROL_SNAPSHOT.md)。
-57. [未完成] 对 provider 失败做 bounded taxonomy（budget、timeout、transient、
-    auth、protocol、worker exit、verifier rejection、policy block、unknown），
-    保留 machine-readable reason。
+    snapshot；未知 provider 执行绑定不填并发、额度、余额或价格。该切片
+    queue-control focused 5/5、当时 full 245/245、build 通过；本轮 full
+    290/290；见 [evidence/CONTROL_SNAPSHOT.md](evidence/CONTROL_SNAPSHOT.md)。
+57. [已完成] provider failure taxonomy + cost truth v0：十类枚举
+    （budget_exhausted、timeout、provider_transient、provider_auth、
+    provider_protocol、worker_process_exit、verifier_rejected、
+    policy_blocked、resource_exhausted、unknown）、八个 stage、四态
+    `CostTruth`、per-session provenance、显式 `missing`、
+    `guardBudgetUsd`、RunManifest checkpoint、`supervisor status` /
+    `queue status` 观察面与 bounded journal 字段。CLI estimate 非权威，
+    缺失成本不写成 0，无自动 retry。focused 50/50、full 290/290、build
+    exit 0；见
+    [evidence/FAILURE_COST_TRUTH.md](evidence/FAILURE_COST_TRUTH.md)。
 58. [未完成] 增加 audited attempt-policy 操作，禁止依赖手工修改
     `.cliyard/queue.json` 扩大 attempts。
 59. [未完成] 实现 CLI + 模型 `ExecutionProfile` 路由，覆盖多模型/多 CLI 的
@@ -967,7 +1046,7 @@ Chained Read Context v0（已完成）：
             docs/evidence/PLAN_BACKED_CHAIN.md
 14. [已完成] Chained Read Context v0：readPaths 按精确 shared base 验证、
             untracked/optional-AGENTS/task-produced 规则不变；focused 5/5 +
-            Plan-backed 31/31、full 240/240、build exit 0；一次真实
+            Plan-backed 31/31、当时 full 240/240、build exit 0；一次真实
             Claude Code + DeepSeek chain 显式 downstream readPaths 2/2
             （13.953 s），实时 worktree + Read event + ancestry
 15. [已完成] 本轮 read-context 文档更新：README / NEXT_ITERATION /
@@ -975,16 +1054,18 @@ Chained Read Context v0（已完成）：
             docs/evidence/PLAN_BACKED_CHAIN.md /
             docs/evidence/CHAINED_READ_CONTEXT.md
 16. [已完成] ControlSnapshot/event/resource v0：只读 queue status、event
-            journal、未知 provider capacity；focused 5/5、full 245/245、
-            build 通过
-17. 下一步 P0：failure/cost telemetry、CLI + 模型路由、
-            两层并行 Supervisor/queue spike
-18. 然后：共享 hierarchical admission broker → 固定上限并行 v0
+            journal、未知 provider capacity；focused 5/5、当时 full 245/245、
+            build 通过；本轮 full 290/290
+17. [已完成] Worker failure taxonomy + cost truth v0：十类枚举、四态成本、
+            RunManifest checkpoint、status/journal 观察面、无自动 retry；
+            focused 50/50、full 290/290、build exit 0
+18. 下一步 P0：CLI + 模型路由、两层并行 Supervisor/queue spike
+19. 然后：共享 hierarchical admission broker → 固定上限并行 v0
             （warm start 3）→ 实测自适应 ramp/backoff
-19. 再然后：Control API、DSH thin cockpit、最小自有 Web UI
-20. 最后：DesignRevision/EvidenceBundle、look-ahead controller、soak、
+20. 再然后：Control API、DSH thin cockpit、最小自有 Web UI
+21. 最后：DesignRevision/EvidenceBundle、look-ahead controller、soak、
             daemon 决策
-21. 不重复已完成切片；不新增 daemon、跨主机、SQLite、无限并行、自动合入
+22. 不重复已完成切片；不新增 daemon、跨主机、SQLite、无限并行、自动合入
     main、provider 会话续跑、自动契约冻结或 24 小时声明
 ```
 
@@ -992,15 +1073,16 @@ Chained Read Context v0（已完成）：
 
 Supervisor v0（前台、原子 JSON RunManifest、进程级 SIGKILL 恢复）已完成，
 其操作语义与自举手册见 [docs/SUPERVISOR_V0.md](SUPERVISOR_V0.md)。当前完整套件
-包含 chained read context、Plan-backed chain、queue、Task Architect、
-supervisor、attempt continuity/progress、ControlSnapshot 与 runtime/drill
-测试（245/245 通过）。本轮没有引入 daemon 或 SQLite，也没有把 supervisor
-或 queue 的后台化列入计划。attempt reuse 是 worktree 连续性，worker progress 是观察
-信息；Task Architect 只产出 Plan；queue 消费显式加入的 frozen contracts 或
+包含 failure/cost、chained read context、Plan-backed chain、queue、Task
+Architect、supervisor、attempt continuity/progress、ControlSnapshot 与
+runtime/drill 测试（290/290 通过）。本轮没有引入 daemon 或 SQLite，也没有把
+supervisor 或 queue 的后台化列入计划。attempt reuse 是 worktree 连续性，
+worker progress 是观察信息；failure/cost 也是观察信息，不授权自动 retry；
+Task Architect 只产出 Plan；queue 消费显式加入的 frozen contracts 或
 已批准 Plan，但不生成、批准或冻结它们；三者都不改变验收权威。RuntimeManager、
 Orphan Reaper、hardening、failure drills、attempt continuity/progress/异常
 drill 回收、Task Architect、Foreground Orchestration Queue、
-Plan-backed Chained Queue Base、Chained Read Context 与 ControlSnapshot/event
-均已收口；下一阶段先收口 provider failure/cost、CLI + 模型
+Plan-backed Chained Queue Base、Chained Read Context、ControlSnapshot/event
+与 Worker Failure Taxonomy/Cost Truth 均已收口；下一阶段先收口 CLI + 模型
 ExecutionProfile、并行 Supervisor/queue admission 和可替换 Control API；
 DesignRevision/EvidenceBundle 之后才引入 look-ahead controller 与 daemon 决策。

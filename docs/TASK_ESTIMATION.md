@@ -100,6 +100,35 @@ CNY =
 
 而 Claude 本地保护值合计约 **$12.46**。数量级不同，必须分开记录。
 
+### 成本真相四态（v0）
+
+实现只承认四种 `CostTruth` 状态，估算器输出不能替代它们：
+
+| 状态 | 含义 | authoritative |
+|------|------|---------------|
+| `provider-reported` | provider 自己报告了金额 | 仅当金额/币种完整且全部 observation 均为 provider-reported |
+| `cli-estimated` | Claude Code `total_cost_usd` 等 CLI 估算 | 永远 `false`；不是 DeepSeek 账单或余额 |
+| `usage-only` | 只有 token usage，没有金额 | `false`；金额为 `null`，`missing` 含 `cost.amount` |
+| `unavailable` | 金额和 usage 都缺失/畸形 | `false`；绝不写成 0 |
+
+`guardBudgetUsd` 是配置的 `--max-budget-usd` 保护上限，不是花费；把各任务
+guard 相加也不是预计账单。跨 session/repair 的已知 CLI 金额可以合并为
+non-authoritative subtotal，但币种混合时不得相加，未知项必须保留在
+`missing`。当前内置 adapter 不产生 `provider-reported`：Claude 产生
+`cli-estimated`/`usage-only`/`unavailable`，Codex 产生 `unavailable`。
+
+失败分类使用共享的十类枚举：`budget_exhausted`、`timeout`、
+`provider_transient`、`provider_auth`、`provider_protocol`、
+`worker_process_exit`、`verifier_rejected`、`policy_blocked`、
+`resource_exhausted`、`unknown`。预算相关失败记为 `budget_exhausted`，超时为
+`timeout`，provider 限流/5xx 为 `provider_transient`，验证失败为
+`verifier_rejected`，确定性控制面拒绝为 `policy_blocked`。失败记录只保留
+有限、脱敏的最终 provider 文本，不保留原始 payload、prompt、文件内容或认证
+头。dispatched run 的 failure/cost 以 RunManifest task 为权威，queue 只为
+没有 RunManifest 的确定性 pre-dispatch block 保存 item-level failure。
+成本真相和失败分类都只是观察信息，不授权自动重试、路由或准入。实测与边界见
+[docs/evidence/FAILURE_COST_TRUTH.md](evidence/FAILURE_COST_TRUTH.md)。
+
 ## 5. 拆分模板
 
 复杂组件不要写成一个 XL task，按以下边界拆：

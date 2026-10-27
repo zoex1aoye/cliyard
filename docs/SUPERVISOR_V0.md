@@ -4,7 +4,11 @@
 > Attempt continuity and worker progress added 2026-10-27
 > Foreground orchestration queue added 2026-10-27 (separate upstream command)
 > Plan-backed chained queue base added 2026-10-27
+> Failure taxonomy and cost truth added 2026-10-27
 > Design authority: [design/supervisor-v0.md](../design/supervisor-v0.md)
+> Failure/cost design:
+> [design/failure-cost-truth-v0.md](../design/failure-cost-truth-v0.md) and
+> [docs/evidence/FAILURE_COST_TRUTH.md](evidence/FAILURE_COST_TRUTH.md)
 > Attempt continuity / progress design:
 > [design/attempt-continuity-progress-v0.md](../design/attempt-continuity-progress-v0.md)
 > Task Architect (read-only Plan producer):
@@ -40,6 +44,12 @@ dispatch, then enters the unchanged Supervisor path; the queue never writes a
 RunManifest. It is not a daemon and does not change the supervisor's
 task-level authority.
 
+Structured failure and cost observations are checkpointed per task in the
+RunManifest. They are bounded, observational records: they never grant
+acceptance, never drive an automatic retry, and never replace the manifest as
+the task-level authority. A Claude Code `total_cost_usd` value is a
+non-authoritative CLI estimate, not a DeepSeek invoice, bill or balance.
+
 Attempt continuity is **worktree continuity**, not provider-conversation
 resume. Worker progress is **advisory**, not run authority. Neither addition
 turns the supervisor into a service; it is deliberately **not** a service:
@@ -62,6 +72,7 @@ turns the supervisor into a service; it is deliberately **not** a service:
 | Diagnosable interruption | `status` reports a stale owner as `interrupted` without mutating the run. |
 | Attempt continuity | A rejected task checkpoints its exact worktree, branch, base and timestamps and keeps the dirty draft. Default `resume --retry-rejected` reuses it; `--fresh-attempt` discards it for a clean worktree. |
 | Observational progress | Claude stream-json events are appended during dispatch to `.cliyard/worker-events/<runId>/<taskId>.jsonl`; `status` shows the latest event and emits heartbeats while waiting. Missing, malformed or stale events never change run status or acceptance. |
+| Structured failure/cost | A rejected task checkpoints a bounded `failure` record and its aggregated `cost`; an accepted task keeps `cost` and no `failure`. Missing cost is `unavailable`, never zero. These fields are observational and do not authorize retry. |
 
 `status` is read-only and is always safe to run. Of the supervisor commands,
 only `start` and `resume` dispatch workers.
@@ -142,6 +153,19 @@ validates) and `workerProgress` (the latest valid event per task with its age
 and a display-only `stale` flag). Human output prints the latest event and each
 reusable attempt. Reading either does not rewrite the manifest or the event
 log.
+
+Each task's `failure` and `cost` pass through the JSON status unchanged. Human
+output prints one additional line per task that carries either observation:
+
+```text
+task task: rejected failure=budget_exhausted/provider (exit_1) cost=cli-estimated 0.07 USD (observed, non-authoritative) missing=cost.usage
+task missing: rejected cost=unavailable missing=cost.amount,cost.usage
+```
+
+An amount is printed only when observed; unavailable cost is never rendered as
+`$0`. The `(observed, non-authoritative)` label is unconditional, including
+for an explicit zero. `guardBudgetUsd` appears in JSON as the configured guard,
+not spend.
 
 `effectiveStatus` is `interrupted` when the manifest still says `running` but
 the owner PID is gone on the same host. A hard-killed supervisor therefore
@@ -328,6 +352,8 @@ Task state:
 | `attemptBaseCommit` | Full commit sha the attempt worktree was based on. |
 | `attemptStartedAt` | ISO timestamp written before the worker starts. |
 | `attemptRejectedAt` | Present only after a rejection; makes the attempt eligible for reuse. Acceptance removes all five attempt fields. |
+| `failure` | Optional bounded `FailureRecord` for a rejected or policy-blocked task. One of ten categories and eight stages, optional code, ≤400-char message, `observedAt`, advisory `retryableHint`. A dispatched task's failure lives here, never duplicated into the queue item. |
+| `cost` | Optional aggregated `CostTruth` across every worker session of the task, including repairs. State is `provider-reported`, `cli-estimated`, `usage-only` or `unavailable`; `authoritative` is false for every CLI estimate; missing amounts stay `null`. Kept for accepted and rejected tasks, including after worktree cleanup. |
 
 These fields are optional so manifests written before the feature still load.
 Their identity is revalidated at reuse time, not assumed from the manifest.
@@ -566,6 +592,40 @@ Behavior:
 Measured live events, heartbeat output and read-only status:
 [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md).
 
+## 8. Failure taxonomy and cost truth
+
+Every newly rejected dispatched task carries a version-1 `FailureRecord` in its
+RunManifest checkpoint. The ten categories are exactly:
+
+```text
+budget_exhausted | timeout | provider_transient | provider_auth
+provider_protocol | worker_process_exit | verifier_rejected
+policy_blocked | resource_exhausted | unknown
+```
+
+Stages are `contract | preflight | spawn | provider | worker | verifier | policy | unknown`.
+Classification priority is timeout, budget, auth, resource,
+transient, protocol, worker process exit, verifier rejection, policy block,
+unknown. `verifier_rejected` requires a successful worker result; a worker
+process failure is never relabeled as a verifier rejection. `policy_blocked`
+covers deterministic pre-dispatch rejection and dependency-blocked tasks.
+
+`CostTruth` has exactly four states: `provider-reported`, `cli-estimated`,
+`usage-only`, `unavailable`. Every state carries per-session observations,
+token usage when available, explicit `missing` reasons and `guardBudgetUsd`.
+Claude Code `total_cost_usd` is `cli-estimated` with `authoritative: false`; it
+is not a DeepSeek invoice, bill or balance. Token usage is preserved
+independently; an explicit zero stays zero but non-authoritative; missing cost
+is `unavailable`, never zero. `guardBudgetUsd` is the configured guard, not
+spend. Mixed currencies are never combined.
+
+Checkpoint rules: accepted task → `cost` only; rejected task → `failure` and
+`cost`; dependency-blocked/skipped task → `policy_blocked` with stage `policy`
+and no fabricated cost; a new attempt clears the prior attempt's fields. Old
+manifests without these fields remain readable, and a malformed present field
+fails closed with a clear parse error. Failure and cost are observational and
+authorize no automatic retry; `retryableHint` is advisory only.
+
 ## Orchestration queue (foreground v0)
 
 The orchestration queue is a separate upstream command, not a Supervisor mode.
@@ -735,6 +795,18 @@ Claude Code + DeepSeek two-item chains:
 - **A heartbeat is a silence observation.** It indicates the adapter is still
   waiting for provider output; it does not prove provider health or eventual
   success.
+- **Failure/cost are observations, not authority.** `failure` and `cost` do not
+  grant acceptance, authorize retry, or feed routing/admission. `retryableHint`
+  is advisory. There is no automatic retry: the queue needs explicit
+  `queue retry`, and Supervisor needs explicit `resume --retry-rejected`.
+- **CLI cost is not a provider bill.** `cli-estimated` is Claude Code's
+  `total_cost_usd`, not a DeepSeek invoice, balance or quota. No run-level
+  authoritative total is claimed. `guardBudgetUsd` is a configured guard, not
+  spend. Codex cost is `unavailable`; no built-in adapter emits
+  `provider-reported` in this slice.
+- **Classification is bounded heuristics.** It scans process signals and a
+  bounded tail of provider text. Unusual prose can fall to `unknown`; missing
+  cost stays `missing`, never zero.
 - **Worker set is claude or codex.** CodeBuddy is not wired into the
   supervisor path.
 - **Dry-run is not verification.** It uses mock worker/verifier output, skips
@@ -780,20 +852,25 @@ Claude Code + DeepSeek two-item chains:
 
 ## 10. Verification evidence
 
-On 2026-10-27 in this checkout (HEAD `7cbd33d`):
+On 2026-10-27 in this checkout (HEAD `69f62de`):
 
 ```text
-npm run build                                             → pass
-focused plan-backed materializer                          → 16/16 pass (1587.0 ms)
-focused plan-backed queue core                            → 10/10 pass (4196.9 ms)
-focused plan-backed queue CLI                             → 5/5 pass (728.5 ms)
-npm test (full suite)                                     → 236/236 pass (12420.3 ms)
+npm run build                                             → exit 0
+focused failure taxonomy                                  → 14/14 pass (85.7 ms)
+focused Claude failure/cost                               → 17/17 pass (11694.1 ms)
+focused supervisor failure/cost                           → 12/12 pass (1134.9 ms)
+focused queue control snapshot                            → 7/7 pass (733.3 ms)
+focused failure/cost combined                             → 50/50 pass (9991.6 ms)
+npm test (full suite)                                     → 290/290 pass (14175.8 ms)
 ```
 
-These are single local runs, not a repeated-run flake rate or CI claim. The
-236-test run includes the prior attempt/progress/drill, Task Architect,
-supervisor and orchestration-queue suites plus 31 new Plan-backed tests; those
-other groups were not separately re-run this round. Three real Claude Code +
+These are single local runs, not a repeated-run flake rate or CI claim. Counts
+were reproduced in a second focused run; durations vary. The
+290-test run includes the prior attempt/progress/drill, Task Architect,
+supervisor, orchestration-queue, Plan-backed and read-context suites plus 45
+new failure/cost tests (14 taxonomy, 17 Claude adapter, 12 durable
+supervisor/queue, 2 queue-control). The prior 236/236 and 245/245 measurements
+remain historical. Three real Claude Code +
 DeepSeek two-item chains completed 2/2 (17.2 s, 24.6 s and 21.4 s), each with
 the live downstream worktree at the upstream head and correct ancestor proof;
 the documented runs also re-verified final branch contents and the
@@ -1136,9 +1213,10 @@ Plan is an artifact for human review, and the later compiler/freeze and
 Supervisor start remain manual, explicit actions. The **foreground
 orchestration queue** (the Orchestration queue section) is now implemented over those explicit runs;
 it is still explicit-approval, sequential and not a daemon. Before a
-supervised foreground long-run controller, the control plane needs a unified
-read-only queue status projection, queue-level event journal, bounded provider
-failure taxonomy and audited attempt-policy changes. The ordered plan is
+supervised foreground long-run controller, the control plane already has the
+read-only queue status projection, queue-level event journal and bounded
+provider failure/cost taxonomy; it still needs audited attempt-policy changes
+and a defined automatic-retry policy. The ordered plan is
 [NEXT_STEP_CONTROLLER.md](NEXT_STEP_CONTROLLER.md). Daemon/background service,
 cross-host recovery, SQLite manifests, browser evidence, parallel admission
 and automatic `main` merge remain non-goals.
