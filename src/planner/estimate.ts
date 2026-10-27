@@ -29,7 +29,18 @@ export interface PlanEstimate {
   totalGuardBudgetUsd: number;
   totalApiCostCnyOffPeak: NumericRange;
   totalApiCostCnyPeak: NumericRange;
+  pricingReference: PricingReference;
   notes: string[];
+}
+
+export interface PricingReference {
+  state: "public-reference";
+  provider: "deepseek";
+  model: "deepseek-flash";
+  currency: "CNY";
+  appliesToCurrentBinding: false;
+  balanceIncluded: false;
+  observedAt: null;
 }
 
 const STATE_TERMS =
@@ -46,10 +57,20 @@ export function estimatePlan(raw: unknown): PlanEstimate {
       tasks.map((task) => task.apiCostCnyOffPeak),
     ),
     totalApiCostCnyPeak: sumRanges(tasks.map((task) => task.apiCostCnyPeak)),
+    pricingReference: {
+      state: "public-reference",
+      provider: "deepseek",
+      model: "deepseek-flash",
+      currency: "CNY",
+      appliesToCurrentBinding: false,
+      balanceIncluded: false,
+      observedAt: null,
+    },
     notes: [
       "Heuristic ranges, not a quote.",
       "guardBudgetUsd is the local Claude --max-budget-usd guard and is deliberately conservative.",
-      "DeepSeek API cost uses deepseek-flash public prices: off-peak is half of peak.",
+      "apiCostCny* is a reference range using historical deepseek-flash public prices; it is not current subscription pricing, balance or an invoice.",
+      "Provider pricing, quota and balance must be observed per endpoint/account/model execution binding before autonomous budget admission.",
       "Ranges are calibrated from the first WinUI 3 Key Mind run and should be replaced by empirical history per task type.",
     ],
   };

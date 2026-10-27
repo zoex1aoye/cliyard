@@ -47,6 +47,7 @@ import {
 } from "../workspace/worktree.js";
 import { findCycle, readyIds, type DagNode } from "./dag.js";
 import { loadContractsInput } from "./mock-batch.js";
+import { tryAppendQueueEvent } from "../orchestration/event-journal.js";
 
 export interface CodexBatchOptions {
   contractsPath: string;
@@ -159,6 +160,23 @@ export function appendWorkerProgressEvent(
       `${JSON.stringify(bounded)}\n`,
       "utf8",
     );
+    if (
+      bounded.type === "session.start" ||
+      bounded.type === "result" ||
+      bounded.type === "error"
+    ) {
+      tryAppendQueueEvent(repoRoot, {
+        type:
+          bounded.type === "session.start"
+            ? "provider.session.started"
+            : "provider.session.ended",
+        at: bounded.at,
+        runId,
+        taskId: bounded.taskId,
+        sessionId: bounded.sessionId,
+        status: bounded.type,
+      });
+    }
   } catch {
     /* progress is best-effort; never fail the task */
   }

@@ -8,8 +8,8 @@ Usage:
   cliyard estimate-plan <plan.json|->
 
 Ranges are planning aids, not invoices. guardBudgetUsd is a conservative
-Claude Code local budget, while apiCostCny* follows deepseek-flash public
-token pricing.
+Claude Code local budget. apiCostCny* is a historical deepseek-flash public
+price reference; it does not describe the current account's price or balance.
 `);
   process.exit(1);
 }

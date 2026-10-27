@@ -390,7 +390,7 @@ async function statusCommand(
   return 0;
 }
 
-async function buildStatus(
+export async function buildStatus(
   repoRoot: string,
   inspection: RunInspection,
   lock: SupervisorLockInspection,

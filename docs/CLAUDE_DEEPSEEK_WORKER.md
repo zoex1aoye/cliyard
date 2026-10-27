@@ -100,16 +100,16 @@ npm run claude-batch -- \
 `CLIYARD_CLAUDE_MAX_BUDGET_USD` 覆盖。生产 Worker 应使用更低单次预算，
 并通过 repair/task 规则扩大，不应无限重试。
 
-DeepSeek 官方文档列出的账号并发上限为：
+较早的 DeepSeek 文档快照列出过 `deepseek-flash: 2500`、
+`deepseek-v4-pro: 500`。这些数字是历史参考，不是当前订阅的可用容量，
+也不会进入 cliyard 的默认并发。账号、endpoint、订阅层级、余额和区域都
+可能改变限制，未来也可能出现文档未给出数字的 provider。
 
-```text
-deepseek-flash: 2500
-deepseek-v4-pro: 500
-```
-
-因此 `CLIYARD_CLAUDE_MAX_CONCURRENT` 默认 3 是本机成本/CPU 保护，不是
-DeepSeek 的模型额度。收到 429 时才应降低并发；连接重置、超时和 5xx 由
-adapter 做有限指数退避重试。
+`CLIYARD_CLAUDE_MAX_CONCURRENT` 默认 3 只是本机全局 warm start。每个未知
+执行绑定先使用单并发探针；调度器必须根据 provider 返回的额度/限流信息、
+429、`Retry-After` 和实测成功窗口学习安全在途数。余额、价格和额度无法
+读取时记录 `unknown`，不能当成无限或免费。连接重置、超时和 5xx 由
+adapter 做有限指数退避重试，不能直接证明并发过高。
 
 ## 5. Plan / DSH
 

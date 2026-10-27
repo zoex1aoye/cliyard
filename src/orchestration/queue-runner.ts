@@ -43,6 +43,7 @@ import {
   type QueueCounts,
   type QueuePlanMaterialization,
 } from "./queue-store.js";
+import { tryAppendQueueEvent } from "./event-journal.js";
 
 export interface QueueSupervisorRequest {
   repoRoot: string;
@@ -286,7 +287,18 @@ export async function runQueue(
     async () => {
       const document = loadQueue(repoRoot);
       const reconciled = reconcileRunningItems(repoRoot, document);
-      if (reconciled.length > 0) saveQueue(repoRoot, document);
+      if (reconciled.length > 0) {
+        saveQueue(repoRoot, document);
+        for (const record of reconciled) {
+          tryAppendQueueEvent(repoRoot, {
+            type: "queue.item.reconciled",
+            itemId: record.id,
+            ...(record.runId !== undefined ? { runId: record.runId } : {}),
+            status: record.to,
+            ...(record.reason !== undefined ? { reason: record.reason } : {}),
+          });
+        }
+      }
 
       const propagated: QueueBlockRecord[] = [];
       if (continueOnBlocked) {
@@ -294,6 +306,7 @@ export async function runQueue(
         if (newlyBlocked.length > 0) {
           propagated.push(...newlyBlocked);
           saveQueue(repoRoot, document);
+          journalPropagatedBlocks(repoRoot, newlyBlocked);
         }
       }
 
@@ -359,6 +372,16 @@ export async function runQueue(
         if (blockedReason) {
           blockItem(document, candidate, blockedReason);
           saveQueue(repoRoot, document);
+          tryAppendQueueEvent(repoRoot, {
+            type: "run.blocked",
+            itemId: candidate.id,
+            ...(candidate.lastRunId !== undefined
+              ? { runId: candidate.lastRunId }
+              : {}),
+            attempt: candidate.attempts,
+            status: candidate.status,
+            reason: blockedReason,
+          });
           log(`blocked ${candidate.id}: ${blockedReason}`);
           if (!continueOnBlocked) {
             stopped = "blocked";
@@ -409,6 +432,7 @@ export async function runQueue(
           if (newlyBlocked.length > 0) {
             propagated.push(...newlyBlocked);
             saveQueue(repoRoot, document);
+            journalPropagatedBlocks(repoRoot, newlyBlocked);
           }
         }
       }
@@ -492,6 +516,23 @@ async function dispatchItem(
   item.updatedAt = startedAt;
   document.updatedAt = startedAt;
   saveQueue(repoRoot, document);
+  tryAppendQueueEvent(repoRoot, {
+    type: "attempt.started",
+    at: startedAt,
+    itemId: item.id,
+    ...(resumeRunId !== undefined ? { runId: resumeRunId } : {}),
+    attempt: item.attempts,
+    action,
+    status: item.status,
+  });
+  tryAppendQueueEvent(repoRoot, {
+    type: action === "resume" ? "run.resumed" : "run.started",
+    at: startedAt,
+    itemId: item.id,
+    ...(resumeRunId !== undefined ? { runId: resumeRunId } : {}),
+    attempt: item.attempts,
+    action,
+  });
 
   const snapshot: QueueItem = {
     ...item,
@@ -549,6 +590,16 @@ async function dispatchItem(
   item.updatedAt = finishedAt;
   document.updatedAt = finishedAt;
   saveQueue(repoRoot, document);
+  tryAppendQueueEvent(repoRoot, {
+    type: completed ? "run.completed" : "run.blocked",
+    at: finishedAt,
+    itemId: item.id,
+    ...(runId !== undefined ? { runId } : {}),
+    attempt: item.attempts,
+    action,
+    status: item.status,
+    ...(item.reason !== undefined ? { reason: item.reason } : {}),
+  });
 
   return {
     id: item.id,
@@ -598,6 +649,19 @@ function blockItem(
   item.nextAction = item.lastRunId ? "resume" : "start";
   item.updatedAt = at;
   document.updatedAt = at;
+}
+
+function journalPropagatedBlocks(
+  repoRoot: string,
+  records: QueueBlockRecord[],
+): void {
+  for (const record of records) {
+    tryAppendQueueEvent(repoRoot, {
+      type: "run.blocked",
+      itemId: record.id,
+      reason: record.reason,
+    });
+  }
 }
 
 /** Mark pending items whose dependency is blocked/cancelled, transitively. */
@@ -692,6 +756,16 @@ function preparePlanDispatch(
     else item.materialization = previous;
     return `plan materialization failed: ${errorMessage(error)}`;
   }
+  tryAppendQueueEvent(repoRoot, {
+    type: "plan.materialized",
+    at: materialization.materializedAt,
+    itemId: item.id,
+    action: "materialize",
+    status: "pending",
+    reason:
+      `base ${materialization.baseCommit}; ` +
+      `contracts ${materialization.contractsHash}`,
+  });
   log(`materialized ${item.id}: ${planLineage(item)}`);
   return undefined;
 }

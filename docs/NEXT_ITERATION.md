@@ -7,7 +7,8 @@
 > drill abnormal recovery v0**、**Task Architect v0（只读 Plan 生产者）**、
 > **Foreground Orchestration Queue v0（显式批准、前台队列）**、
 > **Plan-backed Chained Queue Base v0（单条线性依赖）**，以及
-> **Chained Read Context v0（readPaths 对齐 pinned base）** 均已实现。
+> **Chained Read Context v0（readPaths 对齐 pinned base）** 均已实现；
+> **ControlSnapshot/event/resource v0** 已完成。
 > 最终实测（2026-10-27，HEAD `390d61e`）：`npm run build` exit `0`；
 > read-context focused **5/5**（1174.5 ms）、Plan-backed queue core **10/10**
 > （2824.9 ms）、materializer **16/16**（1613.6 ms）、queue CLI **5/5**
@@ -35,6 +36,14 @@
 > 产品定位、并行动机和替换入口见
 > [PRODUCT_STRATEGY_V2.md](PRODUCT_STRATEGY_V2.md)，运行缺口见
 > [NEXT_STEP_CONTROLLER.md](NEXT_STEP_CONTROLLER.md)。
+>
+> **2026-10-27 ControlSnapshot v0 已完成：** `queue status` 现在只读拼合
+> queue、Plan/materialization、RunManifest/task、worker progress、lock 与
+> 资源快照；queue 生命周期写入 bounded event journal。未知 provider 执行
+> 绑定的 capacity/quota/balance/pricing 保持 `null/unknown`，不继承公开
+> 并发或价格。本轮 `npm run build` exit 0，queue-control focused 5/5，
+> 完整套件连续三次 245/245（12714.5 / 12842.7 / 12601.6 ms）。证据见
+> [evidence/CONTROL_SNAPSHOT.md](evidence/CONTROL_SNAPSHOT.md)。
 >
 > 当前已完成能力仍不包含 daemon/后台服务、跨主机回收、浏览器证据、SQLite、
 > 有界并行准入和多父 integration/merge queue；其中 **CLI + 模型路由、有界
@@ -187,6 +196,22 @@
   - 单次本机运行，不是 CI/flake/成本结论；不新增 daemon、并行、多父、
     跨主机或 SQLite。证据见
     [docs/evidence/CHAINED_READ_CONTEXT.md](evidence/CHAINED_READ_CONTEXT.md)。
+- **ControlSnapshot / event journal / resource snapshot v0**
+  - `queue status --repo <path> [--json]` 只读拼合 queue item、Plan/
+    materialization、RunManifest/task、worker progress、queue/supervisor
+    lock、decision hint 与 host resource sample；不回收 lock、不改
+    manifest、不写 journal、不改变验收。
+  - queue add/retry/cancel/reconcile、Plan materialization、attempt/run
+    start、provider session start/end、completed/blocked 追加到
+    `.cliyard/queue-events/events.jsonl`；字段有界，写失败不反向影响已
+    持久化的 queue mutation。
+  - provider 容量、quota、balance、pricing 按未解析的 worker/model binding
+    保持 `null/unknown`；公开的 provider 并发数字不进入默认容量。未知绑定
+    后续准入先走单并发探针，再依据 provider 反馈和实测窗口增长。
+  - 实测：queue-control focused 5/5、focused 20 次压力循环通过、full
+    连续三次 245/245（12714.5 / 12842.7 / 12601.6 ms）、build exit 0；
+    证据见
+    [docs/evidence/CONTROL_SNAPSHOT.md](evidence/CONTROL_SNAPSHOT.md)。
 - **PortAllocator**
   - 默认端口范围 `19000-19999`，可用 `CLIYARD_PORT_RANGE="start-end"` 覆盖；
   - `.cliyard/runtime/port-leases.json` + `.cliyard/runtime/port-leases.lock`；
@@ -643,20 +668,24 @@ Worker 验收演练，因此不把它们当作 drill、reaper 或跨主机证据
 已完成的 RuntimeManager v0、Orphan Reaper v0、hardening、failure drills v0、
 attempt continuity / worker progress / drill abnormal recovery v0、Task
 Architect v0、**Foreground Orchestration Queue v0**、
-**Plan-backed Chained Queue Base v0**，以及 **Chained Read Context v0**
+**Plan-backed Chained Queue Base v0**、**Chained Read Context v0**，以及
+**ControlSnapshot/event/resource v0**
 不在下一迭代重复。
-下一具体步骤是在 **Plan-backed chain 语义被实测证明并接受后**，对
-**受监督的前台长时运行控制器/daemon 做出决策**：
+下一具体步骤是先补 failure taxonomy/cost truth，再进入执行路由和有界并行；
+controller/daemon 仍留到路由、准入和证据语义稳定之后。
 
-1. **先补运行观测与失败分类（下一步 P0，未实现）**
-   - 自举运行需要人工拼接 `queue.json`、RunManifest、worker-events、ledger
-     和 Git refs，才能判断当前 item、task、worker session 和失败阶段；
-   - 因此先实现只读 `queue status` 聚合、queue-level event journal、bounded
-     provider failure taxonomy 与可审计的 attempts 变更；
+1. **运行观测已完成，下一步补失败分类与成本真相（P0，未实现）**
+   - 本轮之前，自举运行需要人工拼接 `queue.json`、RunManifest、
+     worker-events、ledger 和 Git refs；`queue status` 已收口这部分；
+   - `queue status` 聚合与 queue-level event journal 已完成；仍缺 bounded
+     provider failure taxonomy、实际/缺失成本表达与可审计的 attempts 变更；
    - progress/heartbeat/controller state 仍然只是观察信息，不是验收权威。
 2. **CLI + 模型执行组合路由与有界并行派发（P0，未实现）**
    - 支持三类现实场景：多模型 + 多 CLI、单 CLI + 多模型、单模型 + 多 CLI；
-   - 持久化 `ExecutionProfile`、路由硬约束、评分依据、fallback 和实际成本；
+   - 持久化 `ExecutionProfile`、endpoint/账号绑定、路由硬约束、评分依据、
+     fallback、provider-reported/estimated/missing 成本；
+   - provider 并发、额度、余额和价格必须按执行绑定运行时探测；公开文档数字
+     不是当前订阅容量。未知绑定先单并发探针；
    - 将有界并行列为首要用户价值，替代人工维护多个终端/branch；
    - 并行前检查独立依赖、非重叠 write scope、provider/model 并发、runtime
      slot 和端口 lease；依赖任务仍按上游 integrationHead 串行；
@@ -872,10 +901,12 @@ Chained Read Context v0（已完成）：
 55. [已完成] 文档只记录实测行为；PLAN_BACKED_CHAIN 的 readPaths caveat
     已替换为 measured fix 链接，非目标保持不变。
 
-下一缺口（未完成）：
+当前缺口（未完成）：
 
-56. [未完成] 先实现只读 `queue status` 聚合与 queue event journal，避免继续
-    人工拼接 queue、RunManifest、worker events、ledger 和 Git refs。
+56. [已完成] 只读 `queue status` 聚合、queue event journal 与 host/resource
+    snapshot；未知 provider 执行绑定不填并发、额度、余额或价格。queue-control
+    focused 5/5、full 245/245、build 通过；见
+    [evidence/CONTROL_SNAPSHOT.md](evidence/CONTROL_SNAPSHOT.md)。
 57. [未完成] 对 provider 失败做 bounded taxonomy（budget、timeout、transient、
     auth、protocol、worker exit、verifier rejection、policy block、unknown），
     保留 machine-readable reason。
@@ -884,9 +915,10 @@ Chained Read Context v0（已完成）：
 59. [未完成] 实现 CLI + 模型 `ExecutionProfile` 路由，覆盖多模型/多 CLI 的
     三种真实部署场景。
 60. [未完成] 建立共享 hierarchical admission broker：结合 CPU/RAM、runtime/
-    port/browser、provider/model 并发和预算动态选择并行数。`3` 只作为
-    warm start；通过受控 calibration 调整 hard max，429、内存压力、swap
-    或 OOM 时立即降并发。设计见
+    port/browser、provider/model 运行时观测和预算动态选择并行数。`3` 只作为
+    scheduler warm start，不是 provider permit；未知绑定先单并发探针，
+    通过受控 calibration 调整 hard max，429、内存压力、swap 或 OOM 时立即
+    降并发。设计见
     [dynamic-parallel-admission-v0.md](../design/dynamic-parallel-admission-v0.md)。
 61. [未完成] 完成并行 Supervisor/queue 架构 spike，再基于共享 broker 实现
     有界并行派发：独立 branch/worktree/run/evidence、资源准入和分别恢复；
@@ -942,14 +974,17 @@ Chained Read Context v0（已完成）：
             design/chained-read-context-v0.md /
             docs/evidence/PLAN_BACKED_CHAIN.md /
             docs/evidence/CHAINED_READ_CONTEXT.md
-16. 下一步 P0：ControlSnapshot/event、failure/cost/resource telemetry、
-            CLI + 模型路由、两层并行 Supervisor/queue spike
-17. 然后：共享 hierarchical admission broker → 固定上限并行 v0
+16. [已完成] ControlSnapshot/event/resource v0：只读 queue status、event
+            journal、未知 provider capacity；focused 5/5、full 245/245、
+            build 通过
+17. 下一步 P0：failure/cost telemetry、CLI + 模型路由、
+            两层并行 Supervisor/queue spike
+18. 然后：共享 hierarchical admission broker → 固定上限并行 v0
             （warm start 3）→ 实测自适应 ramp/backoff
-18. 再然后：Control API、DSH thin cockpit、最小自有 Web UI
-19. 最后：DesignRevision/EvidenceBundle、look-ahead controller、soak、
+19. 再然后：Control API、DSH thin cockpit、最小自有 Web UI
+20. 最后：DesignRevision/EvidenceBundle、look-ahead controller、soak、
             daemon 决策
-20. 不重复已完成切片；不新增 daemon、跨主机、SQLite、无限并行、自动合入
+21. 不重复已完成切片；不新增 daemon、跨主机、SQLite、无限并行、自动合入
     main、provider 会话续跑、自动契约冻结或 24 小时声明
 ```
 
@@ -958,14 +993,14 @@ Chained Read Context v0（已完成）：
 Supervisor v0（前台、原子 JSON RunManifest、进程级 SIGKILL 恢复）已完成，
 其操作语义与自举手册见 [docs/SUPERVISOR_V0.md](SUPERVISOR_V0.md)。当前完整套件
 包含 chained read context、Plan-backed chain、queue、Task Architect、
-supervisor、attempt continuity/progress 与 runtime/drill 测试（240/240
-通过）。本轮没有引入 daemon 或 SQLite，也没有把 supervisor 或 queue 的
-后台化列入计划。attempt reuse 是 worktree 连续性，worker progress 是观察
+supervisor、attempt continuity/progress、ControlSnapshot 与 runtime/drill
+测试（245/245 通过）。本轮没有引入 daemon 或 SQLite，也没有把 supervisor
+或 queue 的后台化列入计划。attempt reuse 是 worktree 连续性，worker progress 是观察
 信息；Task Architect 只产出 Plan；queue 消费显式加入的 frozen contracts 或
 已批准 Plan，但不生成、批准或冻结它们；三者都不改变验收权威。RuntimeManager、
 Orphan Reaper、hardening、failure drills、attempt continuity/progress/异常
 drill 回收、Task Architect、Foreground Orchestration Queue、
-Plan-backed Chained Queue Base 与 Chained Read Context 均已收口；
-下一阶段先收口 ControlSnapshot/event、provider failure/cost、CLI + 模型
+Plan-backed Chained Queue Base、Chained Read Context 与 ControlSnapshot/event
+均已收口；下一阶段先收口 provider failure/cost、CLI + 模型
 ExecutionProfile、并行 Supervisor/queue admission 和可替换 Control API；
 DesignRevision/EvidenceBundle 之后才引入 look-ahead controller 与 daemon 决策。

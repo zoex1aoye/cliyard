@@ -24,6 +24,12 @@ import {
   type QueueRunSummary,
   type QueueSupervisorRunner,
 } from "./queue-runner.js";
+import {
+  buildControlSnapshot,
+  latestWorkerProgress,
+  type ControlItemSnapshot,
+  type ControlSnapshot,
+} from "./control-snapshot.js";
 
 export interface QueueCliOptions {
   /** Output sink; defaults to console.log. */
@@ -68,6 +74,8 @@ export async function runQueueCli(
       return addPlanCommand(rest, log);
     case "list":
       return listCommand(rest, log);
+    case "status":
+      return statusCommand(rest, log);
     case "retry":
       return retryCommand(rest, log);
     case "cancel":
@@ -185,6 +193,20 @@ function listCommand(rest: string[], log: (line: string) => void): number {
     log(JSON.stringify(document, null, 2));
   } else {
     printQueue(document, log);
+  }
+  return 0;
+}
+
+async function statusCommand(
+  rest: string[],
+  log: (line: string) => void,
+): Promise<number> {
+  const repoRoot = repoFrom(rest);
+  const snapshot = await buildControlSnapshot(repoRoot);
+  if (has("--json", rest)) {
+    log(JSON.stringify(snapshot, null, 2));
+  } else {
+    printControlSnapshot(snapshot, log);
   }
   return 0;
 }
@@ -403,6 +425,122 @@ function printRunSummary(
   }
 }
 
+function printControlSnapshot(
+  snapshot: ControlSnapshot,
+  log: (line: string) => void,
+): void {
+  const counts = snapshot.counts;
+  log(
+    `queue: ${counts.total} item(s) — pending ${counts.pending} / ` +
+      `running ${counts.running} / completed ${counts.completed} / ` +
+      `blocked ${counts.blocked} / cancelled ${counts.cancelled}`,
+  );
+  log(`observed: ${snapshot.observedAt}`);
+  log(`queue lock: ${formatQueueLock(snapshot)}`);
+  const cpu = snapshot.resources.cpu;
+  const memory = snapshot.resources.memory;
+  log(
+    `resources: cpu ${cpu.logicalCpus} / load ${formatLoad(cpu.load1)} / ` +
+      `memory free ${formatBytes(memory.availableBytesEstimate ?? memory.freeBytes)} ` +
+      `of ${formatBytes(memory.totalBytes)} / pressure ${memory.pressure}`,
+  );
+  log(
+    `journal: ${snapshot.journal.totalEvents} event(s), ` +
+      `${snapshot.journal.malformedLines} malformed` +
+      (snapshot.journal.readError
+        ? `, read error: ${snapshot.journal.readError}`
+        : ""),
+  );
+  if (snapshot.resources.provider.length > 0) {
+    log("provider capacity:");
+    for (const provider of snapshot.resources.provider) {
+      log(
+        `  ${provider.runtimeId}/${provider.modelId ?? "<cli-default>"}  ` +
+          `in-flight=${provider.observedInFlight ?? "unknown"}  ` +
+          `capacity=unknown  ` +
+          `quota=${provider.quota.state}  balance=${provider.balance.state}  ` +
+          `pricing=${provider.pricing.state}`,
+      );
+    }
+  }
+  if (snapshot.items.length === 0) {
+    log("no queue items");
+    return;
+  }
+  for (const item of snapshot.items) {
+    printControlItem(item, log);
+  }
+}
+
+function printControlItem(
+  item: ControlItemSnapshot,
+  log: (line: string) => void,
+): void {
+  log(
+    `${item.id}  ${item.status}  next=${item.observedNextAction}  ` +
+      `ready=${item.ready ? "yes" : "no"}  ` +
+      `worker=${item.worker}${item.model ? `/${item.model}` : ""}  ` +
+      `attempts=${item.attempts}/${item.maxAttempts}`,
+  );
+  if (item.run) {
+    log(
+      `  run: ${item.run.runId}  ${item.run.effectiveStatus}  ` +
+        `tasks=${item.run.accepted}/${item.run.total} accepted  ` +
+        `ownerAlive=${String(item.run.ownerAlive)}`,
+    );
+  } else if (item.lastRunId) {
+    log(`  run: ${item.lastRunId} (manifest unavailable)`);
+  }
+  if (item.materialization) {
+    log(
+      `  materialized base: ${item.materialization.baseCommit}  ` +
+        `contracts=${item.materialization.contractsHash.slice(0, 12)}`,
+    );
+  }
+  const progress = latestWorkerProgress(item.run);
+  if (progress) {
+    log(
+      `  worker: ${progress.event.type}/${progress.event.phase}  ` +
+        `session=${progress.event.sessionId}  age=${progress.ageMs}ms` +
+        `${progress.stale ? " (stale)" : ""}  ` +
+        `${progress.event.message}`,
+    );
+  }
+  if (item.decision.category !== "none") {
+    log(
+      `  decision: ${item.decision.category}` +
+        (item.decision.reason ? ` — ${item.decision.reason}` : ""),
+    );
+  }
+  if (item.journalEvents.length > 0) {
+    const latest = item.journalEvents[item.journalEvents.length - 1]!;
+    log(`  journal: ${latest.type} at ${latest.at}`);
+  }
+  for (const error of item.errors) log(`  warning: ${error}`);
+}
+
+function formatQueueLock(snapshot: ControlSnapshot): string {
+  const lock = snapshot.queue.lock;
+  if (lock.state === "free") return "free";
+  if (lock.state === "invalid") {
+    return `invalid${lock.reason ? ` (${lock.reason})` : ""}`;
+  }
+  if (!lock.lock) return lock.state;
+  return (
+    `${lock.state} by pid ${lock.lock.pid} on ${lock.lock.host}` +
+    (lock.reason ? ` (${lock.reason})` : "")
+  );
+}
+
+function formatLoad(value: number | null): string {
+  return value === null ? "unknown" : value.toFixed(2);
+}
+
+function formatBytes(value: number | null): string {
+  if (value === null) return "unknown";
+  return `${(value / 1024 ** 3).toFixed(1)} GiB`;
+}
+
 // ---------------------------------------------------------------------------
 // Argument helpers
 // ---------------------------------------------------------------------------
@@ -478,6 +616,7 @@ Usage:
                     [--depends-on <id>] [--worker claude|codex]
                     [--model id] [--max-attempts n] [--json]
   cliyard queue list --repo <path> [--json]
+  cliyard queue status --repo <path> [--json]
   cliyard queue retry <queue-id> --repo <path> [--json]
   cliyard queue cancel <queue-id> --repo <path> [--json]
   cliyard queue run --repo <path> [--continue-on-blocked]

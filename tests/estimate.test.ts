@@ -28,7 +28,7 @@ test("estimateTask classifies a component plus demo as a dispatchable large task
   assert.ok(result.drivers.includes("demo/lab coverage"));
 });
 
-test("estimatePlan returns aggregate budget and actual-token cost ranges", () => {
+test("estimatePlan returns aggregate budget and public-price reference ranges", () => {
   const result = estimatePlan({
     planId: "estimate-fixture",
     tasks: [
@@ -53,5 +53,19 @@ test("estimatePlan returns aggregate budget and actual-token cost ranges", () =>
   assert.ok(
     result.totalApiCostCnyPeak.max >=
       result.totalApiCostCnyOffPeak.max,
+  );
+  assert.deepEqual(result.pricingReference, {
+    state: "public-reference",
+    provider: "deepseek",
+    model: "deepseek-flash",
+    currency: "CNY",
+    appliesToCurrentBinding: false,
+    balanceIncluded: false,
+    observedAt: null,
+  });
+  assert.ok(
+    result.notes.some((note) =>
+      note.includes("not current subscription pricing"),
+    ),
   );
 });

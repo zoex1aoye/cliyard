@@ -37,6 +37,7 @@ import {
   SUPERVISOR_DIR,
 } from "../supervisor/store.js";
 import { materializedContractsPath } from "./plan-materializer.js";
+import { tryAppendQueueEvent } from "./event-journal.js";
 
 export const QUEUE_VERSION = 1 as const;
 export const QUEUE_FILE = "queue.json";
@@ -474,6 +475,13 @@ export function addQueueItem(
     document.items.push(item);
     document.updatedAt = at;
     saveQueue(root, document);
+    tryAppendQueueEvent(root, {
+      type: "queue.item.added",
+      at,
+      itemId: item.id,
+      status: item.status,
+      action: item.nextAction,
+    });
     return item;
   });
 }
@@ -607,6 +615,13 @@ export function addPlanQueueItem(
     document.items.push(item);
     document.updatedAt = at;
     saveQueue(root, document);
+    tryAppendQueueEvent(root, {
+      type: "queue.item.added",
+      at,
+      itemId: item.id,
+      status: item.status,
+      action: item.nextAction,
+    });
     return item;
   });
 }
@@ -647,6 +662,15 @@ export function retryQueueItem(repoRoot: string, id: string): QueueItem {
     item.updatedAt = at;
     document.updatedAt = at;
     saveQueue(root, document);
+    tryAppendQueueEvent(root, {
+      type: "queue.retry",
+      at,
+      itemId: item.id,
+      ...(item.lastRunId !== undefined ? { runId: item.lastRunId } : {}),
+      attempt: item.attempts,
+      status: item.status,
+      action: item.nextAction,
+    });
     return item;
   });
 }
@@ -675,6 +699,14 @@ export function cancelQueueItem(repoRoot: string, id: string): QueueItem {
     item.updatedAt = at;
     document.updatedAt = at;
     saveQueue(root, document);
+    tryAppendQueueEvent(root, {
+      type: "queue.cancel",
+      at,
+      itemId: item.id,
+      ...(item.lastRunId !== undefined ? { runId: item.lastRunId } : {}),
+      attempt: item.attempts,
+      status: item.status,
+    });
     return item;
   });
 }

@@ -238,8 +238,8 @@ Capability 至少包含：
 - model selection；
 - MCP / tools；
 - sandbox/permissions；
-- provider / account；
-- concurrency limit。
+- provider / endpoint / account/subscription binding；
+- observed concurrency、quota、balance 与 pricing（允许 unknown）。
 
 ### 7.2 MasterShell
 

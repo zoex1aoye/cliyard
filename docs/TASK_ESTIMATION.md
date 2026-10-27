@@ -73,7 +73,8 @@ XL: 先拆，不直接 dispatch
 
 ### DeepSeek token cost
 
-DeepSeek 官方 `deepseek-flash` 价格：
+以下是撰写时记录的 DeepSeek `deepseek-flash` 公开价快照，仅用于量级估算；
+它不是当前 endpoint/账号/订阅的实际报价，也不包含余额：
 
 ```text
 缓存命中输入：¥0.02 / 百万 tokens（空闲）
@@ -141,12 +142,19 @@ A1 assembly
 
 ## 6. 预算与并发
 
-- DeepSeek `deepseek-flash` 官方并发 2500，不是 3。
-- 本机默认 `CLIYARD_CLAUDE_MAX_CONCURRENT=3` 是 CPU、内存和成本保护。
-- 429 才表示 provider 并发不足。
-- ECONNRESET、超时和 5xx 由 adapter 做有限重试。
+- provider 并发数、余额、额度和价格都不能按模型名写死。相同模型在不同
+  endpoint、账号、订阅、区域和时间可能有不同限制。
+- 外部文档里的 DeepSeek `2500/500` 只是撰写时的公开快照，不进入调度器
+  的默认容量，也不表示当前订阅可用。
+- 本机默认 `CLIYARD_CLAUDE_MAX_CONCURRENT=3` 是全局 warm start，不是
+  provider permit。未知执行绑定先用 1 个在途探针，再按成功窗口增长。
+- 429、`Retry-After`、provider 返回的额度头、余额查询和实测完成窗口才是
+  运行时证据；无法读取时状态必须是 `unknown`，不能假定无限或免费。
+- ECONNRESET、超时和 5xx 由 adapter 做有限重试，不能直接证明并发过高。
 - 任务总预算按所有 ready tasks 的 guard budget 求和。
-- wall-clock 不等于总预算时长；parallel 时要按 wave 计算最大值，再累加 wave。
+- 实际路由必须记录 profile 估费、provider 报告费用和缺失费用的原因。
+- wall-clock 不等于总预算时长；parallel 时要按 wave 计算最大值，再累加
+  wave。
 
 ## 7. 工具使用
 
@@ -168,6 +176,11 @@ recommended repair budget
 complexity drivers
 split recommendation
 ```
+
+`pricingReference` 固定声明 `appliesToCurrentBinding=false` 且
+`balanceIncluded=false`。`apiCostCny*` 只是历史公开价参考，不是当前订阅
+报价、余额或账单；真正的准入成本必须来自所选执行绑定的
+provider-reported/estimated/missing 三态。
 
 该估算器是启发式规则，后续应逐步用每类任务的真实 turns、tokens、耗时和
 repair 历史替换固定区间。

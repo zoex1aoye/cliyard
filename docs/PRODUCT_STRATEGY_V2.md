@@ -106,7 +106,7 @@ Ready work may run concurrently only after deterministic admission:
 - independent base/dependency;
 - non-overlapping write scope;
 - available CLI + model execution profile;
-- provider/model rate-limit budget;
+- observed provider/model rate-limit, quota and balance budget;
 - CPU/memory/runtime slot;
 - isolated port/runtime lease;
 - no conflicting shared resource;
@@ -144,9 +144,11 @@ interface ProviderEndpoint {
   protocol: "anthropic" | "openai" | "openai-compatible" | "acp" | string;
   baseUrl?: string;
   authRef: string;             // env/Keychain reference, never the secret
+  accountBindingId: string;    // distinguishes subscriptions/accounts
   models: ModelDescriptor[];
-  quota?: QuotaState;
-  rateLimit?: RateLimitState;
+  quota: QuotaState;           // known/unknown/stale/unsupported
+  balance: BalanceState;
+  rateLimit: RateLimitState;
   health: EndpointHealth;
 }
 
@@ -163,7 +165,10 @@ interface ExecutionProfile {
   endpointId: ProviderEndpoint["id"];
   modelId: string;
   flags?: Record<string, string | number | boolean>;
-  maxConcurrency?: number;
+  admissionPolicy?: {
+    operatorHardMax?: number;  // absent means unknown, not unlimited
+    unknownBindingProbe?: number;
+  };
   budgetPolicy?: BudgetPolicy;
 }
 
@@ -181,6 +186,12 @@ interface TaskRequirements {
 
 `QueueItem` should eventually store a routing policy and the resolved
 `ExecutionProfile`, not just `worker` plus `model`.
+
+Provider capacity, balance, quota and price are observed per execution binding
+(`endpoint/account binding + model + compatible CLI`). A public documentation
+number or another subscription's configuration is never evidence of current
+permission. Unknown values remain explicit, and an unknown binding gets one
+in-flight probe before any learned ramp.
 
 ### 4.2 Deterministic routing
 
@@ -363,23 +374,27 @@ maxConcurrentByExecutionProfile
 ### 5.5 Dynamic capacity and provider feedback
 
 Parallelism is selected by one admission broker from host CPU/RAM pressure,
-runtime/browser slots, queue-item/task scope, provider/model concurrency and
-budget. The current adapter-level default `3` is a warm start, not a permanent
-limit.
+runtime/browser slots, queue-item/task scope, observed provider/model
+capacity and budget. The scheduler default `3` is a demand warm start, not a
+provider permit and not a permanent limit.
 
 Use:
 
 ```text
 warm start = 3
+unknown execution binding permit = 1
 minimum = 1
 hard max = configurable and calibrated
 policy = additive ramp / multiplicative backoff with cooldowns
 ```
 
-DeepSeek's nominal model concurrency is far above what this 10-core/16 GiB local
-host can safely sustain once builds, browsers and runtime services are included.
-The provider limit still remains independent because account tier, subagents and
-429 feedback can differ from the nominal figure.
+Provider capacity, quota, balance and price are per execution binding: account
+or subscription, endpoint, model and CLI compatibility. Public documentation
+figures are historical references, not current permission. Unknown values stay
+unknown and begin with one in-flight probe. A 10-core/16 GiB host also has its
+own independent CPU, memory, runtime, browser and port limits; observed 429,
+`Retry-After`, quota headers and balance responses reduce the provider's learned
+safe in-flight count immediately.
 
 See
 [dynamic-parallel-admission-v0.md](../design/dynamic-parallel-admission-v0.md)
@@ -537,7 +552,7 @@ The earlier "observability -> foreground controller" ordering is too narrow.
 The revised execution order is:
 
 ```text
-1. ControlSnapshot + event journal + resource telemetry
+1. [implemented] ControlSnapshot + event journal + resource telemetry
 2. Failure taxonomy/cost + ExecutionProfile routing
 3. Parallel Supervisor/queue architecture spike
 4. Shared hierarchical admission broker with fixed limits

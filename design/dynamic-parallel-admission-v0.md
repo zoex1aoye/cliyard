@@ -3,6 +3,11 @@
 > Date: 2026-10-27
 >
 > Scope: bounded, adaptive concurrency across queue-item and Plan-task levels
+>
+> Implementation note (2026-10-27): the read-only host/provider snapshot and
+> unresolved-binding representation exist in
+> `src/runtime/resource-snapshot.ts`; the admission broker, learned provider
+> permits and dynamic ramp are not implemented.
 
 ## 1. Goal
 
@@ -11,15 +16,16 @@ controller that chooses how many task attempts may run at once from:
 
 - available CPU and RAM;
 - runtime/build/browser working sets;
-- provider/model advertised and observed concurrency;
-- rate-limit, quota and retry feedback;
+- runtime-observed provider concurrency and health;
+- account/subscription quota, balance, price and retry feedback;
 - per-item, per-runtime and global policy;
 - current queue demand;
 - budget and latency targets.
 
-The initial value `3` is a safe warm start, not a permanent product constant.
-The selected concurrency must be observable, explainable, recoverable and
-adjustable without editing code.
+The initial value `3` is a scheduler demand warm start, not a permanent
+product constant and not a provider concurrency assumption. The selected
+concurrency must be observable, explainable, recoverable and adjustable
+without editing code.
 
 ## 2. Measured local baseline
 
@@ -38,18 +44,19 @@ The machine currently runs Codex desktop, DSH desktop, browser/music clients and
 other applications. These were not all idle, so raw free RAM is not a sufficient
 capacity signal.
 
-DeepSeek current project notes list nominal model concurrency:
+An earlier documentation snapshot listed nominal model concurrency:
 
 ```text
 deepseek-flash: 2500
 deepseek-v4-pro: 500
 ```
 
-Those numbers are account-level ceilings, not a local target. On the current
-single host, process memory, builds, browsers, disk I/O and CPU bursts are the
-likely first constraints. The provider remains a separate limiter because
-account tier, concurrent subagents and 429 feedback can differ from the nominal
-figure.
+Those numbers are not runtime capacity. They can change by subscription,
+account, endpoint, region, model and time; the control plane may also be used
+with providers that publish no concurrency figure at all. They must never be
+compiled into admission logic or treated as permission to dispatch. On the
+current single host, process memory, builds, browsers, disk I/O and CPU bursts
+are still independent constraints.
 
 ## 3. Hierarchical capacity
 
@@ -112,17 +119,45 @@ interface ResourceSnapshot {
     swapDeltaBytes?: number;
   };
   runtime: {
-    activeTaskAttempts: number;
-    activeRuntimeServices: number;
-    activeBrowsers: number;
-    leasedPorts: number;
+    activeTaskAttempts: number | null;
+    activeRuntimeServices: number | null;
+    activeBrowsers: number | null;
+    leasedPorts: number | null;
   };
   provider: Array<{
     executionProfileId: string;
-    configuredMax: number;
-    observedInFlight: number;
-    recent429: number;
-    recentRetryAfterMs?: number;
+    capacity: {
+      configuredMax: number | null;
+      learnedSafeInFlight: number | null;
+      limitSource:
+        | "operator"
+        | "provider-reported"
+        | "observed"
+        | "unknown";
+      confidence: "none" | "low" | "medium" | "high";
+    };
+    observedInFlight: number | null;
+    recent429: number | null;
+    recentRetryAfterMs: number | null;
+    quota: {
+      state: "known" | "unknown" | "stale" | "unsupported";
+      remaining?: number;
+      unit?: string;
+      observedAt?: string;
+    };
+    balance: {
+      state: "known" | "unknown" | "stale" | "unsupported";
+      remaining?: number;
+      currency?: string;
+      observedAt?: string;
+    };
+    pricing: {
+      state: "known" | "unknown" | "stale" | "unsupported";
+      inputPerMillion?: number;
+      outputPerMillion?: number;
+      currency?: string;
+      observedAt?: string;
+    };
   }>;
 }
 ```
@@ -150,19 +185,35 @@ equivalent.
 
 ## 5. Provider/model admission
 
-Provider capacity is a token bucket independent of task concurrency:
+Provider capacity is an observed token bucket independent of task concurrency:
 
 ```text
 provider permit = min(
-  configured model concurrency,
-  learned safe in-flight count,
-  current account quota,
+  operator hard limit,                  // null when not configured
+  learned safe in-flight count,         // null until observed
+  provider-reported remaining capacity, // optional
   rate-limit token state
 )
 ```
 
 Rules:
 
+- capacity, quota, price and balance belong to an execution binding, not to a
+  provider brand or model name alone;
+- the binding identity includes endpoint/account reference, subscription when
+  known, protocol, model and CLI/runtime compatibility;
+- `null` means unknown, never unlimited and never a substitute for a public
+  documentation number;
+- an unobserved binding starts with one in-flight probe, even when the global
+  scheduler warm start is greater than one;
+- capacity rises only after clean observations; every provider response that
+  reports remaining quota or rate-limit state is evidence for that binding;
+- pricing and balance are fetched or reported when the adapter supports it;
+  otherwise the UI and routing provenance say `unknown`, and cost is never
+  synthesized from another subscription or provider;
+- a balance or quota that cannot be checked is a routing uncertainty. Policy
+  may allow it with an explicit cost cap, but unattended execution must fail
+  closed when the task requires a known budget;
 - nominal provider concurrency does not override local resource limits;
 - 429 and `Retry-After` reduce the active budget immediately;
 - transient 5xx and connection failures increase backoff but do not prove that
@@ -206,11 +257,15 @@ cleanup.
 Default state for v0:
 
 ```text
-warmStart = 3
+schedulerWarmStart = 3
+unknownExecutionProfilePermit = 1
 minimum = 1
 hard max = configurable; initial proposal 6, subject to calibration
 auto scale = recommendation first, then enabled after soak
 ```
+
+The scheduler may have three ready slots while an unknown provider binding has
+only one permit. These are separate limits and are combined conjunctively.
 
 ### Increase
 
@@ -284,11 +339,13 @@ This is controlled calibration, not an intentional overload test.
 
 ## 10. Acceptance
 
-1. Current `3` remains the default warm start until calibration evidence exists.
+1. Current `3` remains the default scheduler warm start until calibration
+   evidence exists; it is never used as a provider subscription assumption.
 2. Concurrency is selected by a shared broker and cannot be multiplied by
    independent Supervisor processes.
 3. Queue-item and Plan-wave limits are enforced together.
-4. Provider/profile limits, CPU, RAM, runtime and port limits are visible.
+4. Provider/profile limits, unknown quota/balance/price, CPU, RAM, runtime and
+   port limits are visible and explain the binding constraint.
 5. 429 or memory pressure reduces concurrency without losing durable work.
 6. CPU/RAM headroom allows a measured ramp above 3 after the stable window.
 7. A restart restores policy and last safe target from disk.
@@ -300,6 +357,8 @@ This is controlled calibration, not an intentional overload test.
 
 - intentionally oversubscribing the host to discover failure;
 - treating advertised provider concurrency as available local capacity;
+- treating a public price, quota or concurrency figure as current permission
+  for an unknown subscription;
 - dynamic concurrency based only on instantaneous free RAM;
 - scaling through worker cancellation or attempt loss;
 - automatic merge of parallel accepted branches;

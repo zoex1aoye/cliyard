@@ -3,6 +3,11 @@
 > Recorded: 2026-10-27
 >
 > Baseline: `3065ad9` / `selfhost/chained-read-context-complete`
+>
+> Implementation update (2026-10-27): `queue status`, the queue event journal
+> and the first read-only resource/provider snapshot are implemented. The next
+> P0 slice is worker-failure taxonomy plus cost truth. Evidence:
+> [evidence/CONTROL_SNAPSHOT.md](evidence/CONTROL_SNAPSHOT.md).
 
 ## Decision
 
@@ -48,6 +53,8 @@ entry selection are specified in
 
 ### 1. `queue-observe-v0` (P0)
 
+**Status: implemented in the read-only CLI slice.**
+
 Add one read-only projection that joins:
 
 ```text
@@ -80,6 +87,8 @@ This command must be read-only and must not mark stale work healthy merely
 because a file exists.
 
 ### 2. `queue-event-journal-v0` (P0)
+
+**Status: implemented with bounded fields and best-effort appends.**
 
 Append bounded queue-level events to:
 
@@ -142,9 +151,11 @@ Model the three real deployment shapes:
 - one model + many CLIs.
 
 Routing is deterministic feasibility filtering, scoring and binding selection;
-an LLM may recommend but does not own the decision. Persist runtime, endpoint,
-model, capabilities, health, quota/concurrency, estimated cost and fallback in
-the dispatch provenance. See
+an LLM may recommend but does not own the decision. Persist runtime,
+endpoint/account binding, model, capabilities, health, quota/concurrency
+observations, balance/price states, estimated/actual cost and fallback in the
+dispatch provenance. Unknown capacity, balance or price is an explicit state
+and cannot inherit a public nominal number from the model name. See
 [PRODUCT_STRATEGY_V2.md](PRODUCT_STRATEGY_V2.md#4-execution-model).
 
 ### 6. Parallel Supervisor/queue spike (P0)
@@ -182,11 +193,15 @@ Implement a shared broker before enabling adaptive scaling. It must combine:
 - host CPU/memory pressure and safety reserve;
 - per-task/profile resource history;
 - runtime/browser/port capacity;
-- provider/model concurrency and 429 feedback;
+- runtime-observed provider/model concurrency and provider feedback, including
+  429, `Retry-After`, quota headers and balance responses;
 - item and global task limits.
 
-`3` is the warm start. Ramp to 4/5/6 only through measured stable windows and an
-audited policy; decrease immediately on 429, memory pressure, swap growth or OOM.
+`3` is the scheduler warm start, not a claim about any subscription. An
+unobserved execution binding starts with one in-flight probe. Ramp to 4/5/6
+only through measured stable windows and an audited policy; decrease
+immediately on 429, memory pressure, swap growth or OOM. Provider balance,
+quota and price remain binding-specific and may be `unknown`.
 The detailed design is
 [design/dynamic-parallel-admission-v0.md](../design/dynamic-parallel-admission-v0.md).
 
