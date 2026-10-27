@@ -16,6 +16,10 @@ import { randomUUID } from "node:crypto";
 import { readFileSync, readdirSync, unlinkSync, type Dirent } from "node:fs";
 import { hostname } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
+import {
+  isWorkerProgressEvent,
+  type WorkerProgressEvent,
+} from "../agents/types.js";
 import type { TaskContract } from "../contracts/schema.js";
 import { RUNTIME_MANIFEST_FILE } from "../runtime/manager.js";
 import { portAllocatorPaths } from "../runtime/ports.js";
@@ -30,6 +34,7 @@ import type {
 import {
   listReusableAttempts,
   runCodexBatch,
+  workerEventsDir,
   type CodexBatchOptions,
   type CodexBatchResult,
 } from "../scheduler/codex-batch.js";
@@ -62,6 +67,11 @@ import type {
 } from "./types.js";
 
 const STOP_TIMEOUT_MS = 5_000;
+/**
+ * A worker event older than this is shown as stale. Staleness is display-only:
+ * it never changes the run status or any acceptance decision.
+ */
+export const WORKER_PROGRESS_STALE_MS = 60_000;
 
 export interface SupervisorCliOptions {
   /** Output sink; defaults to console.log. */
@@ -81,6 +91,17 @@ export interface SupervisorRuntimeRecovery {
   runtimeId: string;
   cleanup?: RuntimeCleanupState;
   recovery: RuntimeRecoveryRecord;
+}
+
+/**
+ * Read-only view of a task's latest valid worker progress event. `stale` only
+ * describes age; it has no effect on run status or acceptance.
+ */
+export interface WorkerProgressStatus {
+  taskId: string;
+  event: WorkerProgressEvent;
+  ageMs: number;
+  stale: boolean;
 }
 
 export interface SupervisorStatus {
@@ -116,6 +137,8 @@ export interface SupervisorStatus {
   lastAccepted: RunTaskState | null;
   /** Rejected attempts whose recorded worktree still validates for reuse. */
   reusableAttempts: ReusableAttempt[];
+  /** Latest valid worker event per task, oldest first. Never run authority. */
+  workerProgress: WorkerProgressStatus[];
   /** Recovery evidence persisted by earlier reaper runs; never reconciled here. */
   runtimeRecovery: SupervisorRuntimeRecovery[];
 }
@@ -385,6 +408,9 @@ async function buildStatus(
   const reusableAttempts = await listReusableAttempts(repoRoot, manifest).catch(
     () => [] as ReusableAttempt[],
   );
+  // Worker progress is advisory: missing, malformed or stale files only hide
+  // progress rows. They can never change status, counts or accepted work.
+  const workerProgress = readWorkerProgress(repoRoot, manifest);
 
   return {
     runId: manifest.runId,
@@ -416,6 +442,7 @@ async function buildStatus(
     lastCheckpoint: manifest.updatedAt,
     lastAccepted: lastAccepted ? { ...lastAccepted } : null,
     reusableAttempts,
+    workerProgress,
     // Read-only: expose evidence written by previous reaper runs; status never
     // plans, signals, releases a lease, or rewrites a manifest.
     runtimeRecovery: readRuntimeRecoveryRecords(repoRoot),
@@ -474,6 +501,21 @@ function printStatus(
       : "";
     log(`last accepted: ${status.lastAccepted.taskId}${commit}`);
   }
+  if (status.workerProgress.length === 0) {
+    log("worker progress: none");
+  } else {
+    for (const entry of status.workerProgress) {
+      const detail = entry.event.detail ? ` - ${entry.event.detail}` : "";
+      const stale = entry.stale
+        ? ` (stale ${Math.round(entry.ageMs / 1000)}s)`
+        : "";
+      log(
+        `worker progress: ${entry.taskId} ${entry.event.at} ` +
+          `${entry.event.type}/${entry.event.phase} ` +
+          `${entry.event.message}${detail}${stale}`,
+      );
+    }
+  }
   if (status.reusableAttempts.length === 0) {
     log("reusable attempts: none");
   } else {
@@ -489,6 +531,71 @@ function printStatus(
     `contracts: ${status.contractsPath} (sha256 ${status.contractsHash})`,
   );
   log(`repo: ${status.repoRoot}`);
+}
+
+/**
+ * Read the latest valid JSONL event for each tracked task. Status is strictly
+ * read-only: missing directories, unreadable files, malformed lines and
+ * foreign task ids are skipped without touching the manifest.
+ */
+function readWorkerProgress(
+  repoRoot: string,
+  manifest: RunManifest,
+): WorkerProgressStatus[] {
+  const dir = workerEventsDir(repoRoot, manifest.runId);
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const now = Date.now();
+  const progress: WorkerProgressStatus[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+    const taskId = entry.name.slice(0, -".jsonl".length);
+    if (!Object.hasOwn(manifest.tasks, taskId)) continue;
+    const event = readLatestWorkerEvent(join(dir, entry.name), taskId);
+    if (!event) continue;
+    const ageMs = Math.max(0, now - Date.parse(event.at));
+    progress.push({
+      taskId,
+      event,
+      ageMs,
+      stale: ageMs > WORKER_PROGRESS_STALE_MS,
+    });
+  }
+  return progress.sort(
+    (left, right) =>
+      Date.parse(left.event.at) - Date.parse(right.event.at) ||
+      left.taskId.localeCompare(right.taskId),
+  );
+}
+
+function readLatestWorkerEvent(
+  path: string,
+  taskId: string,
+): WorkerProgressEvent | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
+  let latest: WorkerProgressEvent | undefined;
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line) as unknown;
+    } catch {
+      continue;
+    }
+    if (!isWorkerProgressEvent(parsed) || parsed.taskId !== taskId) continue;
+    latest = parsed;
+  }
+  return latest;
 }
 
 function formatLock(
