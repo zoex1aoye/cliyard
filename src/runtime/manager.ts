@@ -32,13 +32,16 @@ import {
 } from "node:fs";
 import { get as httpGet, type ClientRequest } from "node:http";
 import { createServer } from "node:net";
+import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { PortAllocator, probePort } from "./ports.js";
+import { ProcessInspector } from "./process.js";
 import {
   RUNTIME_HOST,
   RUNTIME_MANIFEST_VERSION,
   type PortLease,
   type RuntimeManifest,
+  type RuntimeProcessIdentity,
   type RuntimeReadinessAttempt,
   type RuntimeServiceManifest,
   type RuntimeSpec,
@@ -225,6 +228,7 @@ export class RuntimeManager {
   private readonly artifactHash?: string;
   private readonly baseEnv: NodeJS.ProcessEnv;
   private readonly allocator: RuntimePortAllocator;
+  private readonly inspector: ProcessInspector;
   private readonly readinessPollMs: number;
   private readonly stopGraceMs: number;
   private readonly portReleaseTimeoutMs: number;
@@ -300,6 +304,8 @@ export class RuntimeManager {
       });
     }
 
+    this.inspector = new ProcessInspector();
+
     const paths = runtimePaths(this.repoRoot, this.runtimeId);
     this.runtimeDir = paths.runtimeDir;
     this.manifestPath = paths.manifestPath;
@@ -344,6 +350,9 @@ export class RuntimeManager {
         ? { artifactHash: this.artifactHash }
         : {}),
       worktree: this.worktree,
+      // The control process owns this runtime for recovery eligibility. The
+      // host is the OS hostname, not the 127.0.0.1 bind host.
+      owner: { pid: process.pid, host: hostname() },
       services: [],
       startedAt: new Date().toISOString(),
       cleanup: "pending",
@@ -502,6 +511,8 @@ export class RuntimeManager {
     state.pgid = undefined;
     state.addressInUse = false;
     manifest.pid = undefined;
+    manifest.pgid = undefined;
+    manifest.processIdentity = undefined;
     manifest.startedAt = undefined;
     manifest.exitedAt = undefined;
     manifest.exitCode = undefined;
@@ -573,9 +584,55 @@ export class RuntimeManager {
     if (child.pid === undefined) {
       throw new RuntimeManagerError("child process did not report a pid");
     }
-    state.pgid = child.pid;
-    manifest.pid = child.pid;
+    await this.recordSpawnEvidence(state, child.pid);
+  }
+
+  /**
+   * Record the evidence orphan recovery needs, immediately after spawn:
+   * leader pid, process group, and the exact OS-reported process identity.
+   *
+   * `manifest.startedAt` stays a wall-clock bookkeeping timestamp. It is never
+   * copied into `processIdentity.startedAt`, because only the OS start
+   * identity distinguishes a reused pid from the original process.
+   */
+  private async recordSpawnEvidence(
+    state: ServiceState,
+    pid: number,
+  ): Promise<void> {
+    const manifest = state.manifest;
+
+    // POSIX services are spawned detached, so the leader pid is the group id.
+    // Keeping both fields equal is what makes group ownership provable later.
+    state.pgid = pid;
+    manifest.pid = pid;
+    manifest.pgid = pid;
     manifest.startedAt = new Date().toISOString();
+
+    if (this.inspector.supported) {
+      let identity: RuntimeProcessIdentity | undefined;
+      try {
+        identity = await this.inspector.capture(pid);
+      } catch (error) {
+        throw new RuntimeManagerError(
+          `service ${JSON.stringify(manifest.name)} identity capture failed: ` +
+            errorMessage(error),
+        );
+      }
+      if (identity !== undefined) {
+        if (identity.pid !== pid || identity.pgid !== pid) {
+          throw new RuntimeManagerError(
+            `service ${JSON.stringify(manifest.name)} spawned pid ${pid} but ` +
+              `ps reports pid ${identity.pid} in process group ` +
+              `${identity.pgid}`,
+          );
+        }
+        manifest.processIdentity = identity;
+      }
+    }
+
+    // Persist before readiness: a control-process crash during the readiness
+    // wait must still leave the reaper usable evidence.
+    this.persistManifest();
   }
 
   /**
@@ -657,8 +714,10 @@ export class RuntimeManager {
     state.manifest.healthUrl =
       state.manifest.url + state.prepared.readinessPath;
     // The next spawn starts a fresh attempt; do not persist the failed
-    // attempt's pid/timestamps against the new port.
+    // attempt's pid/group/identity/timestamps against the new port.
     state.manifest.pid = undefined;
+    state.manifest.pgid = undefined;
+    state.manifest.processIdentity = undefined;
     state.manifest.startedAt = undefined;
     state.manifest.exitedAt = undefined;
     state.manifest.exitCode = undefined;
