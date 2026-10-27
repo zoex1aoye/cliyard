@@ -98,6 +98,7 @@ function commitFile(
 interface PlanTask {
   taskId: string;
   goal: string;
+  readPaths?: string[];
   writePaths: string[];
   verifyCommands: string[];
 }
@@ -1189,6 +1190,7 @@ test(
         {
           taskId: "upper",
           goal: "Create the upper layer artifact",
+          readPaths: ["foundation.txt"],
           writePaths: ["upper.txt"],
           verifyCommands: [
             "test -f foundation.txt",
@@ -1222,9 +1224,15 @@ const promptIndex = process.argv.indexOf("-p");
 const prompt = promptIndex >= 0 ? process.argv[promptIndex + 1] : "";
 const taskId = (prompt.match(/Task:\s*(\S+)/) || [])[1];
 const writePath = (prompt.match(/Write only under:\n- ([^\n]+)/) || [])[1];
+const readFirst = (prompt.match(/Read first:\n([\s\S]*?)\n\n/) || [])[1] || "";
 if (!taskId || !writePath) {
   console.error("fixture could not parse task prompt");
   process.exit(2);
+}
+
+if (taskId === "upper" && !/^- foundation\.txt$/m.test(readFirst)) {
+  console.error("fixture: downstream task did not declare foundation.txt in readPaths");
+  process.exit(4);
 }
 
 const foundation = path.resolve(process.cwd(), "foundation.txt");
@@ -1302,6 +1310,17 @@ console.log(JSON.stringify({
         upperManifest.baseCommit,
         foundationManifest.integrationHead,
       );
+
+      // The downstream contract explicitly declares the upstream artifact as
+      // read context; preflight proves it at the pinned base.
+      const upperArtifact = JSON.parse(
+        readFileSync(upperItem.materialization!.contractsPath, "utf8"),
+      ) as { contracts: Array<{ taskId: string; readPaths: string[] }> };
+      const upperTask = upperArtifact.contracts.find(
+        (contract) => contract.taskId === "upper",
+      );
+      assert.ok(upperTask, "the materialized downstream contract must exist");
+      assert.deepEqual(upperTask.readPaths, ["foundation.txt"]);
 
       const ancestry = spawnSync(
         "git",
