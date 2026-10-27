@@ -78,11 +78,63 @@ export type RuntimeCleanupState =
   | "complete"
   | "failed";
 
+/**
+ * Process that owned a runtime, used for same-host liveness checks.
+ *
+ * `host` is the operating system hostname (`os.hostname()`), not the bind host
+ * recorded in `PortLease.host` (which is always `127.0.0.1` in v0).
+ */
+export interface RuntimeOwner {
+  pid: number;
+  host: string;
+}
+
+/**
+ * Exact OS process identity captured with `ps` immediately after spawn.
+ *
+ * `startedAt` is the operating system's reported process start identity
+ * (`ps -o lstart=`), never a wall-clock timestamp synthesized by the control
+ * process. A missing identity means "unknown": recovery must not infer it from
+ * manifest write times or from the process group number.
+ */
+export interface RuntimeProcessIdentity {
+  pid: number;
+  pgid: number;
+  /** OS-reported start identity (`ps lstart`), whitespace-normalized. */
+  startedAt: string;
+}
+
+export type RuntimeRecoveryState = "reaped" | "needs_human" | "skipped";
+
+export interface RuntimeRecoveryServiceRecord {
+  name: string;
+  pgid?: number;
+  action: "terminated" | "already-exited" | "preserved";
+  portReleased: boolean;
+}
+
+/** Orphan-recovery evidence written by the reaper. */
+export interface RuntimeRecoveryRecord {
+  state: RuntimeRecoveryState;
+  reason: string;
+  at: string;
+  reaperPid: number;
+  reaperHost: string;
+  services: RuntimeRecoveryServiceRecord[];
+}
+
 export interface RuntimeServiceManifest {
   name: string;
   host: RuntimeHost;
   port: number;
   pid?: number;
+  /** Process group that must be stopped as a unit (the leader pid in v0). */
+  pgid?: number;
+  /**
+   * Exact persisted process identity. Absent in manifests written before
+   * identity capture; consumers must treat absence as unknown, not a match.
+   */
+  processIdentity?: RuntimeProcessIdentity;
   url: string;
   healthUrl: string;
   logPath: string;
@@ -103,9 +155,13 @@ export interface RuntimeManifest {
   worktree: string;
   /** Exact code snapshot the runtime was started from, when known. */
   artifactHash?: string;
+  /** Process that owns this runtime; absent in manifests written before v0.1. */
+  owner?: RuntimeOwner;
   services: RuntimeServiceManifest[];
   startedAt: string;
   stoppedAt?: string;
   cleanup: RuntimeCleanupState;
   failureReason?: string;
+  /** Recovery evidence written by the orphan reaper, once reconciled. */
+  recovery?: RuntimeRecoveryRecord;
 }
