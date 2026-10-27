@@ -1,0 +1,35 @@
+{
+  "planId": "chained-read-context-core",
+  "tasks": [
+    {
+      "taskId": "chained-read-context-core",
+      "goal": "Fix worker read-context preflight to validate explicit readPaths against the exact resolved shared contracts base commit instead of the control repository's current working tree or HEAD. Preserve the existing exceptions for readPath '.', a missing optional AGENTS.md, and paths produced by tasks in the same contracts document. For all other explicit readPaths, prove existence at the pinned base with git object lookup; do not copy files from the checkout and do not weaken untracked-context safety. Keep the existing untracked-context error when a path is visible only as an untracked control-checkout file, and fail when a file exists at current HEAD but not at the pinned base. Add focused tests in tests/context-preflight.test.ts for an older pinned base that still contains a file after current HEAD deletes or moves past it, for a file added after the pinned base at current HEAD, and retain the existing untracked-only rejection. Update tests/plan-backed-queue-core.test.ts so its local two-item Supervisor chain has the downstream task explicitly declare the upstream-produced foundation.txt in readPaths and proves the downstream worker worktree contains and reads it. Keep all scheduler authority and queue lineage behavior unchanged.",
+      "nonGoals": [
+        "No changes to queue materialization or RunManifest authority",
+        "No copying of untracked control-checkout files into worktrees",
+        "No URL, shell, verifier or write-path gate changes",
+        "No daemon, parallel dispatch, multi-parent integration or SQLite"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "design/chained-read-context-v0.md",
+        "src/scheduler/codex-batch.ts",
+        "tests/context-preflight.test.ts",
+        "tests/plan-backed-queue-core.test.ts"
+      ],
+      "writePaths": [
+        "src/scheduler/codex-batch.ts",
+        "tests/context-preflight.test.ts",
+        "tests/plan-backed-queue-core.test.ts"
+      ],
+      "verifyCommands": [
+        "npx tsx --test tests/context-preflight.test.ts",
+        "npx tsx --test tests/plan-backed-queue-core.test.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}

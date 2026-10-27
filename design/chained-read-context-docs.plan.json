@@ -1,0 +1,44 @@
+{
+  "planId": "chained-read-context-docs",
+  "tasks": [
+    {
+      "taskId": "chained-read-context-docs",
+      "goal": "Measure and document the pinned-base read-context fix through tests and a real Claude Code + DeepSeek two-item Plan-backed queue chain. In a scratch Git repository, create a foundation Plan that writes foundation.txt and an upper Plan that declares foundation.txt explicitly in readPaths, writes upper.txt, and verifies both files in the task worktree. Add the two Plans with queue add-plan, the second depending on the first, and run the queue with claude-ds/deepseek-flash[1m]. Capture the downstream live worktree before its worker writes upper.txt, final branch contents, materialized bases, integration ancestry and exact command/test results. Add docs/evidence/CHAINED_READ_CONTEXT.md; update design/chained-read-context-v0.md status if appropriate, README and docs/NEXT_ITERATION.md; remove the obsolete readPaths caveat from docs/evidence/PLAN_BACKED_CHAIN.md and replace it with a link to the measured fix. Document only observed behavior. Preserve non-goals: no automatic Plan approval or contract freeze, no daemon, parallel dispatch, multi-parent integration, cross-host queue, SQLite, automatic push/main merge or provider-session continuation.",
+      "nonGoals": [
+        "No source or test behavior changes",
+        "No invented or unmeasured evidence",
+        "No relaxation of read-context safety",
+        "No daemon, parallel dispatch, multi-parent integration, cross-host queue or SQLite",
+        "No automatic Plan approval, push or main merge"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "design/chained-read-context-v0.md",
+        "design/chained-read-context-core.plan.json",
+        "design/chained-read-context-docs.plan.json",
+        "src/scheduler/codex-batch.ts",
+        "tests/context-preflight.test.ts",
+        "tests/plan-backed-queue-core.test.ts",
+        "docs/evidence/PLAN_BACKED_CHAIN.md"
+      ],
+      "writePaths": [
+        "README.md",
+        "design/chained-read-context-v0.md",
+        "docs/NEXT_ITERATION.md",
+        "docs/evidence/PLAN_BACKED_CHAIN.md",
+        "docs/evidence/CHAINED_READ_CONTEXT.md"
+      ],
+      "verifyCommands": [
+        "test -s docs/evidence/CHAINED_READ_CONTEXT.md",
+        "rg -q 'foundation.txt' docs/evidence/CHAINED_READ_CONTEXT.md",
+        "rg -q 'readPaths' docs/evidence/CHAINED_READ_CONTEXT.md",
+        "rg -q 'DeepSeek' docs/evidence/CHAINED_READ_CONTEXT.md",
+        "rg -q 'pinned base' docs/NEXT_ITERATION.md",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
