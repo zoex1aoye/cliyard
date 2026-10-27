@@ -15,6 +15,7 @@
  * The queue only coordinates Supervisor runs. It never writes a RunManifest.
  */
 import { createHash, randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import {
   closeSync,
   existsSync,
@@ -28,12 +29,14 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { compilePlan, parsePlanJson } from "../planner/plan.js";
 import { findCycle } from "../scheduler/dag.js";
 import {
   isProcessAlive,
   isSameHost,
   SUPERVISOR_DIR,
 } from "../supervisor/store.js";
+import { materializedContractsPath } from "./plan-materializer.js";
 
 export const QUEUE_VERSION = 1 as const;
 export const QUEUE_FILE = "queue.json";
@@ -43,6 +46,8 @@ export const DEFAULT_MAX_ATTEMPTS = 3;
 /** Queue ids are explicit labels and must be safe path/manifest identifiers. */
 const QUEUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
+/** Exact full git object id: SHA-1 (40) or SHA-256 (64) repositories. */
+const FULL_COMMIT_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 
 export type QueueItemStatus =
   | "pending"
@@ -54,16 +59,47 @@ export type QueueNextAction = "start" | "resume";
 export type QueueWorker = "claude" | "codex";
 
 /**
- * One explicitly approved contracts file plus its frozen hash. The contracts
- * path and hash are captured at `queue add`; dispatch fails closed when the
- * current bytes no longer match.
+ * Queue metadata for one Plan-backed item, matching
+ * `QueuePlanMaterialization` in design/plan-backed-chain-v0.md. It is
+ * persisted only after the deterministic artifact exists and has been hashed.
+ */
+export interface QueuePlanMaterialization {
+  planPath: string;
+  planHash: string;
+  planId: string;
+  baseCommit: string;
+  upstreamQueueId?: string;
+  upstreamRunId?: string;
+  upstreamIntegrationHead?: string;
+  contractsPath: string;
+  contractsHash: string;
+  materializedAt: string;
+}
+
+/**
+ * One accepted queue item.
+ *
+ * Contract-backed items (the only v0 legacy kind) carry the frozen
+ * `contractsPath`/`contractsHash` captured at `queue add`. Plan-backed items
+ * are discriminated by `planPath` presence and carry the approved Plan
+ * identity instead; their contracts identity exists only in `materialization`
+ * once dispatch has compiled it. `planId` is the supervisor plan label for
+ * contract items and must equal `id` for Plan items.
  */
 export interface QueueItem {
   id: string;
-  contractsPath: string;
-  contractsHash: string;
-  /** Optional supervisor plan label; defaults to the contracts basename. */
+  /** Contract-backed items only. */
+  contractsPath?: string;
+  contractsHash?: string;
+  /** Plan-backed items only; its presence is the source discriminator. */
+  planPath?: string;
+  /** Plan-backed items only: exact SHA-256 of the approved Plan bytes. */
+  planHash?: string;
   planId?: string;
+  /** Plan-backed root items only: the HEAD pinned by `queue add-plan`. */
+  planBaseCommit?: string;
+  /** Plan-backed items only: the exact materialized attempt-chain identity. */
+  materialization?: QueuePlanMaterialization;
   worker: QueueWorker;
   model?: string;
   dependsOn: string[];
@@ -76,6 +112,53 @@ export interface QueueItem {
   createdAt: string;
   updatedAt: string;
   reason?: string;
+}
+
+/** Frozen contracts path/hash for one queue item, whatever its source kind. */
+export interface QueueContractsIdentity {
+  contractsPath: string;
+  contractsHash: string;
+}
+
+export type PlanBackedQueueItem = QueueItem & {
+  planPath: string;
+  planHash: string;
+  planId: string;
+  contractsPath?: undefined;
+  contractsHash?: undefined;
+};
+
+/** `planPath` presence is the v0 source discriminator; no source field exists. */
+export function isPlanBackedQueueItem(
+  item: QueueItem,
+): item is PlanBackedQueueItem {
+  return typeof item.planPath === "string" && item.planPath.trim() !== "";
+}
+
+/**
+ * Exact frozen contracts identity for dispatch and lineage checks. A Plan item
+ * has none until its materialization has been recorded.
+ */
+export function queueItemContractsIdentity(
+  item: QueueItem,
+): QueueContractsIdentity | undefined {
+  if (isPlanBackedQueueItem(item)) {
+    if (!item.materialization) return undefined;
+    return {
+      contractsPath: item.materialization.contractsPath,
+      contractsHash: item.materialization.contractsHash,
+    };
+  }
+  if (
+    typeof item.contractsPath === "string" &&
+    typeof item.contractsHash === "string"
+  ) {
+    return {
+      contractsPath: item.contractsPath,
+      contractsHash: item.contractsHash,
+    };
+  }
+  return undefined;
 }
 
 export interface QueueDocument {
@@ -186,33 +269,44 @@ export interface QueueContractsCheck {
 export function checkQueueContracts(
   item: Pick<QueueItem, "contractsPath" | "contractsHash">,
 ): QueueContractsCheck {
+  const contractsPath = item.contractsPath;
+  const expected = item.contractsHash;
+  if (typeof contractsPath !== "string" || typeof expected !== "string") {
+    return {
+      ok: false,
+      contractsPath: contractsPath ?? "",
+      expected: expected ?? "",
+      actual: null,
+      reason: "contracts identity is missing for this queue item",
+    };
+  }
   let actual: string;
   try {
-    actual = hashFileSha256(item.contractsPath);
+    actual = hashFileSha256(contractsPath);
   } catch (error) {
     return {
       ok: false,
-      contractsPath: item.contractsPath,
-      expected: item.contractsHash,
+      contractsPath,
+      expected,
       actual: null,
       reason: errorMessage(error),
     };
   }
-  if (actual !== item.contractsHash) {
+  if (actual !== expected) {
     return {
       ok: false,
-      contractsPath: item.contractsPath,
-      expected: item.contractsHash,
+      contractsPath,
+      expected,
       actual,
       reason:
-        `contracts changed: ${item.contractsPath} ` +
-        `(expected sha256 ${item.contractsHash}, found ${actual})`,
+        `contracts changed: ${contractsPath} ` +
+        `(expected sha256 ${expected}, found ${actual})`,
     };
   }
   return {
     ok: true,
-    contractsPath: item.contractsPath,
-    expected: item.contractsHash,
+    contractsPath,
+    expected,
     actual,
   };
 }
@@ -252,13 +346,14 @@ export function loadQueue(repoRoot: string): QueueDocument {
       `invalid JSON in queue ${path}: ${errorMessage(error)}`,
     );
   }
-  return parseQueueDocument(parsed, path);
+  return parseQueueDocument(parsed, path, resolve(repoRoot));
 }
 
 /** Validate and atomically replace the queue JSON. */
 export function saveQueue(repoRoot: string, document: QueueDocument): void {
-  const normalized = parseQueueDocument(document, "queue");
-  writeJsonAtomic(queuePaths(repoRoot).queuePath, normalized);
+  const root = resolve(repoRoot);
+  const normalized = parseQueueDocument(document, "queue", root);
+  writeJsonAtomic(queuePaths(root).queuePath, normalized);
 }
 
 export interface QueueCounts {
@@ -353,17 +448,9 @@ export function addQueueItem(
     }
 
     const worker = input.worker ?? "claude";
-    if (worker !== "claude" && worker !== "codex") {
-      throw new QueueValidationError(
-        `--worker must be claude or codex (got ${String(worker)})`,
-      );
-    }
+    validateWorkerInput(worker);
     const maxAttempts = input.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
-    if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
-      throw new QueueValidationError(
-        `maxAttempts must be a positive integer (got ${String(maxAttempts)})`,
-      );
-    }
+    validateMaxAttemptsInput(maxAttempts);
 
     const planId = optionalNonEmpty(input.planId);
     const model = optionalNonEmpty(input.model);
@@ -373,6 +460,139 @@ export function addQueueItem(
       contractsPath,
       contractsHash,
       ...(planId !== undefined ? { planId } : {}),
+      worker,
+      ...(model !== undefined ? { model } : {}),
+      dependsOn,
+      status: "pending",
+      attempts: 0,
+      maxAttempts,
+      runIds: [],
+      nextAction: "start",
+      createdAt: at,
+      updatedAt: at,
+    };
+    document.items.push(item);
+    document.updatedAt = at;
+    saveQueue(root, document);
+    return item;
+  });
+}
+
+export interface AddPlanQueueItemInput {
+  id: string;
+  /** Resolved against the repository root when relative. */
+  planPath: string;
+  dependsOn?: string[];
+  worker?: QueueWorker;
+  model?: string;
+  maxAttempts?: number;
+}
+
+/**
+ * Add one explicitly approved Plan. The Plan is read exactly once under the
+ * queue lock, snapshotted as an absolute path plus SHA-256, parsed and compiled
+ * at the repository HEAD captured by this mutation. Nothing is materialized or
+ * dispatched here: the queue only persists the human authority.
+ */
+export function addPlanQueueItem(
+  repoRoot: string,
+  input: AddPlanQueueItemInput,
+): QueueItem {
+  const root = resolve(repoRoot);
+  return withQueueLock(root, () => {
+    const document = loadQueue(root);
+    assertSafeQueueId(input.id, "queue id");
+    if (document.items.some((item) => item.id === input.id)) {
+      throw new QueueValidationError(
+        `duplicate queue id ${JSON.stringify(input.id)}`,
+      );
+    }
+    if (typeof input.planPath !== "string" || !input.planPath.trim()) {
+      throw new QueueValidationError("planPath must be a non-empty string");
+    }
+    const planPath = isAbsolute(input.planPath)
+      ? resolve(input.planPath)
+      : resolve(root, input.planPath);
+
+    let planBytes: Buffer;
+    try {
+      planBytes = readFileSync(planPath);
+    } catch (error) {
+      throw new QueueValidationError(
+        `Plan file is missing or unreadable: ${planPath} ` +
+          `(${errorMessage(error)})`,
+      );
+    }
+    const planHash = sha256Hex(planBytes);
+    let parsed: unknown;
+    try {
+      parsed = parsePlanJson(planBytes.toString("utf8"));
+    } catch (error) {
+      throw new QueueValidationError(
+        `cannot parse Plan ${planPath}: ${errorMessage(error)}`,
+      );
+    }
+
+    const dependsOn = uniqueStrings(input.dependsOn ?? []);
+    if (dependsOn.length > 1) {
+      throw new QueueValidationError(
+        `plan-backed queue item ${JSON.stringify(input.id)} supports at most ` +
+          `one dependency in v0 (got ${dependsOn.length})`,
+      );
+    }
+    for (const dependency of dependsOn) {
+      assertSafeQueueId(dependency, "dependency id");
+      if (!document.items.some((item) => item.id === dependency)) {
+        throw new QueueValidationError(
+          `queue item ${JSON.stringify(input.id)} depends on unknown item ` +
+            JSON.stringify(dependency),
+        );
+      }
+    }
+    const cycle = findCycle([
+      ...document.items.map((item) => ({
+        id: item.id,
+        dependsOn: item.dependsOn,
+      })),
+      { id: input.id, dependsOn },
+    ]);
+    if (!cycle.ok) {
+      throw new QueueValidationError(
+        `dependency cycle: ${cycle.cycle.join(" -> ")}`,
+      );
+    }
+
+    // The root base is the HEAD captured by this mutation. It is persisted
+    // only for root items; a dependent base comes from the upstream run.
+    const planBaseCommit = resolveRepositoryHead(root);
+    let compiled: ReturnType<typeof compilePlan>;
+    try {
+      compiled = compilePlan(parsed, { baseCommit: planBaseCommit });
+    } catch (error) {
+      throw new QueueValidationError(
+        `invalid Plan ${planPath}: ${errorMessage(error)}`,
+      );
+    }
+    // v0 Plan-id invariant: the approved Plan id is the queue item id.
+    if (compiled.planId !== input.id) {
+      throw new QueueValidationError(
+        `Plan id mismatch: Plan declares ${JSON.stringify(compiled.planId)}, ` +
+          `queue item id is ${JSON.stringify(input.id)}`,
+      );
+    }
+
+    const worker = input.worker ?? "claude";
+    validateWorkerInput(worker);
+    const maxAttempts = input.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    validateMaxAttemptsInput(maxAttempts);
+    const model = optionalNonEmpty(input.model);
+    const at = now();
+    const item: QueueItem = {
+      id: input.id,
+      planPath,
+      planHash,
+      planId: compiled.planId,
+      ...(dependsOn.length === 0 ? { planBaseCommit } : {}),
       worker,
       ...(model !== undefined ? { model } : {}),
       dependsOn,
@@ -736,6 +956,51 @@ function assertSafeQueueId(value: string, label: string): void {
   }
 }
 
+function validateWorkerInput(worker: QueueWorker): void {
+  if (worker !== "claude" && worker !== "codex") {
+    throw new QueueValidationError(
+      `--worker must be claude or codex (got ${String(worker)})`,
+    );
+  }
+}
+
+function validateMaxAttemptsInput(maxAttempts: number): void {
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    throw new QueueValidationError(
+      `maxAttempts must be a positive integer (got ${String(maxAttempts)})`,
+    );
+  }
+}
+
+function sha256Hex(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** Resolve the repository HEAD exactly once at queue-mutation time. */
+function resolveRepositoryHead(repoRoot: string): string {
+  const result = spawnSync("git", ["rev-parse", "--verify", "HEAD^{commit}"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  if (result.error !== undefined || result.status !== 0) {
+    const detail =
+      result.error?.message ||
+      (result.stderr || result.stdout).trim() ||
+      `git exited ${result.status}`;
+    throw new QueueValidationError(
+      `cannot resolve repository HEAD in ${repoRoot}: ${detail}`,
+    );
+  }
+  const head = result.stdout.trim().toLowerCase();
+  if (!FULL_COMMIT_PATTERN.test(head)) {
+    throw new QueueValidationError(
+      `repository HEAD did not resolve to a full commit hash: ` +
+        JSON.stringify(result.stdout.trim()),
+    );
+  }
+  return head;
+}
+
 function optionalNonEmpty(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
   const trimmed = value.trim();
@@ -797,6 +1062,7 @@ function parseQueueLock(raw: unknown): QueueLockInfo {
 function parseQueueDocument(
   raw: unknown,
   source: string,
+  repoRoot: string,
 ): QueueDocument {
   if (!isRecord(raw)) {
     throw new QueueValidationError(`${source}: queue must be an object`);
@@ -819,7 +1085,11 @@ function parseQueueDocument(
   const items: QueueItem[] = [];
   const ids = new Set<string>();
   for (const [index, value] of raw.items.entries()) {
-    const item = parseQueueItem(value, `${source}: items[${index}]`);
+    const item = parseQueueItem(
+      value,
+      `${source}: items[${index}]`,
+      repoRoot,
+    );
     if (ids.has(item.id)) {
       throw new QueueValidationError(
         `${source}: duplicate queue id ${JSON.stringify(item.id)}`,
@@ -832,7 +1102,11 @@ function parseQueueDocument(
   return { version: QUEUE_VERSION, updatedAt: raw.updatedAt, items };
 }
 
-function parseQueueItem(raw: unknown, source: string): QueueItem {
+function parseQueueItem(
+  raw: unknown,
+  source: string,
+  repoRoot: string,
+): QueueItem {
   if (!isRecord(raw)) {
     throw new QueueValidationError(`${source}: item must be an object`);
   }
@@ -841,19 +1115,95 @@ function parseQueueItem(raw: unknown, source: string): QueueItem {
       `${source}: invalid queue id ${JSON.stringify(raw.id)}`,
     );
   }
-  if (typeof raw.contractsPath !== "string" || !raw.contractsPath.trim()) {
-    throw new QueueValidationError(
-      `${source}: contractsPath must be a non-empty string`,
-    );
+
+  // `planPath` presence is the only source discriminator. Legacy
+  // contract-backed items never define it.
+  const planBacked = raw.planPath !== undefined;
+  let contractsPath: string | undefined;
+  let contractsHash: string | undefined;
+  let planPath: string | undefined;
+  let planHash: string | undefined;
+  let planId: string | undefined;
+  let planBaseCommit: string | undefined;
+
+  if (planBacked) {
+    if (typeof raw.planPath !== "string" || !raw.planPath.trim()) {
+      throw new QueueValidationError(
+        `${source}: planPath must be a non-empty string`,
+      );
+    }
+    if (raw.contractsPath !== undefined || raw.contractsHash !== undefined) {
+      throw new QueueValidationError(
+        `${source}: plan-backed item must not define a top-level contracts identity`,
+      );
+    }
+    planPath = raw.planPath;
+    if (
+      typeof raw.planHash !== "string" ||
+      !SHA256_PATTERN.test(raw.planHash)
+    ) {
+      throw new QueueValidationError(
+        `${source}: planHash must be a hex SHA-256 digest`,
+      );
+    }
+    planHash = raw.planHash;
+    if (typeof raw.planId !== "string" || !QUEUE_ID_PATTERN.test(raw.planId)) {
+      throw new QueueValidationError(
+        `${source}: planId must be a safe queue id for a plan-backed item`,
+      );
+    }
+    if (raw.planId !== raw.id) {
+      throw new QueueValidationError(
+        `${source}: planId ${JSON.stringify(raw.planId)} must equal queue id ` +
+          `${JSON.stringify(raw.id)}`,
+      );
+    }
+    planId = raw.planId;
+    if (raw.planBaseCommit !== undefined) {
+      if (
+        typeof raw.planBaseCommit !== "string" ||
+        !FULL_COMMIT_PATTERN.test(raw.planBaseCommit)
+      ) {
+        throw new QueueValidationError(
+          `${source}: planBaseCommit must be a full git commit hash ` +
+            "(40 or 64 hex characters)",
+        );
+      }
+      planBaseCommit = raw.planBaseCommit;
+    }
+  } else {
+    for (const field of [
+      "planHash",
+      "planBaseCommit",
+      "materialization",
+    ] as const) {
+      if (raw[field] !== undefined) {
+        throw new QueueValidationError(
+          `${source}: ${field} requires planPath (plan-backed items only)`,
+        );
+      }
+    }
+    if (typeof raw.contractsPath !== "string" || !raw.contractsPath.trim()) {
+      throw new QueueValidationError(
+        `${source}: contractsPath must be a non-empty string`,
+      );
+    }
+    if (
+      typeof raw.contractsHash !== "string" ||
+      !SHA256_PATTERN.test(raw.contractsHash)
+    ) {
+      throw new QueueValidationError(
+        `${source}: contractsHash must be a hex SHA-256 digest`,
+      );
+    }
+    contractsPath = raw.contractsPath;
+    contractsHash = raw.contractsHash;
+    if (raw.planId !== undefined && typeof raw.planId !== "string") {
+      throw new QueueValidationError(`${source}: planId must be a string`);
+    }
+    planId = raw.planId as string | undefined;
   }
-  if (
-    typeof raw.contractsHash !== "string" ||
-    !SHA256_PATTERN.test(raw.contractsHash)
-  ) {
-    throw new QueueValidationError(
-      `${source}: contractsHash must be a hex SHA-256 digest`,
-    );
-  }
+
   if (raw.worker !== "claude" && raw.worker !== "codex") {
     throw new QueueValidationError(
       `${source}: worker must be claude or codex`,
@@ -906,7 +1256,7 @@ function parseQueueItem(raw: unknown, source: string): QueueItem {
       );
     }
   }
-  for (const field of ["lastRunId", "reason", "model", "planId"] as const) {
+  for (const field of ["lastRunId", "reason", "model"] as const) {
     if (raw[field] !== undefined && typeof raw[field] !== "string") {
       throw new QueueValidationError(
         `${source}: ${field} must be a string`,
@@ -914,18 +1264,82 @@ function parseQueueItem(raw: unknown, source: string): QueueItem {
     }
   }
 
+  const dependsOn = uniqueStrings(raw.dependsOn as string[]);
+  const runIds = uniqueStrings(raw.runIds as string[]);
+
+  if (planBacked) {
+    if (dependsOn.length === 0) {
+      if (planBaseCommit === undefined) {
+        throw new QueueValidationError(
+          `${source}: root plan-backed item requires planBaseCommit`,
+        );
+      }
+    } else if (dependsOn.length === 1) {
+      if (planBaseCommit !== undefined) {
+        throw new QueueValidationError(
+          `${source}: dependent plan-backed item must not define ` +
+            "planBaseCommit",
+        );
+      }
+    } else {
+      throw new QueueValidationError(
+        `${source}: plan-backed item supports at most one dependency`,
+      );
+    }
+
+    const materialization =
+      raw.materialization === undefined
+        ? undefined
+        : parsePlanMaterialization(
+            raw.materialization,
+            `${source}.materialization`,
+            {
+              repoRoot,
+              id: raw.id,
+              planPath: planPath as string,
+              planHash: planHash as string,
+              planId: planId as string,
+              ...(planBaseCommit !== undefined ? { planBaseCommit } : {}),
+              dependsOn,
+            },
+          );
+
+    return {
+      id: raw.id,
+      planPath: planPath as string,
+      planHash: planHash as string,
+      planId: planId as string,
+      ...(planBaseCommit !== undefined ? { planBaseCommit } : {}),
+      ...(materialization !== undefined ? { materialization } : {}),
+      worker: raw.worker,
+      ...(raw.model !== undefined ? { model: raw.model as string } : {}),
+      dependsOn,
+      status: raw.status as QueueItemStatus,
+      attempts: raw.attempts as number,
+      maxAttempts: raw.maxAttempts as number,
+      runIds,
+      ...(raw.lastRunId !== undefined
+        ? { lastRunId: raw.lastRunId as string }
+        : {}),
+      nextAction: raw.nextAction,
+      createdAt: raw.createdAt as string,
+      updatedAt: raw.updatedAt as string,
+      ...(raw.reason !== undefined ? { reason: raw.reason as string } : {}),
+    };
+  }
+
   return {
     id: raw.id,
-    contractsPath: raw.contractsPath,
-    contractsHash: raw.contractsHash,
-    ...(raw.planId !== undefined ? { planId: raw.planId as string } : {}),
+    contractsPath: contractsPath as string,
+    contractsHash: contractsHash as string,
+    ...(planId !== undefined ? { planId } : {}),
     worker: raw.worker,
     ...(raw.model !== undefined ? { model: raw.model as string } : {}),
-    dependsOn: uniqueStrings(raw.dependsOn as string[]),
+    dependsOn,
     status: raw.status as QueueItemStatus,
     attempts: raw.attempts as number,
     maxAttempts: raw.maxAttempts as number,
-    runIds: uniqueStrings(raw.runIds as string[]),
+    runIds,
     ...(raw.lastRunId !== undefined
       ? { lastRunId: raw.lastRunId as string }
       : {}),
@@ -934,6 +1348,191 @@ function parseQueueItem(raw: unknown, source: string): QueueItem {
     updatedAt: raw.updatedAt as string,
     ...(raw.reason !== undefined ? { reason: raw.reason as string } : {}),
   };
+}
+
+interface PlanMaterializationItemContext {
+  repoRoot: string;
+  id: string;
+  planPath: string;
+  planHash: string;
+  planId: string;
+  planBaseCommit?: string;
+  dependsOn: string[];
+}
+
+function parsePlanMaterialization(
+  raw: unknown,
+  source: string,
+  item: PlanMaterializationItemContext,
+): QueuePlanMaterialization {
+  if (!isRecord(raw)) {
+    throw new QueueValidationError(
+      `${source}: materialization must be an object`,
+    );
+  }
+
+  const planPath = requireNonEmptyField(raw.planPath, `${source}.planPath`);
+  if (resolve(planPath) !== resolve(item.planPath)) {
+    throw new QueueValidationError(
+      `${source}.planPath must match the item planPath ${item.planPath}`,
+    );
+  }
+  const planHash = requireNonEmptyField(raw.planHash, `${source}.planHash`);
+  if (!SHA256_PATTERN.test(planHash)) {
+    throw new QueueValidationError(
+      `${source}.planHash must be a hex SHA-256 digest`,
+    );
+  }
+  if (planHash.toLowerCase() !== item.planHash.toLowerCase()) {
+    throw new QueueValidationError(
+      `${source}.planHash must match the item planHash`,
+    );
+  }
+  const planId = requireNonEmptyField(raw.planId, `${source}.planId`);
+  if (planId !== item.planId) {
+    throw new QueueValidationError(
+      `${source}.planId must match the item planId ${item.planId}`,
+    );
+  }
+  const baseCommit = requireNonEmptyField(
+    raw.baseCommit,
+    `${source}.baseCommit`,
+  );
+  if (!FULL_COMMIT_PATTERN.test(baseCommit)) {
+    throw new QueueValidationError(
+      `${source}.baseCommit must be a full git commit hash`,
+    );
+  }
+  const contractsPath = requireNonEmptyField(
+    raw.contractsPath,
+    `${source}.contractsPath`,
+  );
+  const contractsHash = requireNonEmptyField(
+    raw.contractsHash,
+    `${source}.contractsHash`,
+  );
+  if (!SHA256_PATTERN.test(contractsHash)) {
+    throw new QueueValidationError(
+      `${source}.contractsHash must be a hex SHA-256 digest`,
+    );
+  }
+  const materializedAt = requireNonEmptyField(
+    raw.materializedAt,
+    `${source}.materializedAt`,
+  );
+
+  const upstreamQueueId = optionalStringField(
+    raw.upstreamQueueId,
+    `${source}.upstreamQueueId`,
+  );
+  const upstreamRunId = optionalStringField(
+    raw.upstreamRunId,
+    `${source}.upstreamRunId`,
+  );
+  const upstreamIntegrationHead = optionalStringField(
+    raw.upstreamIntegrationHead,
+    `${source}.upstreamIntegrationHead`,
+  );
+
+  if (item.dependsOn.length === 0) {
+    if (
+      item.planBaseCommit === undefined ||
+      baseCommit.toLowerCase() !== item.planBaseCommit.toLowerCase()
+    ) {
+      throw new QueueValidationError(
+        `${source}.baseCommit must equal the root planBaseCommit`,
+      );
+    }
+    if (
+      upstreamQueueId !== undefined ||
+      upstreamRunId !== undefined ||
+      upstreamIntegrationHead !== undefined
+    ) {
+      throw new QueueValidationError(
+        `${source}: root materialization must not record upstream lineage`,
+      );
+    }
+  } else {
+    const dependency = item.dependsOn[0]!;
+    if (upstreamQueueId !== dependency) {
+      throw new QueueValidationError(
+        `${source}.upstreamQueueId must equal the item dependency ` +
+          JSON.stringify(dependency),
+      );
+    }
+    if (upstreamRunId === undefined) {
+      throw new QueueValidationError(
+        `${source}.upstreamRunId is required for a dependent item`,
+      );
+    }
+    if (upstreamIntegrationHead === undefined) {
+      throw new QueueValidationError(
+        `${source}.upstreamIntegrationHead is required for a dependent item`,
+      );
+    }
+    if (!FULL_COMMIT_PATTERN.test(upstreamIntegrationHead)) {
+      throw new QueueValidationError(
+        `${source}.upstreamIntegrationHead must be a full git commit hash`,
+      );
+    }
+    if (
+      upstreamIntegrationHead.toLowerCase() !== baseCommit.toLowerCase()
+    ) {
+      throw new QueueValidationError(
+        `${source}.baseCommit must equal upstreamIntegrationHead`,
+      );
+    }
+  }
+
+  let expectedContractsPath: string;
+  try {
+    expectedContractsPath = materializedContractsPath(
+      item.repoRoot,
+      item.id,
+      baseCommit,
+      item.planHash,
+    );
+  } catch (error) {
+    throw new QueueValidationError(
+      `${source}: invalid queue id for materialization: ${errorMessage(error)}`,
+    );
+  }
+  if (resolve(contractsPath) !== resolve(expectedContractsPath)) {
+    throw new QueueValidationError(
+      `${source}.contractsPath must be the deterministic artifact path ` +
+        expectedContractsPath,
+    );
+  }
+
+  return {
+    planPath,
+    planHash,
+    planId,
+    baseCommit,
+    ...(upstreamQueueId !== undefined ? { upstreamQueueId } : {}),
+    ...(upstreamRunId !== undefined ? { upstreamRunId } : {}),
+    ...(upstreamIntegrationHead !== undefined
+      ? { upstreamIntegrationHead }
+      : {}),
+    contractsPath,
+    contractsHash,
+    materializedAt,
+  };
+}
+
+function requireNonEmptyField(value: unknown, source: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new QueueValidationError(`${source} must be a non-empty string`);
+  }
+  return value;
+}
+
+function optionalStringField(
+  value: unknown,
+  source: string,
+): string | undefined {
+  if (value === undefined) return undefined;
+  return requireNonEmptyField(value, source);
 }
 
 const QUEUE_STATUSES: readonly QueueItemStatus[] = [

@@ -3,6 +3,7 @@
 > Status: implemented (Supervisor v0 slice) — 2026-10-26
 > Attempt continuity and worker progress added 2026-10-27
 > Foreground orchestration queue added 2026-10-27 (separate upstream command)
+> Plan-backed chained queue base added 2026-10-27
 > Design authority: [design/supervisor-v0.md](../design/supervisor-v0.md)
 > Attempt continuity / progress design:
 > [design/attempt-continuity-progress-v0.md](../design/attempt-continuity-progress-v0.md)
@@ -12,6 +13,9 @@
 > Orchestration queue design:
 > [design/durable-orchestration-v0.md](../design/durable-orchestration-v0.md) and
 > [docs/evidence/ORCHESTRATION_QUEUE.md](evidence/ORCHESTRATION_QUEUE.md)
+> Plan-backed chain design:
+> [design/plan-backed-chain-v0.md](../design/plan-backed-chain-v0.md) and
+> [docs/evidence/PLAN_BACKED_CHAIN.md](evidence/PLAN_BACKED_CHAIN.md)
 > Scope: one local git repository, one supervisor at a time; one foreground
 > queue dispatches at a time
 
@@ -29,9 +33,12 @@ human reviews/edits the Plan, the existing plan compiler/`plan-dispatch` path
 produces frozen contracts, and `start` is an explicit later action.
 
 The separate foreground orchestration queue section is also explicit and
-upstream. It holds already-approved frozen contracts, dispatches them one at a
-time through `start`/`resume`, and never writes a RunManifest. It is not a
-daemon and does not change the supervisor's task-level authority.
+upstream. It holds already-approved frozen contracts or approved Plans, and
+dispatches them one at a time through `start`/`resume`. A Plan-backed item is
+compiled deterministically into a queue-owned contracts file immediately before
+dispatch, then enters the unchanged Supervisor path; the queue never writes a
+RunManifest. It is not a daemon and does not change the supervisor's
+task-level authority.
 
 Attempt continuity is **worktree continuity**, not provider-conversation
 resume. Worker progress is **advisory**, not run authority. Neither addition
@@ -576,6 +583,9 @@ scheduler, no parallel dispatch, and no 24h unattended claim.
 cliyard queue add <contracts.json> --repo <path> --id <queue-id>
                [--depends-on <id>]... [--worker claude|codex] [--model id]
                [--plan-id id] [--max-attempts n] [--json]
+cliyard queue add-plan <plan.json> --repo <path> --id <queue-id>
+               [--depends-on <id>] [--worker claude|codex] [--model id]
+               [--max-attempts n] [--json]
 cliyard queue list --repo <path> [--json]
 cliyard queue retry <queue-id> --repo <path> [--json]
 cliyard queue cancel <queue-id> --repo <path> [--json]
@@ -589,9 +599,24 @@ cliyard queue run --repo <path> [--continue-on-blocked]
   SHA-256, and rejects duplicate/unsafe ids, unknown dependencies and cycles.
   The queue does not validate that the contracts are frozen; the Supervisor
   does that at dispatch time, and a failure becomes a blocked item.
-- An item is ready when it is `pending`, every dependency is `completed`, the
-  current contracts bytes still match the frozen hash, and `attempts <
-  maxAttempts` (default `3`).
+- `queue add-plan` reads an explicitly approved Plan once, freezes its absolute
+  path and SHA-256, requires its Plan id to equal the queue id, and persists a
+  pinned root HEAD (`planBaseCommit`). A Plan item supports at most one
+  dependency. The Plan is compiled at that pinned HEAD only to validate it and
+  enforce the Plan-id invariant; nothing is materialized or dispatched at add.
+  Before its first dispatch, the queue
+  verifies the Plan bytes, compiles with the existing `compilePlan` at the exact
+  base (root `planBaseCommit`, or the completed upstream RunManifest
+  `integrationHead`), writes the deterministic artifact
+  `.cliyard/queue/materialized/<id>/<base>-<plan-hash>.contracts.json`, hashes
+  it, and only then writes `running`/the attempt and calls the Supervisor.
+  Retry/resume re-verifies the recorded artifact, base, upstream lineage and
+  RunManifest identity instead of recompiling; a changed Plan, artifact or
+  upstream evidence blocks.
+- An item is ready when it is `pending`, every dependency is `completed`, and
+  `attempts < maxAttempts` (default `3`). A contract-backed item additionally
+  requires its current contracts bytes to match the frozen hash; a Plan-backed
+  item verifies or creates its materialization immediately before dispatch.
 - Dispatch is sequential. The queue persists `running` and increments
   `attempts` **before** calling the Supervisor. It invokes
   `supervisor start <contracts> --repo <repo> --worker <worker>` for a new
@@ -610,10 +635,18 @@ cliyard queue run --repo <path> [--continue-on-blocked]
   RunManifest. Completed and cancelled items are monotonic and cannot be
   retried. Retry applies to the whole Supervisor run (`--retry-rejected`), not
   one task.
-- A dependency gates dispatch and failure propagation only. It does **not**
-  chain integration branches: each Supervisor run uses the `baseCommit` frozen
-  in its own contracts file. A dependant therefore does not automatically
-  contain its dependency's accepted commits.
+- For **contract-backed** items a dependency still gates dispatch and failure
+  propagation only. It does **not** chain integration branches: each run uses
+  the `baseCommit` frozen in its own contracts file, so a contract-backed
+  dependant does not automatically contain its dependency's accepted commits.
+- For **Plan-backed** items the dependent contracts are compiled at the
+  completed upstream RunManifest `integrationHead`, so that run's
+  `baseCommit` is the upstream head and its integration branch retains the
+  upstream head as an ancestor. This is a linear, one-dependency chain;
+  multi-parent integration and a merge queue are not implemented.
+- A Plan materialization failure (changed/missing Plan, invalid Plan, bad or
+  ambiguous upstream evidence, changed/missing artifact) blocks before the
+  attempt increment and before any Supervisor start.
 - `queue run` exits `1` when any item is blocked after the invocation, and
   `0` otherwise. Pending work left by `--max-dispatches` does not make it exit
   non-zero (focused test).
@@ -647,16 +680,22 @@ cliyard queue run --repo <path> [--continue-on-blocked]
 ```text
 <repo>/.cliyard/queue.json   ordered queue items (atomic replace)
 <repo>/.cliyard/queue.lock   exclusive queue ownership (O_EXCL, 0600)
+<repo>/.cliyard/queue/materialized/<id>/<base>-<plan-hash>.contracts.json
+                             Plan-backed contracts artifact (create-only, hashed)
 ```
 
-Both are gitignored. Queue ids are labels, not RunManifest foreign keys; the
+All are gitignored. Queue ids are labels, not RunManifest foreign keys; the
 recorded `runIds`/`lastRunId` are the only run correlation. There is no queue
-history, compaction, id reuse or in-place contract update.
+history, compaction, id reuse, in-place contract update or artifact GC.
 
 Measured commands, queue JSON, dependency order, completion, blocked
 stop/continue, retry/resume, stale-running crash windows, changed-contract
 fail-closed behavior, lock evidence and final test counts:
 [docs/evidence/ORCHESTRATION_QUEUE.md](evidence/ORCHESTRATION_QUEUE.md).
+Plan-backed add validation, artifact layout/hash, upstream lineage,
+idempotency/retry, fail-closed matrix, integration ancestry and the real
+Claude Code + DeepSeek two-item chains:
+[docs/evidence/PLAN_BACKED_CHAIN.md](evidence/PLAN_BACKED_CHAIN.md).
 
 ## 9. Limitations
 
@@ -711,12 +750,22 @@ fail-closed behavior, lock evidence and final test counts:
   the compiler/freeze path, then `start` the supervisor explicitly. The
   supervisor does not invoke the architect.
 - **The queue is explicit approval, not automatic orchestration.** Items must
-  already be frozen contracts added by an operator. The queue does not create,
-  approve, edit or re-freeze them; changed/missing bytes block dispatch.
-- **Queue dependencies gate dispatch, not code state.** Each queued run uses
-  its own frozen `baseCommit`; a dependant's integration branch does not
-  automatically include its dependency's accepted work. Human review/merge and
-  a new approved contract are required to build on earlier work.
+  be frozen contracts added by an operator, or an approved Plan added with
+  `queue add-plan`. The queue does not create, approve, edit or re-freeze
+  either; changed/missing contract bytes, a changed Plan or changed
+  materialization/upstream evidence block dispatch.
+- **Contract-backed queue dependencies gate dispatch, not code state.** Each
+  contract-backed run uses its own frozen `baseCommit`, so its integration
+  branch does not include its dependency's accepted work. **Plan-backed** items
+  are the exception: v0 compiles the dependent at the completed upstream
+  RunManifest `integrationHead`, so the downstream branch starts at that head
+  and retains it as an ancestor. Only one linear dependency is supported; there
+  is no multi-parent integration or merge queue.
+- **Plan-backed inputs are frozen at add.** A changed Plan, artifact or upstream
+  evidence blocks; a different Plan or base requires a new queue item and run.
+  Explicit upstream `readPaths` can also trip the Supervisor's pre-existing
+  readPath preflight, which resolves against the control checkout rather than
+  the run base (measured; see the Plan-backed evidence).
 - **Queue crash recovery is fail-closed at the start boundary.** A `SIGKILL`
   after the queue persists `running` but before it records the run id leaves a
   stale `running` item that reconciles to `blocked`; the existing RunManifest
@@ -731,22 +780,28 @@ fail-closed behavior, lock evidence and final test counts:
 
 ## 10. Verification evidence
 
-On 2026-10-27 in this checkout (HEAD `20b9a64`):
+On 2026-10-27 in this checkout (HEAD `7cbd33d`):
 
 ```text
 npm run build                                             → pass
-focused queue file (tests/orchestration-queue.test.ts)    → 13/13 pass (1892.0 ms)
-npm test (full suite)                                     → 205/205 pass (11022.6 ms)
+focused plan-backed materializer                          → 16/16 pass (1587.0 ms)
+focused plan-backed queue core                            → 10/10 pass (4196.9 ms)
+focused plan-backed queue CLI                             → 5/5 pass (728.5 ms)
+npm test (full suite)                                     → 236/236 pass (12420.3 ms)
 ```
 
 These are single local runs, not a repeated-run flake rate or CI claim. The
-205-test run includes the prior attempt/progress/drill, Task Architect and
-supervisor suites plus the new queue tests; those other groups were not
-separately re-run this round. The earlier HEAD `3bc56e4` measurement recorded
-the focused architect file at 14/14 (2193.3 ms) and the full suite at 191/191;
-the architect CLI measurements (fake-worker guards and one real Claude Code +
-DeepSeek smoke) are recorded in
-[docs/evidence/TASK_ARCHITECT.md](evidence/TASK_ARCHITECT.md).
+236-test run includes the prior attempt/progress/drill, Task Architect,
+supervisor and orchestration-queue suites plus 31 new Plan-backed tests; those
+other groups were not separately re-run this round. Three real Claude Code +
+DeepSeek two-item chains completed 2/2 (17.2 s, 24.6 s and 21.4 s), each with
+the live downstream worktree at the upstream head and correct ancestor proof;
+the documented runs also re-verified final branch contents and the
+byte-identical no-op rerun. The earlier queue measurement at HEAD `20b9a64`
+was 13/13 focused and 205/205 full.
+Architect and Plan-backed real-provider measurements are recorded in
+[docs/evidence/TASK_ARCHITECT.md](evidence/TASK_ARCHITECT.md) and
+[docs/evidence/PLAN_BACKED_CHAIN.md](evidence/PLAN_BACKED_CHAIN.md).
 
 The supervisor suites cover manifest durability, active pointer, atomic writes,
 lock exclusivity/staleness, contracts/base rejection, `start`/`status`/
@@ -765,6 +820,16 @@ provider plus one real Claude Code + DeepSeek smoke are in
 [docs/evidence/ORCHESTRATION_QUEUE.md](evidence/ORCHESTRATION_QUEUE.md). They
 include a real `SIGKILL` during start (no recorded run id → `blocked`) and
 during resume (recorded run id → `pending` → same-run resume → `completed`).
+
+Plan-backed coverage is in `tests/plan-backed-materializer.test.ts`,
+`tests/plan-backed-queue-core.test.ts` and `tests/plan-backed-queue-cli.test.ts`
+(16/16, 10/10 and 5/5): pinned root base versus a moved `HEAD`, exact artifact
+paths/bytes/provenance, idempotent re-materialization, changed Plan/artifact
+fail-closed, upstream run/contracts/head/ancestry checks, blocked/cancelled/
+missing upstreams, retry of the same run with unchanged artifact bytes, stale
+`running` reconciliation, a local Supervisor chain with a fixture provider, and
+the `add-plan` CLI rejection/output matrix. The real-provider measurements are
+in [docs/evidence/PLAN_BACKED_CHAIN.md](evidence/PLAN_BACKED_CHAIN.md).
 
 Attempt continuity and progress coverage is in
 `tests/supervisor-attempt-reuse.test.ts`,
@@ -1048,7 +1113,7 @@ review/edit Plan
 Measured on 2026-10-27 at HEAD `3bc56e4`: `npm run build` passed; the focused
 architect file was 14/14 (a later doc-repair re-run on the same HEAD was also
 14/14); the full suite was 191/191 in one run. (The queue work moved HEAD to
-`20b9a64`; the current full suite is 205/205, section 10.) Fake-worker CLI
+`20b9a64`; the current full suite is 236/236, section 10.) Fake-worker CLI
 measurements covered dirty
 preflight with zero worker invocations, touched paths, a moved `HEAD`, an
 untracked or escaping design, an invalid plan id, a non-git target, invalid
@@ -1071,10 +1136,10 @@ Plan is an artifact for human review, and the later compiler/freeze and
 Supervisor start remain manual, explicit actions. The **foreground
 orchestration queue** (the Orchestration queue section) is now implemented over those explicit runs;
 it is still explicit-approval, sequential and not a daemon. The **next step is
-a supervised foreground long-run controller/daemon decision** after queue
-semantics are proven. Daemon/background service, cross-host recovery, SQLite
-manifests, browser evidence, parallel admission and automatic `main` merge
-remain non-goals.
+a supervised foreground long-run controller/daemon decision** after Plan-backed
+chain semantics are accepted. Daemon/background service, cross-host recovery,
+SQLite manifests, browser evidence, parallel admission and automatic `main`
+merge remain non-goals.
 
 ## 12. Related documents
 
@@ -1091,11 +1156,18 @@ remain non-goals.
   measured queue add/run/retry/cancel, blocked stop/continue, stale-running
   crash windows, changed-contract fail-closed behavior, lock evidence and the
   real provider smoke.
+- [design/plan-backed-chain-v0.md](../design/plan-backed-chain-v0.md) —
+  Plan-backed chained-queue design authority.
+- [docs/evidence/PLAN_BACKED_CHAIN.md](evidence/PLAN_BACKED_CHAIN.md) —
+  measured add-plan validation, pinned/upstream base lineage, artifact
+  layout/hash, idempotency/retry, fail-closed matrix, integration ancestry and
+  the real Claude Code + DeepSeek two-item chains.
 - [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md)
   — measured reuse, fresh-attempt, live stream, heartbeat and drill-recovery
   evidence.
 - [docs/NEXT_ITERATION.md](NEXT_ITERATION.md) — current status; the foreground
-  queue is complete, and the next step is a supervised foreground long-run
-  controller/daemon decision after queue semantics are proven.
+  queue and the Plan-backed chained queue base are complete, and the next step
+  is a supervised foreground long-run controller/daemon decision after
+  Plan-backed chain semantics are accepted.
 - [README.md](../README.md) — command overview.
 - [docs/KEY_MIND.md](KEY_MIND.md) — product thesis and the supervisor's role.

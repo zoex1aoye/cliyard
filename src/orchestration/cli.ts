@@ -7,11 +7,14 @@
  */
 import { resolve } from "node:path";
 import {
+  addPlanQueueItem,
   addQueueItem,
   cancelQueueItem,
+  isPlanBackedQueueItem,
   loadQueue,
   queueCounts,
   retryQueueItem,
+  type PlanBackedQueueItem,
   type QueueDocument,
   type QueueItem,
   type QueueWorker,
@@ -61,6 +64,8 @@ export async function runQueueCli(
   switch (cmd) {
     case "add":
       return addCommand(rest, log);
+    case "add-plan":
+      return addPlanCommand(rest, log);
     case "list":
       return listCommand(rest, log);
     case "retry":
@@ -127,6 +132,52 @@ function addCommand(rest: string[], log: (line: string) => void): number {
   return 0;
 }
 
+function addPlanCommand(rest: string[], log: (line: string) => void): number {
+  const repoRoot = repoFrom(rest);
+  const planArg = positionalArg(rest);
+  if (!planArg) {
+    throw new Error("queue add-plan: missing <plan.json>");
+  }
+  const id = arg("--id", rest);
+  if (!id) {
+    throw new Error("queue add-plan: missing --id <queue-id>");
+  }
+
+  const workerRaw = arg("--worker", rest) ?? "claude";
+  if (workerRaw !== "claude" && workerRaw !== "codex") {
+    throw new Error(
+      `queue add-plan: --worker must be claude or codex (got ${workerRaw})`,
+    );
+  }
+  const maxAttemptsRaw = arg("--max-attempts", rest);
+  const maxAttempts =
+    maxAttemptsRaw === undefined
+      ? undefined
+      : parsePositiveInt(maxAttemptsRaw, "--max-attempts");
+
+  const item = addPlanQueueItem(repoRoot, {
+    id,
+    planPath: planArg,
+    dependsOn: values("--depends-on", rest),
+    worker: workerRaw as QueueWorker,
+    model: arg("--model", rest),
+    maxAttempts,
+  });
+
+  if (has("--json", rest)) {
+    log(JSON.stringify(item, null, 2));
+  } else {
+    log(
+      `added queue item ${item.id}: ${item.status} ` +
+        `(worker=${item.worker}${item.model ? `/${item.model}` : ""}, ` +
+        `attempts=${item.attempts}/${item.maxAttempts}, ` +
+        `deps=${item.dependsOn.join(",") || "-"}, next=${item.nextAction})`,
+    );
+    printItemDetail(item, log);
+  }
+  return 0;
+}
+
 function listCommand(rest: string[], log: (line: string) => void): number {
   const repoRoot = repoFrom(rest);
   const document = loadQueue(repoRoot);
@@ -150,6 +201,7 @@ function retryCommand(rest: string[], log: (line: string) => void): number {
       `queue item ${item.id}: ${item.status} ` +
         `(next ${item.nextAction}, attempts ${item.attempts}/${item.maxAttempts})`,
     );
+    if (isPlanBackedQueueItem(item)) printItemDetail(item, log);
   }
   return 0;
 }
@@ -163,6 +215,7 @@ function cancelCommand(rest: string[], log: (line: string) => void): number {
     log(JSON.stringify(item, null, 2));
   } else {
     log(`queue item ${item.id}: ${item.status}`);
+    if (isPlanBackedQueueItem(item)) printItemDetail(item, log);
   }
   return 0;
 }
@@ -240,11 +293,50 @@ function printItemDetail(
   item: QueueItem,
   log: (line: string) => void,
 ): void {
+  if (isPlanBackedQueueItem(item)) {
+    printPlanDetail(item, log);
+    if (item.reason) log(`  reason: ${item.reason}`);
+    return;
+  }
   if (item.planId) log(`  plan: ${item.planId}`);
   log(
     `  contracts: ${item.contractsPath} (sha256 ${item.contractsHash})`,
   );
   if (item.reason) log(`  reason: ${item.reason}`);
+}
+
+function printPlanDetail(
+  item: PlanBackedQueueItem,
+  log: (line: string) => void,
+): void {
+  log(`  plan: ${item.planId}`);
+  log(`  plan path: ${item.planPath}`);
+  log(`  plan sha256: ${item.planHash}`);
+  if (item.dependsOn.length === 0) {
+    log(`  plan base: ${item.planBaseCommit} (frozen initial base)`);
+  } else {
+    log(
+      `  plan base: upstream ${item.dependsOn[0]} ` +
+        "(materialized before dispatch)",
+    );
+  }
+  const materialization = item.materialization;
+  if (!materialization) {
+    log("  contracts: not materialized yet");
+    return;
+  }
+  log(`  materialized base: ${materialization.baseCommit}`);
+  if (materialization.upstreamQueueId !== undefined) {
+    log(
+      `  upstream: queue ${materialization.upstreamQueueId} ` +
+        `run ${materialization.upstreamRunId ?? "-"} ` +
+        `integration head ${materialization.upstreamIntegrationHead ?? "-"}`,
+    );
+  }
+  log(
+    `  contracts: ${materialization.contractsPath} ` +
+      `(sha256 ${materialization.contractsHash})`,
+  );
 }
 
 function printRunSummary(
@@ -295,6 +387,18 @@ function printRunSummary(
   for (const item of summary.items) {
     if (item.status === "blocked") {
       log(`blocked ${item.id}: ${item.reason ?? "no reason recorded"}`);
+    }
+  }
+
+  const planItems = summary.items.filter(isPlanBackedQueueItem);
+  if (planItems.length > 0) {
+    log(`plans: ${planItems.length}`);
+    for (const item of planItems) {
+      log(
+        `  ${item.id}  ${item.status}  next=${item.nextAction}  ` +
+          `run=${item.lastRunId ?? "-"}`,
+      );
+      printItemDetail(item, log);
     }
   }
 }
@@ -370,6 +474,9 @@ Usage:
   cliyard queue add <contracts.json> --repo <path> --id <queue-id>
                     [--depends-on <id>]... [--worker claude|codex]
                     [--model id] [--max-attempts n] [--plan-id id] [--json]
+  cliyard queue add-plan <plan.json> --repo <path> --id <queue-id>
+                    [--depends-on <id>] [--worker claude|codex]
+                    [--model id] [--max-attempts n] [--json]
   cliyard queue list --repo <path> [--json]
   cliyard queue retry <queue-id> --repo <path> [--json]
   cliyard queue cancel <queue-id> --repo <path> [--json]
@@ -378,8 +485,11 @@ Usage:
 
 The queue freezes each contracts file's SHA-256 at add time and dispatches
 ready items sequentially through the Supervisor (start, or resume --retry-rejected
-for an existing run). A blocked item stops the run by default; with
---continue-on-blocked independent items continue and dependants are blocked.
+for an existing run). add-plan freezes the approved Plan's SHA-256 instead and
+compiles queue-owned contracts at a pinned base immediately before dispatch; a
+Plan item supports at most one queue dependency. A blocked item stops the run
+by default; with --continue-on-blocked independent items continue and
+dependants are blocked.
 Foreground only: no daemon, no parallel dispatch. The RunManifest remains the
 task authority and is never rewritten by the queue.`);
 }
