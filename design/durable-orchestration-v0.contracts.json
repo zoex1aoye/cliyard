@@ -1,0 +1,93 @@
+{
+  "planId": "durable-orchestration-v0",
+  "contracts": [
+    {
+      "taskId": "orchestration-queue-core",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Implement a durable foreground orchestration queue over existing frozen contract files and Supervisor runs. Add src/orchestration/queue-store.ts, src/orchestration/queue-runner.ts, src/orchestration/cli.ts, top-level cliyard queue wiring and package script. Persist <repo>/.cliyard/queue.json atomically and serialize mutations/dispatch with <repo>/.cliyard/queue.lock containing pid/host/token and stale same-host recovery. Queue items freeze contractsPath + SHA-256, plan/worker/model, dependsOn, status pending|running|completed|blocked|cancelled, attempts/maxAttempts, runIds/lastRunId, nextAction start|resume and timestamps. Implement queue add/list/retry/cancel/run with JSON and human output. Validate unique safe ids, existing dependencies and cycles at mutation time. Run ready items in dependency order by calling an injectable Supervisor runner defaulting to the existing runSupervisorCli: start for a new item and resume --retry-rejected for retryable existing runs. Persist running and increment attempts before dispatch; completed/cancelled items are monotonic; changed or missing contracts fail closed. Default queue run stops at first blocked item; --continue-on-blocked lets independent items continue while dependants of blocked work become blocked. --max-dispatches bounds one invocation. Reconcile stale running items against their RunManifest: completed becomes completed, interrupted/rejected resumable becomes pending nextAction resume, missing/ambiguous evidence becomes blocked. Treat the RunManifest as task authority and never rewrite it. Add focused tests with injected supervisor runners covering dependency order, completed monotonicity, blocked stop/continue propagation, retry resume, changed contracts, stale running recovery, lock serialization and CLI summaries. Do not add a daemon or background service."
+      ],
+      "nonGoals": [
+        "No daemon, launchd, systemd or cron",
+        "No automatic contract approval",
+        "No automatic model or budget escalation",
+        "No cross-repository queue",
+        "No SQLite",
+        "No parallel queue dispatch"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "design/durable-orchestration-v0.md",
+        "docs/SUPERVISOR_V0.md",
+        "src/supervisor/cli.ts",
+        "src/supervisor/store.ts",
+        "src/supervisor/types.ts",
+        "src/scheduler/dag.ts",
+        "src/planner/plan.ts",
+        "tests/supervisor-cli.test.ts",
+        "tests/supervisor-attempt-reuse.test.ts"
+      ],
+      "writePaths": [
+        "src/orchestration/queue-store.ts",
+        "src/orchestration/queue-runner.ts",
+        "src/orchestration/cli.ts",
+        "src/cli.ts",
+        "package.json",
+        "tests/orchestration-queue.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "f82b3e3fcaee486e4300d014cd4e778a8e7c3e97",
+      "verifyCommands": [
+        "npx tsx --test tests/orchestration-queue.test.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "orchestration-queue-docs",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Measure the implemented foreground orchestration queue through injected and real CLI paths, then document only observed behavior. Update README, NEXT_ITERATION and SUPERVISOR_V0; add docs/evidence/ORCHESTRATION_QUEUE.md with exact commands, queue JSON, dependency order, completion, blocked stop/continue, queue retry/resume, stale running recovery, changed-contract fail-closed behavior, lock evidence, final test counts and remaining limitations. State explicitly that this is a foreground explicit-approval queue, not a daemon, and that RunManifest remains task authority. Name the next step as a supervised foreground long-run controller/daemon decision after queue semantics are proven; preserve cross-host, SQLite, browser evidence, parallel admission and automatic main merge as non-goals."
+      ],
+      "nonGoals": [
+        "No source or test behavior changes",
+        "No invented evidence",
+        "No daemon or 24-hour execution claim",
+        "No automatic approval, push or main merge"
+      ],
+      "dependsOn": [
+        "orchestration-queue-core"
+      ],
+      "readPaths": [
+        "README.md",
+        "docs/NEXT_ITERATION.md",
+        "docs/SUPERVISOR_V0.md",
+        "design/durable-orchestration-v0.md",
+        "src/orchestration/queue-store.ts",
+        "src/orchestration/queue-runner.ts",
+        "src/orchestration/cli.ts",
+        "tests/orchestration-queue.test.ts"
+      ],
+      "writePaths": [
+        "README.md",
+        "docs/NEXT_ITERATION.md",
+        "docs/SUPERVISOR_V0.md",
+        "docs/evidence/ORCHESTRATION_QUEUE.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "f82b3e3fcaee486e4300d014cd4e778a8e7c3e97",
+      "verifyCommands": [
+        "npm test",
+        "npm run build",
+        "test -s docs/evidence/ORCHESTRATION_QUEUE.md",
+        "rg -q '^## Orchestration queue' docs/SUPERVISOR_V0.md",
+        "rg -q 'foreground' docs/evidence/ORCHESTRATION_QUEUE.md"
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
