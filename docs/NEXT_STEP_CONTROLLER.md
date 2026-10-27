@@ -157,6 +157,22 @@ This is the direct replacement for the developer's multiple terminal-tab
 workflow. See
 [PRODUCT_STRATEGY_V2.md](PRODUCT_STRATEGY_V2.md#5-parallel-queue-v0-requirement).
 
+The spike must cover both parallel axes:
+
+- queue items / branches running concurrently;
+- independent Plan tasks inside one item running as parallel ready waves.
+
+The second axis already exists partially through `readyIds` + `Promise.all`,
+but lacks first-class task caps, global provider/runtime admission, two-level
+status visibility and explicit merge semantics. Do not build a new intra-item
+scheduler from scratch; harden the existing wave scheduler and place both axes
+under one admission controller.
+
+The Plan compiler also needs a concurrency-aware write-path rule: overlapping
+paths are safe only when a transitive dependency makes the tasks serialize;
+otherwise they must be rejected or routed through a future integration
+envelope.
+
 ### 7. `foreground-controller-v0` (P1)
 
 Add a finite-process controller command, tentatively:
@@ -246,3 +262,5 @@ The controller slice is ready to start when:
    endpoint/model/runtime capability and availability.
 7. Multiple queue items can be recovered independently and bounded by explicit
    provider/model/runtime/resource admission.
+8. Intra-item ready waves have bounded task concurrency and are observable in
+   the same status projection as queue-item concurrency.

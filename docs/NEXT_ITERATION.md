@@ -660,6 +660,8 @@ Architect v0、**Foreground Orchestration Queue v0**、
    - 将有界并行列为首要用户价值，替代人工维护多个终端/branch；
    - 并行前检查独立依赖、非重叠 write scope、provider/model 并发、runtime
      slot 和端口 lease；依赖任务仍按上游 integrationHead 串行；
+   - Plan 编译器的写路径规则改为“无传递依赖的重叠拒绝、有传递依赖的重叠
+     按序串行”，从而支持同模块子任务既并行又安全串行；
    - Supervisor 当前 repo-global lock / single active-run 模型必须先做独立
      架构 spike，不能直接并发调用现有 `runQueue`。
 3. **Control API、可替换入口与外部 UI（P0/P1，未实现）**
@@ -882,7 +884,8 @@ Chained Read Context v0（已完成）：
 59. [未完成] 实现 CLI + 模型 `ExecutionProfile` 路由，覆盖多模型/多 CLI 的
     三种真实部署场景。
 60. [未完成] 完成并行 Supervisor/queue 架构 spike，再实现有界并行派发：
-    独立 branch/worktree/run/evidence、资源准入和分别恢复。
+    独立 branch/worktree/run/evidence、资源准入和分别恢复；同时把现有
+    Plan ready-wave 任务并行纳入统一 admission，不能只做 queue item 并行。
 61. [未完成] 先稳定本地 Control API/event stream；DSH 只做薄 cockpit，
     最小自有 Web UI 作为平台不可用时的后备入口。
 62. [未完成] 在路由和并行语义稳定后，实现 DesignRevision/EvidenceBundle，
@@ -934,8 +937,9 @@ Chained Read Context v0（已完成）：
             docs/evidence/PLAN_BACKED_CHAIN.md /
             docs/evidence/CHAINED_READ_CONTEXT.md
 16. 下一步 P0：ControlSnapshot/event journal、failure taxonomy/cost、
-            CLI + 模型路由、并行 Supervisor/queue spike
-17. 然后：有界并行 queue、Control API、DSH thin cockpit、最小自有 Web UI
+            CLI + 模型路由、两层并行 Supervisor/queue spike
+17. 然后：有界并行 queue + bounded Plan task waves、Control API、DSH thin
+            cockpit、最小自有 Web UI
 18. 再然后：DesignRevision/EvidenceBundle、look-ahead controller、soak、
             daemon 决策
 19. 不重复已完成切片；不新增 daemon、跨主机、SQLite、无限并行、自动合入

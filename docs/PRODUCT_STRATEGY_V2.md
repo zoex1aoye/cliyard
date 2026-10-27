@@ -116,6 +116,16 @@ Dependent Plan items remain serialized by their upstream `integrationHead`.
 Parallel queue items open separate integration lines; they do not merge into
 one another without an explicit integration decision.
 
+Parallelism is hierarchical. Multiple branches may run together, and within one
+branch's Plan, independent tasks may also run together:
+
+```text
+workspace
+  -> queue items / branches                 (inter-item parallelism)
+       -> Plan task DAG ready wave           (intra-item parallelism)
+            -> worker-internal subagents     (worker-owned, optional)
+```
+
 ### 3.4 Evidence and adjudication
 
 Worker completion is not acceptance. Evidence must come from the exact result
@@ -248,6 +258,107 @@ At minimum:
 6. no accepted branch is auto-merged into another branch;
 7. crash recovery can reconcile every `running` item independently;
 8. the UI shows lanes/slots instead of pretending there is one global run.
+
+### 5.4 Intra-branch task parallelism
+
+The current scheduler already has a partial implementation:
+
+- `readyIds` derives the currently runnable DAG nodes;
+- every ready wave is dispatched with `Promise.all`;
+- task worktrees in one wave start from the same integration head;
+- accepted wave results are snapshotted and merged into the integration
+  worktree sequentially;
+- failed tasks retain attempt metadata while independent siblings may still be
+  accepted;
+- `continuous-batch` tests already prove `foundation -> left/right -> upper`.
+
+This is the correct execution primitive, but it is not yet a complete product
+capability because:
+
+- all ready tasks are launched without a first-class task concurrency cap;
+- the Claude adapter has a process-local concurrency limit, but there is no
+  shared scheduler across queue items;
+- provider/model limits, runtime slots and task slots are not one admission
+  model;
+- queue/UI status does not clearly represent branch wave, task slots and
+  sibling outcomes;
+- write-path overlap is rejected instead of being resolved by a merge envelope;
+- worker-internal subagent parallelism is delegated to the harness and is not
+  controlled by cliyard.
+
+#### Recommended Plan shape for v0
+
+Keep the Plan flat and express hierarchy with dependencies and optional
+`moduleId`/`scope` metadata:
+
+```text
+module-a-foundation
+  -> module-a-ui
+  -> module-a-api
+
+module-b-foundation
+  -> module-b-ui
+  -> module-b-api
+```
+
+`module-a-ui` and `module-a-api` can run in the same ready wave if their write
+paths are disjoint. Module A and module B may also run in the same wave. This
+avoids a nested Plan schema while preserving module-level ownership.
+
+If tasks in one module must modify the same files, they must be serialized in
+v0. The current Plan compiler is stricter than necessary: it rejects every
+write-path overlap across the whole Plan, even when the tasks have an explicit
+dependency order and can never share a ready wave. The target rule is:
+
+```text
+overlap + no transitive dependency -> reject (cannot isolate safely)
+overlap + transitive dependency    -> serialize in dependency order
+no overlap                         -> eligible for the same ready wave
+```
+
+Parallel overlapping patches still require a future integration-envelope or
+merge-queue design. The compiler change must be tested against diamonds and
+transitive dependency cases so it cannot accidentally admit concurrent unsafe
+writers.
+
+#### Hierarchical admission
+
+Every task attempt must acquire all applicable slots:
+
+```text
+queue-item slot
+task slot (per item and global)
+execution-profile slot (CLI + endpoint + model)
+runtime slot
+port lease
+optional browser/visual slot
+```
+
+The scheduler must not multiply independent limits accidentally. For example,
+`maxParallelItems=3` and `maxParallelTasksPerItem=3` must not create an
+unbounded nine-worker burst; a global task/profile/runtime limit still applies.
+
+Candidate limits:
+
+```text
+maxParallelItems
+maxParallelTasksPerItem
+maxParallelTasksGlobal
+maxParallelRuntimes
+maxParallelVisualChecks
+maxConcurrentByExecutionProfile
+```
+
+#### Intra-branch acceptance
+
+1. one queue item with a four-task DAG dispatches only its current ready wave;
+2. two independent tasks execute concurrently within the configured task cap;
+3. two queue items execute concurrently and obey the global task/profile cap;
+4. integration merges are deterministic and sequential within each item;
+5. sibling failure does not erase an accepted sibling's evidence;
+6. a blocked dependent task never runs, while unrelated ready work may proceed;
+7. rate-limit, runtime and port admission are global, not per-supervisor silos;
+8. crash recovery reconstructs every item/task wave independently.
 
 ## 6. Entry strategy: Control API first, UI second
 
