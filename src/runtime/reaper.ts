@@ -425,10 +425,16 @@ async function assessService(
     );
   }
 
-  if (lease.pid !== owner.pid && inspector.isAlive(lease.pid)) {
+  // Exact ownership: the lease must have been acquired by the manifest owner.
+  // A mismatch is never safe, even when the third-party owner is already dead;
+  // the dead owner's lease does not prove this runtime's service. Preserve the
+  // group, lease, and manifest for human review.
+  if (lease.pid !== owner.pid) {
+    const liveness = inspector.isAlive(lease.pid) ? "live" : "dead";
     return preserve(
-      `service ${name} lease ${lease.key}@${lease.port} is owned by live pid ` +
-        `${lease.pid}, not the dead runtime owner ${owner.pid}`,
+      `service ${name} lease ${lease.key}@${lease.port} is owned by ${liveness} ` +
+        `pid ${lease.pid}, not the runtime owner pid ${owner.pid}; exact lease ` +
+        "ownership cannot be proven",
     );
   }
 
