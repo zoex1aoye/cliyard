@@ -14,7 +14,7 @@ North star: stop babysitting AI. **Master 壳 = DeepSeek Harness GUI**；**cliya
 **Harness boundaries and DSH replacement strategy:** [docs/HARNESS_BOUNDARIES.md](docs/HARNESS_BOUNDARIES.md).
 **Supervisor v0 operations:** [docs/SUPERVISOR_V0.md](docs/SUPERVISOR_V0.md) — durable foreground runs, recovery, limitations, safe self-hosting.
 **RuntimeManager v0:** [docs/RUNTIME_MANAGER.md](docs/RUNTIME_MANAGER.md) — finite local services, leased ports, runtime manifest/evidence, cleanup, limitations.
-**Runtime orphan recovery:** [docs/RUNTIME_ORPHAN_RECOVERY.md](docs/RUNTIME_ORPHAN_RECOVERY.md) — exact-identity preflight, `supervisor reap`, start/resume reconciliation, evidence-preserving gaps.
+**Runtime orphan recovery:** [docs/RUNTIME_ORPHAN_RECOVERY.md](docs/RUNTIME_ORPHAN_RECOVERY.md) — exact-identity preflight, exact lease-owner PID, `runtimeId`-bearing recovery records, `supervisor reap`, start/resume reconciliation, evidence-preserving gaps.
 **Next iteration:** [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md) — process-level failure drills and incident-evidence review.
 
 ## What we want (ideal)
@@ -37,13 +37,24 @@ Human: requirements + prototype in DeepSeek Harness
 - **Continuous waves:** accepted work enters an integration branch before dependent tasks start
 - **Supervisor v0 (durable foreground):** `supervisor start/status/resume/reap/stop`, atomic JSON RunManifest, integration-branch checkpoint, one-lock recovery; resume skips accepted tasks (no daemon, no SQLite)
 - **RuntimeManager v0 (single host):** finite verification services started from the exact task worktree, leased `127.0.0.1` ports, HTTP readiness, URL env injection into `verifyCommands`, runtime manifest + service logs, process-group cleanup; no daemon, SQLite, or browser evidence
-- **Runtime orphan recovery v0 (single host):** persisted owner/pid/pgid/OS start identity, read-only preflight, `supervisor reap`, automatic `start`/`resume` reconciliation, exact lease release after group exit; `needs_human` instead of heuristic kills. No daemon or cross-host kill
+- **Runtime orphan recovery v0 (single host):** persisted owner/pid/pgid/OS start identity, exact lease-owner PID correlation, read-only preflight, `supervisor reap`, automatic `start`/`resume` reconciliation, exact lease release after group exit, `runtimeId`-bearing recovery records; `needs_human` instead of heuristic kills. No daemon or cross-host kill
 - **Windows track:** `doctor` / `run` / `batch` via WSL (deferred for CodeBuddy E2E)
 
-Not yet: Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, Multica runtime, Supervisor daemon/background service, daemon-based or periodic orphan cleanup, cross-host runtime recovery, automatic reaping of leader-dead process groups, SQLite manifests, Playwright/axe/screenshot or a11y evidence, unlimited parallel runtimes.
+Not yet: Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, Multica runtime, Supervisor daemon/background service, daemon-based or periodic orphan cleanup, cross-host runtime recovery, automatic reaping of leader-dead process groups, cross-repository port coordination, SQLite manifests, Playwright/axe/screenshot or a11y evidence, unlimited parallel runtimes.
 
-Measured suite (2026-10-27): `npm run build` passes; `npm test` reports **156/156**
-(70 runtime/recovery-focused).
+Measured suite (2026-10-27): `npm run build` passes; `npm test` reports
+**164/164 in each of five consecutive runs** (78 runtime/recovery-focused).
+No flakes were observed in those runs; that is local macOS evidence, not a
+long-term flake-rate claim. Per-run durations and the hardening acceptance
+matrix are in
+[docs/RUNTIME_ORPHAN_RECOVERY.md](docs/RUNTIME_ORPHAN_RECOVERY.md#verification).
+
+Hardening measured in this iteration: a lease must be owned by the exact runtime
+owner PID (live or dead mismatch → `needs_human`); every new recovery record
+carries its `runtimeId` and the Supervisor reads it directly instead of matching
+reason text; `src/supervisor` contains no NUL bytes; and the six runtime test
+files that start real processes or bind real ports use disjoint static port
+pools (22000–22599, test-only — not cross-repository port coordination).
 
 ## Recommended layout
 
@@ -129,8 +140,10 @@ Runtime evidence: `<target>/.cliyard/runtime/<runtimeId>/runtime-manifest.json`
 plus `<service>.log` and `data/<service>/`; port leases live in
 `<target>/.cliyard/runtime/port-leases.json`; orphan reconciliation serializes
 through `<target>/.cliyard/runtime/reaper.lock` (all gitignored). A completed
-recovery writes a `recovery` record into the runtime manifest. Runtime services
-are finite and single-host; details and limitations:
+recovery writes a `recovery` record carrying its `runtimeId` into the runtime
+manifest. Lease correlation requires the lease owner PID to equal the manifest
+owner PID; a live or dead mismatch is `needs_human`. Runtime services are finite
+and single-host; details and limitations:
 [docs/RUNTIME_MANAGER.md](docs/RUNTIME_MANAGER.md) and
 [docs/RUNTIME_ORPHAN_RECOVERY.md](docs/RUNTIME_ORPHAN_RECOVERY.md). No daemon,
 SQLite, Playwright/axe, screenshot, or a11y evidence is produced; orphan

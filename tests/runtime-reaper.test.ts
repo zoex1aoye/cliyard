@@ -10,10 +10,11 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { createServer, type AddressInfo, type Server } from "node:net";
+import { createServer, type Server } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { takeTestPortRange } from "./test-port-ranges.js";
 import { runtimePaths } from "../src/runtime/manager.js";
 import { PortAllocator, probePort } from "../src/runtime/ports.js";
 import { ProcessInspector } from "../src/runtime/process.js";
@@ -117,23 +118,6 @@ function closeServer(server: Server): Promise<void> {
   });
 }
 
-async function ephemeralPort(): Promise<number> {
-  const server = createServer();
-  await listenOn(server, 0);
-  const { port } = server.address() as AddressInfo;
-  await closeServer(server);
-  return port;
-}
-
-async function freshRange(
-  size: number,
-): Promise<{ range: string; start: number; end: number }> {
-  const base = await ephemeralPort();
-  const start = Math.min(base, 65535 - size + 1);
-  const end = start + size - 1;
-  return { range: `${start}-${end}`, start, end };
-}
-
 /**
  * Allocate real PortAllocator leases for every requested service, then rewrite
  * their owner pid to the dead owner. Allocation must happen first because the
@@ -143,7 +127,7 @@ async function allocateOrphanLeases(
   repo: string,
   requests: ReadonlyArray<{ runtimeId: string; service: string }>,
 ): Promise<PortLease[]> {
-  const { range } = await freshRange(requests.length + 2);
+  const { range } = takeTestPortRange("runtime-reaper", requests.length + 2);
   const allocator = new PortAllocator({ repoRoot: repo, range });
   const allocated: PortLease[] = [];
   for (const request of requests) {
@@ -356,7 +340,7 @@ test("reaps a real RuntimeManager service after its owner is SIGKILLed", async (
       "utf8",
     );
 
-    const { range } = await freshRange(3);
+    const { range } = takeTestPortRange("runtime-reaper", 3);
     let stderr = "";
     const owner = spawn(
       process.execPath,

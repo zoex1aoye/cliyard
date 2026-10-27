@@ -115,6 +115,11 @@ export interface RuntimeRecoveryServiceRecord {
 
 /** Orphan-recovery evidence written by the reaper. */
 export interface RuntimeRecoveryRecord {
+  /**
+   * Runtime this record describes. Optional only for records written before
+   * runtime identity was carried; every new executor record sets it.
+   */
+  runtimeId?: string;
   state: RuntimeRecoveryState;
   reason: string;
   at: string;

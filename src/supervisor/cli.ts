@@ -20,10 +20,6 @@ import type { TaskContract } from "../contracts/schema.js";
 import { RUNTIME_MANIFEST_FILE } from "../runtime/manager.js";
 import { portAllocatorPaths } from "../runtime/ports.js";
 import {
-  preflightOrphanedRuntimes,
-  type RuntimeReapPlanState,
-} from "../runtime/reaper.js";
-import {
   reapOrphanedRuntimes,
   type RuntimeReapReport,
 } from "../runtime/reaper-execute.js";
@@ -606,7 +602,6 @@ async function waitFor(
 
 interface AnnotatedRecoveryRecord {
   group: "reaped" | "needsHuman" | "skipped";
-  runtimeId?: string;
   record: RuntimeRecoveryRecord;
 }
 
@@ -638,83 +633,40 @@ async function reapCommand(
 }
 
 /**
- * Run the destructive reaper and annotate its records with runtime ids.
+ * Run the destructive reaper and group its records for reporting.
  *
- * Preflight runs first (read-only) because the executor report intentionally
- * carries recovery records without ids; plans are the only source for
- * `needs_human`/`skip` decisions that change nothing on disk. Records persisted
- * by the executor are matched back to their manifest.
+ * Every executor record names its runtime directly, so neither ids nor labels
+ * are reconstructed here: a second preflight would have to match state and
+ * reason text, which is ambiguous when two runtimes produce the same reason.
+ * Records written before runtime identity was carried are only read by
+ * `status`, where `readRuntimeRecoveryRecords` falls back to the manifest id.
  */
 async function reconcileRuntimeOrphans(
   repoRoot: string,
 ): Promise<ReconciliationOutcome> {
-  const preflight = await preflightOrphanedRuntimes(repoRoot);
   const report = await reapOrphanedRuntimes(repoRoot);
-  const persisted = readRuntimeRecoveryRecords(repoRoot);
-
-  const planIds = new Map<string, string[]>();
-  for (const plan of preflight.plans) {
-    const key = planKey(plan.state, plan.reason);
-    const ids = planIds.get(key);
-    if (ids === undefined) planIds.set(key, [plan.runtimeId]);
-    else ids.push(plan.runtimeId);
-  }
-  const takePlanId = (
-    state: RuntimeReapPlanState,
-    reason: string,
-  ): string | undefined => planIds.get(planKey(state, reason))?.shift();
-
-  const usedPersisted = new Set<number>();
-  const takePersistedId = (
-    record: RuntimeRecoveryRecord,
-  ): string | undefined => {
-    for (let index = 0; index < persisted.length; index += 1) {
-      if (usedPersisted.has(index)) continue;
-      if (sameRecovery(persisted[index].recovery, record)) {
-        usedPersisted.add(index);
-        return persisted[index].runtimeId;
-      }
-    }
-    return undefined;
-  };
-
-  const annotate = (
-    group: AnnotatedRecoveryRecord["group"],
-    records: readonly RuntimeRecoveryRecord[],
-    planState?: RuntimeReapPlanState,
-  ): AnnotatedRecoveryRecord[] =>
-    records.map((record) => {
-      const runtimeId =
-        takePersistedId(record) ??
-        (planState === undefined
-          ? undefined
-          : takePlanId(planState, record.reason));
-      return {
-        group,
-        ...(runtimeId !== undefined ? { runtimeId } : {}),
-        record,
-      };
-    });
 
   const records: AnnotatedRecoveryRecord[] = [
-    ...annotate("reaped", report.reaped),
-    ...annotate("needsHuman", report.needsHuman, "needs_human"),
-    ...annotate("skipped", report.skipped, "skip"),
+    ...report.reaped.map((record) => ({ group: "reaped" as const, record })),
+    ...report.needsHuman.map((record) => ({
+      group: "needsHuman" as const,
+      record,
+    })),
+    ...report.skipped.map((record) => ({ group: "skipped" as const, record })),
   ];
 
   const blocked: BlockedRuntime[] = [];
   const blockedKeys = new Set<string>();
   const addBlocked = (runtimeId: string | undefined, reason: string): void => {
-    const key = `${runtimeId ?? ""} ${reason}`;
+    const key = JSON.stringify([runtimeId ?? null, reason]);
     if (blockedKeys.has(key)) return;
     blockedKeys.add(key);
     blocked.push({ ...(runtimeId !== undefined ? { runtimeId } : {}), reason });
   };
-  for (const plan of preflight.needsHuman) {
-    addBlocked(plan.runtimeId, plan.reason);
-  }
   for (const entry of records) {
-    if (entry.group === "needsHuman") addBlocked(entry.runtimeId, entry.record.reason);
+    if (entry.group === "needsHuman") {
+      addBlocked(entry.record.runtimeId, entry.record.reason);
+    }
   }
 
   return { report, records, blocked };
@@ -752,8 +704,9 @@ function printReconciliation(
   log(`skipped: ${report.skipped.length}`);
   for (const entry of outcome.records) {
     const label = entry.group === "needsHuman" ? "needs human" : entry.group;
+    const runtimeId = entry.record.runtimeId;
     log(
-      `${label}${entry.runtimeId ? ` ${entry.runtimeId}` : ""}: ` +
+      `${label}${runtimeId ? ` ${runtimeId}` : ""}: ` +
         entry.record.reason,
     );
     for (const service of entry.record.services) {
@@ -763,35 +716,6 @@ function printReconciliation(
       );
     }
   }
-}
-
-function planKey(state: RuntimeReapPlanState, reason: string): string {
-  return `${state} ${reason}`;
-}
-
-function sameRecovery(
-  a: RuntimeRecoveryRecord,
-  b: RuntimeRecoveryRecord,
-): boolean {
-  if (
-    a.state !== b.state ||
-    a.reason !== b.reason ||
-    a.at !== b.at ||
-    a.reaperPid !== b.reaperPid ||
-    a.reaperHost !== b.reaperHost ||
-    a.services.length !== b.services.length
-  ) {
-    return false;
-  }
-  return a.services.every((service, index) => {
-    const other = b.services[index]!;
-    return (
-      service.name === other.name &&
-      service.pgid === other.pgid &&
-      service.action === other.action &&
-      service.portReleased === other.portReleased
-    );
-  });
 }
 
 /** Read persisted recovery evidence without planning or mutating anything. */
@@ -822,10 +746,15 @@ function readRuntimeRecoveryRecords(
     const recovery = parsed.recovery;
     if (!isRuntimeRecoveryRecord(recovery)) continue;
 
+    // The record owns its identity. Records written before runtime identity
+    // was carried fall back to the manifest, then the runtime directory.
     const runtimeId =
-      typeof parsed.runtimeId === "string" && parsed.runtimeId.trim() !== ""
-        ? parsed.runtimeId
-        : entry.name;
+      typeof recovery.runtimeId === "string" && recovery.runtimeId.trim() !== ""
+        ? recovery.runtimeId
+        : typeof parsed.runtimeId === "string" &&
+            parsed.runtimeId.trim() !== ""
+          ? parsed.runtimeId
+          : entry.name;
     const cleanup = isRuntimeCleanupState(parsed.cleanup)
       ? parsed.cleanup
       : undefined;

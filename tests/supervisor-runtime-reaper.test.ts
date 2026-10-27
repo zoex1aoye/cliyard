@@ -19,10 +19,10 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { createServer, type AddressInfo } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { takeTestPortRange } from "./test-port-ranges.js";
 import {
   RUNTIME_MANIFEST_FILE,
   runtimePaths,
@@ -116,25 +116,6 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
 
-async function ephemeralPort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((resolveListen, rejectListen) => {
-    server.once("error", rejectListen);
-    server.listen({ host: "127.0.0.1", port: 0 }, () => resolveListen());
-  });
-  const { port } = server.address() as AddressInfo;
-  await new Promise<void>((resolveClose, rejectClose) => {
-    server.close((error) => (error ? rejectClose(error) : resolveClose()));
-  });
-  return port;
-}
-
-async function freshRange(size: number): Promise<string> {
-  const base = await ephemeralPort();
-  const start = Math.min(base, 65535 - size + 1);
-  return `${start}-${start + size - 1}`;
-}
-
 /**
  * Allocate real leases, then rewrite their owner pid to a provably dead one so
  * preflight treats the runtime as an orphan. Allocation must happen first
@@ -144,7 +125,10 @@ async function allocateOrphanLeases(
   repo: string,
   requests: ReadonlyArray<{ runtimeId: string; service: string }>,
 ): Promise<PortLease[]> {
-  const range = await freshRange(requests.length + 2);
+  const { range } = takeTestPortRange(
+    "supervisor-runtime-reaper",
+    requests.length + 2,
+  );
   const allocator = new PortAllocator({ repoRoot: repo, range });
   const allocated: PortLease[] = [];
   for (const request of requests) {

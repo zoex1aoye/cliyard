@@ -9,9 +9,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { get as httpGetRaw, type IncomingMessage } from "node:http";
-import { createServer, type AddressInfo, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { takeTestPortRange } from "./test-port-ranges.js";
 import { PortAllocator, probePort } from "../src/runtime/ports.js";
 import {
   RuntimeManager,
@@ -146,39 +146,6 @@ function writeScript(dir: string, filename: string, source: string): string {
   return path;
 }
 
-function listenOn(server: Server, port: number): Promise<void> {
-  return new Promise((resolveListen, rejectListen) => {
-    server.once("error", rejectListen);
-    server.listen({ host: "127.0.0.1", port }, () => {
-      server.off("error", rejectListen);
-      resolveListen();
-    });
-  });
-}
-
-function closeServer(server: Server): Promise<void> {
-  return new Promise((resolveClose, rejectClose) => {
-    server.close((error) => (error ? rejectClose(error) : resolveClose()));
-  });
-}
-
-async function ephemeralPort(): Promise<number> {
-  const server = createServer();
-  await listenOn(server, 0);
-  const { port } = server.address() as AddressInfo;
-  await closeServer(server);
-  return port;
-}
-
-async function freshRange(
-  size: number,
-): Promise<{ range: string; start: number; end: number }> {
-  const base = await ephemeralPort();
-  const start = Math.min(base, 65535 - size + 1);
-  const end = start + size - 1;
-  return { range: `${start}-${end}`, start, end };
-}
-
 interface HttpResult {
   status: number;
   body: string;
@@ -271,7 +238,7 @@ test("starts two services with leased ports, URL env, and data dirs, then cleans
       "fixture-server.mjs",
       FIXTURE_SERVER_SOURCE,
     );
-    const { range, start, end } = await freshRange(8);
+    const { range, start, end } = takeTestPortRange("runtime-manager", 8);
     const allocator = new PortAllocator({ repoRoot: repo, range });
     const manager = new RuntimeManager({
       ...baseManagerOptions(repo, worktree),
@@ -423,11 +390,15 @@ test("readiness failure captures logs, stops the service, and skips the callback
       "fixture-server.mjs",
       FIXTURE_SERVER_SOURCE,
     );
-    const { range } = await freshRange(4);
+    const { range } = takeTestPortRange("runtime-manager", 4);
     const allocator = new PortAllocator({ repoRoot: repo, range });
     const manager = new RuntimeManager({
       ...baseManagerOptions(repo, worktree),
       taskId: "task-unready",
+      // Leave room after the last probe for its 503 response. Polling every
+      // 25ms can race a final sub-millisecond probe that times out or is
+      // refused instead, masking the expected status in the classified error.
+      readinessPollMs: 250,
       env: { ...process.env, FIXTURE_STATUS: "503" },
       allocator,
     });
@@ -501,7 +472,7 @@ test("run stops services and releases leases when the callback throws", async ()
       "fixture-server.mjs",
       FIXTURE_SERVER_SOURCE,
     );
-    const { range } = await freshRange(4);
+    const { range } = takeTestPortRange("runtime-manager", 4);
     const allocator = new PortAllocator({ repoRoot: repo, range });
     const manager = new RuntimeManager({
       ...baseManagerOptions(repo, worktree),
@@ -554,7 +525,7 @@ test("stops the complete process group, escalating past a leader that ignores SI
       "fixture-group.mjs",
       FIXTURE_GROUP_SOURCE,
     );
-    const { range } = await freshRange(4);
+    const { range } = takeTestPortRange("runtime-manager", 4);
     const allocator = new PortAllocator({ repoRoot: repo, range });
     const manager = new RuntimeManager({
       ...baseManagerOptions(repo, worktree),
@@ -615,7 +586,7 @@ test("retries once on immediate EADDRINUSE evidence with a different port", asyn
       FIXTURE_SERVER_SOURCE,
     );
     const marker = join(worktree, "retry-marker");
-    const { range } = await freshRange(8);
+    const { range } = takeTestPortRange("runtime-manager", 8);
     const inner = new PortAllocator({ repoRoot: repo, range });
     const allocator = new RecordingAllocator(inner);
     const manager = new RuntimeManager({
@@ -684,7 +655,7 @@ test("does not retry a second time after EADDRINUSE", async () => {
       "fixture-server.mjs",
       FIXTURE_SERVER_SOURCE,
     );
-    const { range } = await freshRange(8);
+    const { range } = takeTestPortRange("runtime-manager", 8);
     const inner = new PortAllocator({ repoRoot: repo, range });
     const allocator = new RecordingAllocator(inner);
     const manager = new RuntimeManager({
@@ -798,7 +769,7 @@ test("run returns the finalized manifest and session.stop is idempotent", async 
       "fixture-server.mjs",
       FIXTURE_SERVER_SOURCE,
     );
-    const { range } = await freshRange(4);
+    const { range } = takeTestPortRange("runtime-manager", 4);
     const allocator = new PortAllocator({ repoRoot: repo, range });
     const manager = new RuntimeManager({
       ...baseManagerOptions(repo, worktree),

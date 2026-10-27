@@ -2,10 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { createServer, type AddressInfo, type Server } from "node:net";
+import { createServer, type Server } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { takeTestPortRange } from "./test-port-ranges.js";
 import {
   NoAvailablePortError,
   PortAllocator,
@@ -181,33 +182,6 @@ function closeServer(server: Server): Promise<void> {
   });
 }
 
-async function ephemeralPort(): Promise<number> {
-  const server = createServer();
-  await listenOn(server, 0);
-  const { port } = server.address() as AddressInfo;
-  await closeServer(server);
-  return port;
-}
-
-/** A range starting at a fresh OS-assigned port, with enough room to test. */
-async function freshRange(
-  size: number,
-): Promise<{ range: string; start: number; end: number }> {
-  const base = await ephemeralPort();
-  const start = Math.min(base, 65535 - size + 1);
-  const end = start + size - 1;
-  return { range: `${start}-${end}`, start, end };
-}
-
-/** A single port that is bindable right now. */
-async function freshAvailablePort(): Promise<number> {
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    const port = await ephemeralPort();
-    if (await probePort(port)) return port;
-  }
-  throw new Error("could not find an available test port");
-}
-
 /** A pid that has exited and been reaped. */
 async function exitedPid(): Promise<number> {
   const child = spawn(process.execPath, ["-e", "process.exit(0)"], {
@@ -220,27 +194,13 @@ async function exitedPid(): Promise<number> {
   return child.pid;
 }
 
-/** A listening server whose port still leaves room for a test range above it. */
-async function occupiedPortWithRoom(
-  room: number,
-): Promise<{ server: Server; port: number }> {
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    const server = createServer();
-    await listenOn(server, 0);
-    const port = (server.address() as AddressInfo).port;
-    if (port <= 65535 - room) return { server, port };
-    await closeServer(server);
-  }
-  throw new Error("could not find an occupied port with range room");
-}
-
 // ---------------------------------------------------------------------------
 // Allocation, persistence, reuse
 // ---------------------------------------------------------------------------
 
 test("allocate persists a lease and reuses it for the same live runId+service", async () => {
   await withRepo(async (repo) => {
-    const { range, start, end } = await freshRange(6);
+    const { range, start, end } = takeTestPortRange("runtime-ports", 6);
     const allocator = new PortAllocator({ repoRoot: repo, range });
 
     const web = await allocator.allocate("run-1", "web");
@@ -281,8 +241,7 @@ test("allocate persists a lease and reuses it for the same live runId+service", 
 
 test("release is idempotent, removes only the exact lease, and frees the port", async () => {
   await withRepo(async (repo) => {
-    const port = await freshAvailablePort();
-    const range = `${port}-${port}`;
+    const { range, start: port } = takeTestPortRange("runtime-ports", 1);
     const allocator = new PortAllocator({ repoRoot: repo, range });
 
     const first = await allocator.allocate("run-a", "web");
@@ -317,7 +276,7 @@ test("CLIYARD_PORT_RANGE selects the range and explicit options win", async () =
     const defaults = new PortAllocator({ repoRoot: repo, env: {} });
     assert.deepEqual(defaults.range, { start: 19000, end: 19999 });
 
-    const { range, start, end } = await freshRange(4);
+    const { range, start, end } = takeTestPortRange("runtime-ports", 4);
     const fromEnv = new PortAllocator({
       repoRoot: repo,
       env: { CLIYARD_PORT_RANGE: range },
@@ -365,7 +324,7 @@ test("lease identities reject unsafe runId and service names", () => {
 
 test("separate live processes never lease the same port", async () => {
   await withRepo(async (repo) => {
-    const { range, start, end } = await freshRange(8);
+    const { range, start, end } = takeTestPortRange("runtime-ports", 8);
     const ids = ["p0", "p1", "p2", "p3"];
     const children = ids.map((id) =>
       startAllocatorChild(repo, range, `run-${id}`, "web", true),
@@ -405,7 +364,7 @@ test("separate live processes never lease the same port", async () => {
 
 test("a second process reuses the same live lease while its owner is alive", async () => {
   await withRepo(async (repo) => {
-    const { range, start, end } = await freshRange(4);
+    const { range, start, end } = takeTestPortRange("runtime-ports", 4);
     const holder = startAllocatorChild(repo, range, "run-shared", "web", true);
     try {
       const lease = await holder.lease;
@@ -423,8 +382,7 @@ test("a second process reuses the same live lease while its owner is alive", asy
 
 test("a dead owner's lease is reclaimed on this host", async () => {
   await withRepo(async (repo) => {
-    const port = await freshAvailablePort();
-    const range = `${port}-${port}`;
+    const { range, start: port } = takeTestPortRange("runtime-ports", 1);
     const holder = startAllocatorChild(repo, range, "dead-run", "web", false);
     let childLease: PortLease;
     try {
@@ -452,15 +410,16 @@ test("a dead owner's lease is reclaimed on this host", async () => {
 
 test("a separate process skips an occupied port", async () => {
   await withRepo(async (repo) => {
-    const { server, port } = await occupiedPortWithRoom(4);
+    const { range, start, end } = takeTestPortRange("runtime-ports", 5);
+    const server = createServer();
+    await listenOn(server, start);
     try {
-      assert.equal(await probePort(port), false);
-      const range = `${port}-${port + 4}`;
+      assert.equal(await probePort(start), false);
       const child = startAllocatorChild(repo, range, "run-occupied", "web", false);
       try {
         const lease = await child.lease;
-        assert.notEqual(lease.port, port, "leased an occupied port");
-        assert.ok(lease.port > port && lease.port <= port + 4);
+        assert.notEqual(lease.port, start, "leased an occupied port");
+        assert.ok(lease.port > start && lease.port <= end);
         assert.equal(readStore(repo).leases[0]?.port, lease.port);
       } finally {
         await child.stop();
@@ -477,7 +436,7 @@ test("a separate process skips an occupied port", async () => {
 
 test("a dead-owner lock is reclaimed, a live-owner lock blocks", async () => {
   await withRepo(async (repo) => {
-    const { range } = await freshRange(3);
+    const { range } = takeTestPortRange("runtime-ports", 3);
     const { lockPath, runtimeDir } = portAllocatorPaths(repo);
     mkdirSync(runtimeDir, { recursive: true });
 
@@ -528,7 +487,7 @@ test("a corrupt lease store is reported and never overwritten", async () => {
     const corrupt = "{not json\n";
     writeFileSync(storePath, corrupt, "utf8");
 
-    const { range } = await freshRange(2);
+    const { range } = takeTestPortRange("runtime-ports", 2);
     const allocator = new PortAllocator({ repoRoot: repo, range });
     await assert.rejects(
       allocator.allocate("run-x", "web"),
