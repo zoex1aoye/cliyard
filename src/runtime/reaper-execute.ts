@@ -202,13 +202,20 @@ export async function reapOrphanedRuntimes(
     for (const plan of preflight.plans) {
       if (plan.state === "skip") {
         report.skipped.push(
-          makeRecord("skipped", plan.reason, plan.services, deps.reaperHost),
+          makeRecord(
+            plan.runtimeId,
+            "skipped",
+            plan.reason,
+            plan.services,
+            deps.reaperHost,
+          ),
         );
         continue;
       }
       if (plan.state === "needs_human") {
         report.needsHuman.push(
           makeRecord(
+            plan.runtimeId,
             "needs_human",
             plan.reason,
             plan.services,
@@ -260,6 +267,7 @@ async function executeSafePlan(
 ): Promise<RuntimeRecoveryRecord> {
   if (plan.manifest === undefined) {
     return makeRecord(
+      plan.runtimeId,
       "needs_human",
       "safe plan has no parsed manifest; refusing to act",
       plan.services,
@@ -295,7 +303,13 @@ async function executeSafePlan(
       ? reapedReason(plan, services)
       : `orphan recovery failed: ${failures.join("; ")}`;
 
-  const record = makeRecord(state, reason, plan.services, deps.reaperHost);
+  const record = makeRecord(
+    plan.runtimeId,
+    state,
+    reason,
+    plan.services,
+    deps.reaperHost,
+  );
   record.services = services;
 
   try {
@@ -617,12 +631,14 @@ function isGroupGone(execution: ServiceExecution): boolean {
 // ---------------------------------------------------------------------------
 
 function makeRecord(
+  runtimeId: string,
   state: RuntimeRecoveryState,
   reason: string,
   services: readonly RuntimeReapServicePlan[],
   reaperHost: string,
 ): RuntimeRecoveryRecord {
   return {
+    runtimeId,
     state,
     reason,
     at: new Date().toISOString(),
