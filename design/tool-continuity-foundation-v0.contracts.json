@@ -1,0 +1,111 @@
+{
+  "contracts": [
+    {
+      "taskId": "queue-first-run-binding",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Close the first-live-dispatch observability gap described in design/selfhost-iteration-v0.md section 2.2.",
+        "In src/orchestration/queue-runner.ts, allocate a safe run id before invoking the Supervisor for a start action, persist it to the queue item's lastRunId and runIds together with status=running and the attempt increment, and pass that exact id to the injected runner. A process crash after this persistence must leave a durable run binding.",
+        "In src/supervisor/cli.ts, add a backward-compatible --run-id option to supervisor start. Use it when present; otherwise retain random UUID generation. Let the existing manifest store validate id safety and reject collisions. Keep resume behavior unchanged.",
+        "Update createQueueSupervisorRunner so a real start passes the preallocated id via --run-id and a resume passes its existing --run argument.",
+        "Handle a start that fails before creating a manifest without fabricating evidence: if the preallocated manifest is absent after the runner returns or throws, allow the queue item to retry with nextAction=start rather than leaving a permanently dangling resume. If a manifest exists, preserve the binding even on interruption.",
+        "Keep the RunManifest as task authority and the queue as dispatch coordination. Do not infer a live run from active.json when an explicit id is available.",
+        "Add focused tests in tests/queue-run-binding.test.ts that prove: persisted lastRunId is visible inside the runner before it returns; the request and manifest use the same id; supervisor start honors --run-id; a crash-like start with a durable manifest can be reconciled; and a start failure before manifest creation falls back safely to start.",
+        "Add docs/evidence/QUEUE_RUN_BINDING.md with implementation facts, exact tests, compatibility behavior, and remaining limits."
+      ],
+      "nonGoals": [
+        "Do not implement parallel queue dispatch, a daemon, push, or automatic main-branch merge.",
+        "Do not rewrite historical queue records.",
+        "Do not change RunManifest version or TaskContract shape.",
+        "Do not change path-audit, deadline, budget, estimator, or runtime files."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "."
+      ],
+      "writePaths": [
+        "src/orchestration/queue-runner.ts",
+        "src/supervisor/cli.ts",
+        "tests/queue-run-binding.test.ts",
+        "docs/evidence/QUEUE_RUN_BINDING.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "d1fb8edc99a191718d5e1779c54aa3d89ec3e9bc",
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/queue-run-binding.test.ts",
+        "npm test"
+      ],
+      "deliverables": [
+        "A queue item is durably bound to its first run id before worker execution.",
+        "The same id is passed to Supervisor start and stored in RunManifest.",
+        "Failure before manifest creation does not strand the item on resume."
+      ],
+      "forbidden": [
+        "Do not persist a guessed run id from active.json.",
+        "Do not create a manifest merely to make a binding look successful.",
+        "Do not touch files outside writePaths."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "worker-exit-path-audit",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Close the failed-exit and reused-worktree path-scope gap described in design/selfhost-iteration-v0.md section 2.3.",
+        "Add a small shared path-scope audit utility under src/agents/path-scope.ts. It must reject path traversal and absolute paths, normalize repository-relative separators, treat exact writePaths and descendants of directory-like writePaths as allowed, and return bounded evidence listing changed paths and paths outside write scope.",
+        "Extend AgentResult with optional changedPathsError so adapters can expose a git-diff failure without losing the original worker failure.",
+        "Update Claude and Codex adapters to set changedPathsError whenever collectChangedPaths fails.",
+        "In src/repair/loop.ts, evaluate a path audit after every worker exit, not only successful exits. Preserve the adapter's original structured failure when a failed exit also has path overshoot; path overshoot must be separate durable evidence and must never relabel budget/auth/provider failures.",
+        "Add a bounded PathAuditRecord in src/supervisor/types.ts and persist pathAudits on RunTaskState. The evidence should include attempt index, observed time, worker exit code, changed paths, outside-write-scope paths, and any changed-path collection error. Keep records cumulative for the task so retries do not erase prior audit evidence; cap stored path counts.",
+        "Update src/supervisor/store.ts to validate optional pathAudits while keeping old manifests readable and failing closed on malformed present records.",
+        "In src/scheduler/codex-batch.ts, checkpoint path audit evidence for accepted and rejected worker results. Before dispatching a reused rejected worktree, collect changes from its recorded base and audit them against the contract; if any path is outside scope or collection fails, fail closed before starting the worker and report the exact evidence. Do not auto-delete or hide unexpected files.",
+        "Add focused tests in tests/worker-exit-path-audit.test.ts covering failed exit with outside-scope temp file, preserved original failure, accepted audits, invalid traversal evidence, manifest validation, and reused-worktree rejection before worker invocation.",
+        "Add docs/evidence/WORKER_EXIT_PATH_AUDIT.md describing behavior, tests, and why automatic cleanup is forbidden."
+      ],
+      "nonGoals": [
+        "Do not implement deadline extension or budget continuation.",
+        "Do not auto-delete unexpected files.",
+        "Do not run runtime services during the audit.",
+        "Do not change queue run-id binding files.",
+        "Do not make path evidence grant acceptance or change verifier authority."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "."
+      ],
+      "writePaths": [
+        "src/agents/types.ts",
+        "src/agents/path-scope.ts",
+        "src/agents/claude.ts",
+        "src/agents/codex.ts",
+        "src/repair/loop.ts",
+        "src/scheduler/codex-batch.ts",
+        "src/supervisor/types.ts",
+        "src/supervisor/store.ts",
+        "tests/worker-exit-path-audit.test.ts",
+        "docs/evidence/WORKER_EXIT_PATH_AUDIT.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "d1fb8edc99a191718d5e1779c54aa3d89ec3e9bc",
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/worker-exit-path-audit.test.ts",
+        "npm test"
+      ],
+      "deliverables": [
+        "Every adapter worker exit produces bounded path-scope evidence.",
+        "A failed worker keeps its original failure while path overshoot remains visible separately.",
+        "A reused worktree is audited before its next worker starts and fails closed on unexpected files."
+      ],
+      "forbidden": [
+        "Do not overwrite a budget/auth/provider failure with a path failure.",
+        "Do not clean or stage unexpected files automatically.",
+        "Do not touch files outside writePaths."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}

@@ -262,7 +262,7 @@ dry-run 只验证调度、依赖和工作区，不验证真实 UI。
 npm run plan-dispatch -- design/winui3.plan.json \
   --repo ../ui-prototype \
   --dispatch --worker claude \
-  --model 'deepseek-flash[1m]' --background
+  --model 'deepseek-flash' --background
 ```
 
 只派已冻结的 Wave。

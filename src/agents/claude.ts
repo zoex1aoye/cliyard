@@ -56,7 +56,7 @@ export interface ClaudeWorkerOptions {
   cwd: string;
   /** Default: CLIYARD_CLAUDE_BINARY or `claude-ds`. */
   binary?: string;
-  /** Default: CLIYARD_CLAUDE_MODEL or `deepseek-flash[1m]`. */
+  /** Default: CLIYARD_CLAUDE_MODEL or `deepseek-flash`. */
   model?: string;
   permissionMode?: ClaudePermissionMode;
   allowedTools?: string[];
@@ -116,7 +116,7 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
   const model =
     opts.model ??
     process.env.CLIYARD_CLAUDE_MODEL ??
-    "deepseek-flash[1m]";
+    "deepseek-flash";
   const permissionMode = opts.permissionMode ?? "acceptEdits";
   const allowedTools = opts.allowedTools ?? DEFAULT_TOOLS;
   const deadlinePolicy =

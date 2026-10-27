@@ -41,7 +41,7 @@ cliyard architect \
 Defaults:
 
 - worker: `claude`;
-- model: Claude adapter default (`deepseek-flash[1m]` through `claude-ds`);
+- model: Claude adapter default (`deepseek-flash` through `claude-ds`);
 - output: `<target>/.cliyard/plans/<planId>.json`.
 
 The command is foreground and finite. It does not run the Plan.

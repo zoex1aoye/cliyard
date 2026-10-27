@@ -1,0 +1,53 @@
+{
+  "planId": "budget-continuation-v0",
+  "tasks": [
+    {
+      "taskId": "budget-continuation-resume",
+      "goal": "Implement the budget half of design/task-continuation-and-deadline-v0.md on top of deadline-extension-v0. Extend the shared continuation model with a bounded BudgetContinuationPolicy and execution-profile capability for provider-session resume. In the Claude adapter, recognize only a clean error_max_budget_usd outcome with no timeout, auth/protocol/policy/changed-path failure as budget-exhausted eligibility. Require mapped assistant/tool progress before exhaustion, a provider session id, an onExtension callback, autoContinue=true, remaining continuation count, and room under maxCumulativeGuardUsd after overshootReserveUsd. Persist a budget-continuation TaskExtensionRecord through onExtension before the resumed process starts; a persistence failure must not start it. Resume the same provider session using --resume <session-id> and a larger CLI --max-budget-usd guard, while preserving the exact worktree and task contract. Use a fresh provider session only for existing transient retry behavior; never silently treat resume failure as another grant. Aggregate every invocation's cost observations and extensions, preserve provider session id when reported, and keep final budget exhaustion as budget_exhausted with code error_max_budget_usd. Keep auto continuation disabled by default and max continuations zero by default. Add CLI/pipeline flags --max-budget-usd, --auto-continue-budget, --continuation-guard-usd, --max-budget-continuations, --max-cumulative-budget-guard-usd and --budget-overshoot-reserve-usd, validate them before dispatch, and pass them through CodexBatchOptions/runClosedLoop to the Claude adapter. Human supervisor status must show budget extension count and cumulative guard; JSON task extensions remain durable. Add focused fake-CLI tests proving first invocation session-id and second invocation --resume use the same id, the second guard is larger, grant persistence occurs before resume, cost observations aggregate, no progress/denied policy/wrong failure/max limits/timeout never continue, resume failure does not consume another grant, manifest extension round-trip, and default-off behavior. Update docs/evidence/BUDGET_CONTINUATION.md and docs/CLAUDE_DEEPSEEK_WORKER.md with exact behavior, checks and limits. State that total_cost_usd remains a non-authoritative CLI estimate and guard values are not provider balance or a strict hard cap.",
+      "nonGoals": [
+        "Do not change the deadline extension behavior except additive shared plumbing.",
+        "Do not auto-retry auth, transient, timeout, protocol, policy, verifier or path failures.",
+        "Do not modify a running CLI process's active budget in place.",
+        "Do not claim provider balance, invoice price, quota or a strict hard cap.",
+        "Do not route to another CLI/model or merge the task automatically.",
+        "Do not implement a daemon, cross-host resume or SQLite migration.",
+        "Do not edit historical run or queue records."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        ".",
+        "design/task-continuation-and-deadline-v0.md",
+        "docs/evidence/DEADLINE_EXTENSION.md"
+      ],
+      "writePaths": [
+        "src/agents/continuation.ts",
+        "src/agents/types.ts",
+        "src/agents/claude.ts",
+        "src/repair/loop.ts",
+        "src/scheduler/codex-batch.ts",
+        "src/supervisor/store.ts",
+        "src/supervisor/cli.ts",
+        "tests/budget-continuation.test.ts",
+        "docs/evidence/BUDGET_CONTINUATION.md",
+        "docs/CLAUDE_DEEPSEEK_WORKER.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/budget-continuation.test.ts",
+        "npm test"
+      ],
+      "deliverables": [
+        "A healthy budget-exhausted Claude task can continue in the same provider session with a persisted, larger bounded guard.",
+        "Budget continuation never retries unrelated failures and never fabricates cost truth.",
+        "Durable status exposes each grant and the cumulative guard."
+      ],
+      "forbidden": [
+        "Do not persist a grant after spawning the resumed worker.",
+        "Do not overwrite the original task contract or worktree.",
+        "Do not continue from a generic exit code without the provider subtype and health evidence.",
+        "Do not touch files outside writePaths."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}

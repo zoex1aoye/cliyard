@@ -28,7 +28,7 @@ npm run master-dispatch -- \
 npm run master-dispatch -- \
   --plan examples/glass-parallel.plan.json \
   --repo ~/Documents/pers-project/ui-prototype \
-  --dispatch --worker claude --model 'deepseek-flash[1m]' \
+  --dispatch --worker claude --model 'deepseek-flash' \
   --real-worker --keep-worktrees
 ```
 
@@ -60,7 +60,7 @@ linked plugin source does not guarantee an active Host module is reloaded.
 | `defaultContracts` | `examples/mock-batch.parallel.json` |
 | `ledgerPath` | `.cliyard/ledger.json` |
 | `defaultWorker` | shipped patch: `claude`; package fallback: `mock` |
-| `model` | shipped patch: `deepseek-flash[1m]` |
+| `model` | shipped patch: `deepseek-flash` |
 | `keepWorktrees` | `true` |
 | `monitorPort` | `3927` |
 

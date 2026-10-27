@@ -118,7 +118,7 @@
 - **Task Architect v0（只读 Plan 生产者）**
   - `cliyard architect --repo <target> --design <repo-relative-design.md>
     --plan-id <id> [--worker claude] [--model <id>] [--out <plan.json>] [--json]`；
-    默认 worker `claude`、模型 `deepseek-flash[1m]`、输出
+    默认 worker `claude`、模型 `deepseek-flash`、输出
     `<target>/.cliyard/plans/<planId>.json`；前台有限命令，不运行 Plan；
   - preflight：目标必须是 git repo、worktree 干净、design 已 tracked 且在
     repo 内、HEAD 解析为精确 base commit；任何失败都在 worker 启动前拒绝；

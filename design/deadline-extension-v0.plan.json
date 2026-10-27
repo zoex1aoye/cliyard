@@ -1,0 +1,51 @@
+{
+  "planId": "deadline-extension-v0",
+  "tasks": [
+    {
+      "taskId": "health-gated-deadline-extension",
+      "goal": "Implement the deadline half of design/task-continuation-and-deadline-v0.md. Add shared versioned continuation types in src/agents/continuation.ts for a bounded DeadlineExtensionPolicy and TaskExtensionRecord, including extensionId, attempt, kind deadline, source auto, requested/granted timestamps, reason, bounded healthyEvidence, providerSessionId when known, extensionMs, and cumulativeTimeoutMs. Add optional AgentStartInput.onExtension and AgentResult.extensions. In the Claude adapter, track the newest mapped assistant/tool.start/tool.result event as the only meaningful-progress signal; heartbeat, waiting and thinking-token traffic alone must not qualify. At the wall-clock timeout, auto-extend only when policy.autoExtend=true, a callback is present, the child is alive, the last meaningful event is within healthyActivityWindowMs, there is no unresolved error/retry storm, and maxExtensions/maxTotalTimeoutMs bounds permit it. Persist the exact grant through onExtension before rescheduling the same live child timer; if persistence fails, do not grant. Do not change the provider budget guard. Keep the default disabled (autoExtend=false, maxExtensions=0). Add pipeline plumbing: CodexBatchOptions.deadlinePolicy, runClosedLoop callback forwarding, batch checkpoints that append grants to RunTaskState.extensions before the invocation can finish, backward-compatible manifest validation in src/supervisor/store.ts, and supervisor start/resume CLI flags --timeout-ms, --auto-extend-deadline, --deadline-extension-ms, --max-deadline-extensions, --max-total-timeout-ms and --healthy-activity-window-ms. Reject invalid or contradictory policy values before dispatch. Surface extension count and last deadline extension in supervisor human status; JSON already includes task extensions. Codex remains fail-closed because its adapter has no mapped meaningful progress stream yet; document that limit. Add focused fixture tests with fake Claude stream-json children proving healthy extension, stale-only-heartbeat denial, error-storm denial, bounded max extensions/total time, persistence-before-extension ordering, callback failure denial, manifest round-trip/malformed evidence, and default-off behavior. Do not test with a real API. Record exact checks and limits in docs/evidence/DEADLINE_EXTENSION.md.",
+      "nonGoals": [
+        "Do not implement budget continuation or provider --resume.",
+        "Do not change TaskContract, verifier acceptance or RunManifest authority.",
+        "Do not infer progress from generic heartbeats or provider thinking-token records.",
+        "Do not add a daemon, manual control file, cross-host extension or automatic main merge.",
+        "Do not modify historical RunManifest records.",
+        "Do not claim extension grants acceptance or increases budget."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        ".",
+        "design/task-continuation-and-deadline-v0.md"
+      ],
+      "writePaths": [
+        "src/agents/continuation.ts",
+        "src/agents/types.ts",
+        "src/agents/claude.ts",
+        "src/repair/loop.ts",
+        "src/scheduler/codex-batch.ts",
+        "src/supervisor/types.ts",
+        "src/supervisor/store.ts",
+        "src/supervisor/cli.ts",
+        "tests/deadline-extension.test.ts",
+        "docs/evidence/DEADLINE_EXTENSION.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/deadline-extension.test.ts",
+        "npm test"
+      ],
+      "deliverables": [
+        "Healthy live Claude children can receive bounded, persisted time extensions.",
+        "Heartbeat-only or error-storm children do not receive time extensions.",
+        "The policy is disabled by default and fully visible in durable task state."
+      ],
+      "forbidden": [
+        "Do not extend after the child has exited.",
+        "Do not reschedule a timer before the extension record is durably accepted.",
+        "Do not treat thinking provider records as tool/assistant progress.",
+        "Do not touch files outside writePaths."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}

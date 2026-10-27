@@ -6,7 +6,7 @@
 >
 > Claude Code：2.1.185
 >
-> 模型：`deepseek-flash[1m]`
+> 模型：`deepseek-flash`
 
 ## 1. 安装方式
 
@@ -48,14 +48,24 @@ Key 明文不进入仓库、不打印到日志。
 ```bash
 export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
 export ANTHROPIC_AUTH_TOKEN="$DEEPSEEK_API_KEY"
-export ANTHROPIC_MODEL='deepseek-flash[1m]'
-export ANTHROPIC_DEFAULT_OPUS_MODEL='deepseek-flash[1m]'
-export ANTHROPIC_DEFAULT_SONNET_MODEL='deepseek-flash[1m]'
+export ANTHROPIC_MODEL='deepseek-flash'
+export ANTHROPIC_DEFAULT_OPUS_MODEL='deepseek-flash'
+export ANTHROPIC_DEFAULT_SONNET_MODEL='deepseek-flash'
 export ANTHROPIC_DEFAULT_HAIKU_MODEL='deepseek-flash'
 export CLAUDE_CODE_SUBAGENT_MODEL='deepseek-flash'
 export CLAUDE_CODE_EFFORT_LEVEL=max
 export CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432
 ```
+
+2026-10-28 的真实 DeepSeek Anthropic-compatible endpoint 返回：
+
+```text
+The supported API model names are deepseek-flash, deepseek-v4-pro,
+but you passed deepseek-flash[1m].
+```
+
+因此当前启动器和 cliyard 默认值已改为 `deepseek-flash`。历史 evidence 中
+保留的 `deepseek-flash[1m]` 是当时实测记录，不应继续作为可执行配置。
 
 来源：
 
@@ -76,7 +86,7 @@ claude-ds -p 'Reply exactly with PROBE_OK and nothing else.' \
 ```text
 is_error=false
 result=PROBE_OK
-modelUsage has deepseek-flash[1m]
+modelUsage has deepseek-flash
 ```
 
 ## 4. Cliyard Worker
@@ -212,23 +222,24 @@ DeepSeek/Claude 的余额、发票价格、额度或严格 hard cap；单次 pro
 [docs/evidence/BUDGET_CONTINUATION.md](evidence/BUDGET_CONTINUATION.md)。
 
 本 slice 的最终检查：`npm run build` 通过，focused budget fake-CLI
-15/15，受影响回归串行 90/90。完整测试命令仍受当前 sandbox 的 `tsx` IPC
-`EPERM` 和固定测试端口不可绑定的影响，不能报告为全绿；这不是 provider
-运行结果，也没有调用真实 Claude/DeepSeek API。
+15/15，受影响回归串行 90/90，合入后独立 `npm test` 338/338 通过。
+真实 `deepseek-flash` resume probe 也确认同一 session 可在更大 guard 下继续；
+该 probe 的 `$0.000001` guard 实际报告了 `$0.10665`，再次证明 guard 不是
+严格 hard cap。
 
 ## 5. Plan / DSH
 
 ```bash
 npm run plan-dispatch -- plan.json \
   --repo /path/to/target \
-  --dispatch --worker claude --model 'deepseek-flash[1m]' --background
+  --dispatch --worker claude --model 'deepseek-flash' --background
 ```
 
 DSH 插件的 shipped patch 当前默认：
 
 ```text
 defaultWorker: claude
-model: deepseek-flash[1m]
+model: deepseek-flash
 ```
 
 仍然需要重启已有 DSH Desktop 进程，新的 Host 模块和工具才会重新加载。

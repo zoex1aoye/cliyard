@@ -199,15 +199,47 @@ Run from this worktree:
 | Command | Result |
 |---------|--------|
 | `npm run build` | pass, exit `0` |
-| `node --import tsx --test tests/budget-continuation.test.ts` | 15/15 pass |
+| `npx tsx --test tests/budget-continuation.test.ts` | 15/15 pass |
 | Affected existing and new regression group with `--test-concurrency=1` (11 files) | 90/90 pass, 64,809.1 ms |
-| `node --import tsx --test tests/*.test.ts` | not a clean repository-wide result: unrelated child-CLI tests hit sandbox IPC `EPERM`, runtime drills could not bind their fixed ports, and the run was terminated after runtime-test children stopped making progress |
+| Independent integration `npm test` | 338/338 pass |
 
-The repository's local `tsx` executable attempted to open a temporary IPC pipe
-and received sandbox `EPERM`; tests were therefore invoked through
-`node --import tsx --test`, which runs the same TypeScript files without the
-CLI wrapper. Test timing remains host-load sensitive because the fixtures use
-real short wall-clock timers.
+The worker sandbox could not run the repository-wide `tsx` command reliably,
+so its evidence used the Node `tsx` loader. After merging into the control
+worktree, the normal `npm test` command was run independently and passed.
+Test timing remains host-load sensitive because the fixtures use real short
+wall-clock timers.
+
+### 5.1 Real Claude Code + DeepSeek resume probe
+
+After the fake-CLI suite passed, a disposable real probe was run with
+`claude-ds --model deepseek-flash`:
+
+```text
+session: 3de80d30-2897-4706-a74e-b6e12ab4c5ec
+
+first invocation:
+  --session-id 3de80d30-2897-4706-a74e-b6e12ab4c5ec
+  --max-budget-usd 0.000001
+  exit 1
+  subtype error_max_budget_usd
+  reported total_cost_usd 0.10665
+
+second invocation:
+  --resume 3de80d30-2897-4706-a74e-b6e12ab4c5ec
+  --max-budget-usd 0.05
+  exit 0
+  subtype success
+  result PROBE_TWO
+  reported total_cost_usd 0.011569
+```
+
+This proves the currently installed Claude Code and DeepSeek-compatible
+endpoint accept a larger guard on a resumed provider session. It also
+demonstrates the documented overshoot: a `$0.000001` guard observed
+`$0.10665` because the first provider request can overshoot. The probe was a
+direct CLI compatibility check, not a complete cliyard auto-continuation run;
+the adapter's health gate, policy and persistence ordering are covered by the
+fake-CLI tests.
 
 ## 6. Limits and non-goals
 

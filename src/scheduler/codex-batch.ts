@@ -1628,7 +1628,7 @@ Usage:
 
 Defaults:
   codex model: deepseek-v4-pro (or CLIYARD_CODEX_MODEL)
-  claude model: deepseek-flash[1m] (or CLIYARD_CLAUDE_MODEL)
+  claude model: deepseek-flash (or CLIYARD_CLAUDE_MODEL)
   --dry-run: stub files in worktree (no worker API); for tests / offline
   ledger: <repo>/.cliyard/ledger.json
 `);
@@ -1659,6 +1659,13 @@ async function runWorkerBatchCli(
   }
   const file = positionalArg(argv);
   if (!file) usage(worker);
+  const requestedWorker = arg("--worker", argv);
+  if (requestedWorker !== undefined) {
+    throw new Error(
+      `worker-batch: ${worker}-batch does not accept --worker; ` +
+        `use ${requestedWorker}-batch instead`,
+    );
+  }
   const budget = budgetSettingsFromArgs(argv, worker);
 
   const result = await runCodexBatch({
@@ -1709,6 +1716,7 @@ function positionalArg(argv: string[]): string | undefined {
     "--repo",
     "--ledger",
     "--model",
+    "--worker",
     ...BUDGET_VALUE_FLAGS,
   ]);
   for (let i = 0; i < argv.length; i++) {

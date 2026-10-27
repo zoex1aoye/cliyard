@@ -43,7 +43,7 @@ cd "$CLIYARD" && npm run plan-dispatch -- \
 cd "$CLIYARD" && npm run plan-dispatch -- \
   examples/glass-parallel.plan.json \
   --repo "$GLASS" \
-  --dispatch --worker claude --model 'deepseek-flash[1m]' --dry-run
+  --dispatch --worker claude --model 'deepseek-flash' --dry-run
 
 # 真跑：DeepSeek flash 双任务并行隔离（写 Empty / Skeleton）
 cd "$CLIYARD" && npm run codex-batch -- \

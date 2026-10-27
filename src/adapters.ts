@@ -28,7 +28,11 @@ export function buildWorkerCommand(
         opts.permission === "bypass"
           ? "--permission-mode bypassPermissions"
           : "--permission-mode acceptEdits";
-      return [`claude -p ${q}`, modelFlag, perm].filter(Boolean).join(" ");
+      const claudeBinary =
+        process.env.CLIYARD_CLAUDE_BINARY ?? "claude-ds";
+      return [`${shellQuote(claudeBinary)} -p ${q}`, modelFlag, perm]
+        .filter(Boolean)
+        .join(" ");
     }
     case "codex": {
       const sandbox =

@@ -16,6 +16,38 @@ import { runCodexBatch } from "../src/scheduler/codex-batch.js";
 const parallelFixture = fileURLToPath(
   new URL("../examples/codex-batch.parallel.json", import.meta.url),
 );
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+
+test("codex-batch rejects an ignored --worker override", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cliyard-codex-worker-"));
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "src/cli.ts",
+        "codex-batch",
+        parallelFixture,
+        "--repo",
+        dir,
+        "--worker",
+        "claude",
+      ],
+      {
+        cwd: repoRoot,
+        encoding: "utf8",
+      },
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(
+      `${result.stdout}\n${result.stderr}`,
+      /codex-batch does not accept --worker; use claude-batch instead/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("runCodexBatch dry-run: two worktrees then accept", async () => {
   const dir = mkdtempSync(join(tmpdir(), "cliyard-codex-"));
