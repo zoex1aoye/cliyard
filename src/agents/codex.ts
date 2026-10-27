@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { collectChangedPaths } from "./git-paths.js";
 import {
+  boundFailureText,
   createFailureRecord,
   unavailableCostTruth,
 } from "../failures.js";
@@ -213,10 +214,18 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
             opts.extraArgs ?? [],
             timeoutMs,
           );
-          const changed = await collectChangedPaths(
-            opts.cwd,
-            input.contract.baseCommit,
-          );
+          let changed: Awaited<ReturnType<typeof collectChangedPaths>>;
+          try {
+            changed = await collectChangedPaths(
+              opts.cwd,
+              input.contract.baseCommit,
+            );
+          } catch (error) {
+            changed = {
+              paths: [],
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
           const changedLog = changed.error
             ? `\n[codex] git diff failed: ${changed.error}`
             : changed.paths.length
@@ -232,8 +241,14 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
             .join("; ");
           return {
             sessionId,
-            exitCode: changed.error ? 1 : res.code,
+            exitCode:
+              res.code !== 0 ? res.code : changed.error ? 1 : 0,
             touchedPaths: changed.paths,
+            ...(changed.error
+              ? {
+                  changedPathsError: boundFailureText(changed.error, 2_000),
+                }
+              : {}),
             logTail:
               (res.stdout + "\n" + res.stderr).trim().slice(-4000) +
               changedLog,
@@ -245,6 +260,10 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
                     signal: res.signal,
                     timeoutMs,
                     stage: "worker",
+                    postCheckFailed:
+                      Boolean(changed.error) &&
+                      !res.timedOut &&
+                      res.code === 0,
                     ...(detail ? { messageDetail: detail } : {}),
                   }),
                 }

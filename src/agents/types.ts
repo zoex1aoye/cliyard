@@ -111,8 +111,13 @@ export interface AgentStartInput {
 export interface AgentResult {
   sessionId: string;
   exitCode: number;
-  /** Mock / real: paths touched under writePaths */
+  /** Repository-relative paths reported changed by the worker adapter. */
   touchedPaths: string[];
+  /**
+   * Bounded git-diff collection failure, when changed paths are unavailable.
+   * This is observation evidence; it does not replace the worker failure.
+   */
+  changedPathsError?: string;
   logTail: string;
   /**
    * Complete final provider result text, when the adapter captures one.

@@ -11,12 +11,30 @@ import type { CostTruth, FailureRecord } from "../failures.js";
 
 export const RUN_MANIFEST_VERSION = 1 as const;
 export const ACTIVE_RUN_VERSION = 1 as const;
+export const MAX_PATH_AUDITS = 64;
+export const MAX_PATH_AUDIT_PATHS = 128;
+export const MAX_PATH_AUDIT_ERROR_LENGTH = 2_000;
 
 export type RunStatus = "running" | "interrupted" | "completed" | "blocked";
 
 export interface RunOwner {
   pid: number;
   host: string;
+}
+
+/**
+ * Bounded, non-authoritative evidence for one worker exit. Path observations
+ * never grant acceptance or replace the worker's structured failure.
+ */
+export interface PathAuditRecord {
+  /** 0-based attempt index within the closed-loop invocation. */
+  attempt: number;
+  observedAt: string;
+  /** Normalized worker exit code returned by the adapter. */
+  exitCode: number;
+  changedPaths: string[];
+  outsideWritePaths: string[];
+  changedPathsError?: string;
 }
 
 export interface RunTaskState {
@@ -51,6 +69,11 @@ export interface RunTaskState {
    * after the attempt worktree is cleaned up.
    */
   cost?: CostTruth;
+  /**
+   * Cumulative bounded path evidence for every worker exit observed for this
+   * task. Older manifests may omit this field.
+   */
+  pathAudits?: PathAuditRecord[];
 }
 
 /** A rejected attempt whose worktree still validates for reuse. */

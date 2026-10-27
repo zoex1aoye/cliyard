@@ -251,10 +251,18 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
             });
             await delay(waitMs);
           }
-          const changed = await collectChangedPaths(
-            opts.cwd,
-            input.contract.baseCommit,
-          );
+          let changed: Awaited<ReturnType<typeof collectChangedPaths>>;
+          try {
+            changed = await collectChangedPaths(
+              opts.cwd,
+              input.contract.baseCommit,
+            );
+          } catch (error) {
+            changed = {
+              paths: [],
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
           const changedLog = changed.error
             ? `\n[claude] git diff failed: ${changed.error}`
             : changed.paths.length
@@ -281,6 +289,11 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
             sessionId,
             exitCode: failed ? 1 : 0,
             touchedPaths: changed.paths,
+            ...(changed.error
+              ? {
+                  changedPathsError: boundFailureText(changed.error, 2_000),
+                }
+              : {}),
             logTail: `${output}${changedLog}`,
             ...(typeof parsed?.result === "string" && parsed.result
               ? { finalText: parsed.result }

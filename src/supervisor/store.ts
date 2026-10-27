@@ -29,8 +29,12 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { parseCostTruth, parseFailureRecord } from "../failures.js";
 import {
   ACTIVE_RUN_VERSION,
+  MAX_PATH_AUDITS,
+  MAX_PATH_AUDIT_ERROR_LENGTH,
+  MAX_PATH_AUDIT_PATHS,
   RUN_MANIFEST_VERSION,
   type ActiveRunPointer,
+  type PathAuditRecord,
   type RunManifest,
   type RunOwner,
   type RunStatus,
@@ -808,9 +812,104 @@ function parseRunManifest(raw: unknown, source: string): RunManifest {
       }
       task.cost = cost;
     }
+    if (task.pathAudits !== undefined) {
+      task.pathAudits = parsePathAudits(
+        task.pathAudits,
+        `${source}: task ${key}.pathAudits`,
+      );
+    }
   }
 
   return raw as unknown as RunManifest;
+}
+
+function parsePathAudits(raw: unknown, source: string): PathAuditRecord[] {
+  if (!Array.isArray(raw)) {
+    throw new RunManifestError(`${source} must be an array`);
+  }
+  if (raw.length > MAX_PATH_AUDITS) {
+    throw new RunManifestError(
+      `${source} must contain at most ${MAX_PATH_AUDITS} records`,
+    );
+  }
+
+  return raw.map((value, index) => {
+    const path = `${source}[${index}]`;
+    if (!isRecord(value)) {
+      throw new RunManifestError(`${path} must be an object`);
+    }
+    if (!Number.isInteger(value.attempt) || (value.attempt as number) < 0) {
+      throw new RunManifestError(
+        `${path}.attempt must be a non-negative integer`,
+      );
+    }
+    if (
+      typeof value.observedAt !== "string" ||
+      value.observedAt.length === 0 ||
+      Number.isNaN(Date.parse(value.observedAt))
+    ) {
+      throw new RunManifestError(`${path}.observedAt must be a timestamp`);
+    }
+    if (!Number.isInteger(value.exitCode)) {
+      throw new RunManifestError(`${path}.exitCode must be an integer`);
+    }
+
+    const changedPaths = parsePathEvidence(
+      value.changedPaths,
+      `${path}.changedPaths`,
+    );
+    const outsideWritePaths = parsePathEvidence(
+      value.outsideWritePaths,
+      `${path}.outsideWritePaths`,
+    );
+
+    let changedPathsError: string | undefined;
+    if (value.changedPathsError !== undefined) {
+      if (
+        typeof value.changedPathsError !== "string" ||
+        value.changedPathsError.length === 0 ||
+        value.changedPathsError.length > MAX_PATH_AUDIT_ERROR_LENGTH
+      ) {
+        throw new RunManifestError(
+          `${path}.changedPathsError must be a non-empty string of at most ` +
+            `${MAX_PATH_AUDIT_ERROR_LENGTH} characters`,
+        );
+      }
+      changedPathsError = value.changedPathsError;
+    }
+
+    return {
+      attempt: value.attempt as number,
+      observedAt: value.observedAt,
+      exitCode: value.exitCode as number,
+      changedPaths,
+      outsideWritePaths,
+      ...(changedPathsError !== undefined ? { changedPathsError } : {}),
+    };
+  });
+}
+
+function parsePathEvidence(raw: unknown, source: string): string[] {
+  if (!Array.isArray(raw)) {
+    throw new RunManifestError(`${source} must be an array`);
+  }
+  if (raw.length > MAX_PATH_AUDIT_PATHS) {
+    throw new RunManifestError(
+      `${source} must contain at most ${MAX_PATH_AUDIT_PATHS} paths`,
+    );
+  }
+  return raw.map((value, index) => {
+    if (
+      typeof value !== "string" ||
+      value.length === 0 ||
+      value.includes("\0")
+    ) {
+      throw new RunManifestError(
+        `${source}[${index}] must be a non-empty path string`,
+      );
+    }
+    return value;
+  });
 }
 
 function parseLockInfo(raw: unknown): SupervisorLockInfo {
