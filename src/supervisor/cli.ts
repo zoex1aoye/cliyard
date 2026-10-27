@@ -1,18 +1,36 @@
 /**
- * Supervisor v0 CLI: foreground `start` / `resume`, read-only `status`, and a
- * cooperative `stop`.
+ * Supervisor v0 CLI: foreground `start` / `resume`, read-only `status`,
+ * orphan-runtime `reap`, and a cooperative `stop`.
  *
  * Durability lives in the RunManifest store; the worker batch persists a
  * checkpoint after every accepted task. `resume` reloads that manifest, checks
  * the contracts / base / integration preconditions, and dispatches only tasks
  * that are not accepted yet.
+ *
+ * `start` and `resume` reconcile orphaned runtime processes after acquiring the
+ * repository lock and before creating or marking a run. Any runtime that needs
+ * human review fails the command closed (design/runtime-orphan-reaper-v0.md).
  */
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFileSync, unlinkSync } from "node:fs";
+import { readFileSync, readdirSync, unlinkSync, type Dirent } from "node:fs";
 import { hostname } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import type { TaskContract } from "../contracts/schema.js";
+import { RUNTIME_MANIFEST_FILE } from "../runtime/manager.js";
+import { portAllocatorPaths } from "../runtime/ports.js";
+import {
+  preflightOrphanedRuntimes,
+  type RuntimeReapPlanState,
+} from "../runtime/reaper.js";
+import {
+  reapOrphanedRuntimes,
+  type RuntimeReapReport,
+} from "../runtime/reaper-execute.js";
+import type {
+  RuntimeCleanupState,
+  RuntimeRecoveryRecord,
+} from "../runtime/types.js";
 import {
   runCodexBatch,
   type CodexBatchOptions,
@@ -60,6 +78,13 @@ export interface SupervisorCliOptions {
   signalHandling?: boolean;
 }
 
+/** A recovery record already persisted in a runtime manifest. */
+export interface SupervisorRuntimeRecovery {
+  runtimeId: string;
+  cleanup?: RuntimeCleanupState;
+  recovery: RuntimeRecoveryRecord;
+}
+
 export interface SupervisorStatus {
   runId: string;
   planId: string;
@@ -91,6 +116,8 @@ export interface SupervisorStatus {
   /** Timestamp of the last manifest checkpoint write. */
   lastCheckpoint: string;
   lastAccepted: RunTaskState | null;
+  /** Recovery evidence persisted by earlier reaper runs; never reconciled here. */
+  runtimeRecovery: SupervisorRuntimeRecovery[];
 }
 
 export async function runSupervisorCli(
@@ -115,6 +142,8 @@ export async function runSupervisorCli(
       return statusCommand(rest, options, log);
     case "resume":
       return resumeCommand(rest, options, log);
+    case "reap":
+      return reapCommand(rest, options, log);
     case "stop":
       return stopCommand(rest, options, log);
     default:
@@ -154,6 +183,9 @@ async function startCommand(
   const lock = acquireSupervisorLock(repoRoot, runId);
   let manifest: RunManifest;
   try {
+    // Reconcile orphaned runtimes only once this supervisor owns the repo. Any
+    // runtime needing human review fails the start before a run is created.
+    await reconcileOrphansBeforeRun(repoRoot, "start");
     manifest = createRunManifest(repoRoot, {
       runId,
       planId,
@@ -221,6 +253,9 @@ async function resumeCommand(
   const lock = acquireResumeLock(repoRoot, manifest, has("--force", rest));
   let resumed: RunManifest;
   try {
+    // Reconcile before marking the run running so unsafe orphan evidence can
+    // never coexist with a newly dispatched batch.
+    await reconcileOrphansBeforeRun(repoRoot, "resume");
     setActiveRun(repoRoot, manifest.runId);
     resumed = updateRunManifest(repoRoot, manifest.runId, (current) => {
       current.status = "running";
@@ -360,6 +395,9 @@ function buildStatus(
     },
     lastCheckpoint: manifest.updatedAt,
     lastAccepted: lastAccepted ? { ...lastAccepted } : null,
+    // Read-only: expose evidence written by previous reaper runs; status never
+    // plans, signals, releases a lease, or rewrites a manifest.
+    runtimeRecovery: readRuntimeRecoveryRecords(repoRoot),
   };
 }
 
@@ -399,6 +437,16 @@ function printStatus(
         : " (not running)";
   log(`owner: pid ${status.owner.pid} on ${status.owner.host}${alive}`);
   log(`last checkpoint: ${status.lastCheckpoint}`);
+  if (status.runtimeRecovery.length === 0) {
+    log("runtime recovery: none");
+  } else {
+    for (const entry of status.runtimeRecovery) {
+      log(
+        `runtime recovery: ${entry.runtimeId} ${entry.recovery.state} ` +
+          `at ${entry.recovery.at} - ${entry.recovery.reason}`,
+      );
+    }
+  }
   if (status.lastAccepted) {
     const commit = status.lastAccepted.resultCommit
       ? ` @ ${status.lastAccepted.resultCommit}`
@@ -550,6 +598,273 @@ async function waitFor(
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
   }
   return predicate();
+}
+
+// ---------------------------------------------------------------------------
+// Orphan runtime reconciliation
+// ---------------------------------------------------------------------------
+
+interface AnnotatedRecoveryRecord {
+  group: "reaped" | "needsHuman" | "skipped";
+  runtimeId?: string;
+  record: RuntimeRecoveryRecord;
+}
+
+interface BlockedRuntime {
+  runtimeId?: string;
+  reason: string;
+}
+
+interface ReconciliationOutcome {
+  report: RuntimeReapReport;
+  records: AnnotatedRecoveryRecord[];
+  blocked: BlockedRuntime[];
+}
+
+async function reapCommand(
+  rest: string[],
+  _options: SupervisorCliOptions,
+  log: (line: string) => void,
+): Promise<number> {
+  const repoRoot = repoFrom(rest);
+  const outcome = await reconcileRuntimeOrphans(repoRoot);
+
+  if (has("--json", rest)) {
+    log(JSON.stringify(outcome.report, null, 2));
+  } else {
+    printReconciliation(outcome, log);
+  }
+  return 0;
+}
+
+/**
+ * Run the destructive reaper and annotate its records with runtime ids.
+ *
+ * Preflight runs first (read-only) because the executor report intentionally
+ * carries recovery records without ids; plans are the only source for
+ * `needs_human`/`skip` decisions that change nothing on disk. Records persisted
+ * by the executor are matched back to their manifest.
+ */
+async function reconcileRuntimeOrphans(
+  repoRoot: string,
+): Promise<ReconciliationOutcome> {
+  const preflight = await preflightOrphanedRuntimes(repoRoot);
+  const report = await reapOrphanedRuntimes(repoRoot);
+  const persisted = readRuntimeRecoveryRecords(repoRoot);
+
+  const planIds = new Map<string, string[]>();
+  for (const plan of preflight.plans) {
+    const key = planKey(plan.state, plan.reason);
+    const ids = planIds.get(key);
+    if (ids === undefined) planIds.set(key, [plan.runtimeId]);
+    else ids.push(plan.runtimeId);
+  }
+  const takePlanId = (
+    state: RuntimeReapPlanState,
+    reason: string,
+  ): string | undefined => planIds.get(planKey(state, reason))?.shift();
+
+  const usedPersisted = new Set<number>();
+  const takePersistedId = (
+    record: RuntimeRecoveryRecord,
+  ): string | undefined => {
+    for (let index = 0; index < persisted.length; index += 1) {
+      if (usedPersisted.has(index)) continue;
+      if (sameRecovery(persisted[index].recovery, record)) {
+        usedPersisted.add(index);
+        return persisted[index].runtimeId;
+      }
+    }
+    return undefined;
+  };
+
+  const annotate = (
+    group: AnnotatedRecoveryRecord["group"],
+    records: readonly RuntimeRecoveryRecord[],
+    planState?: RuntimeReapPlanState,
+  ): AnnotatedRecoveryRecord[] =>
+    records.map((record) => {
+      const runtimeId =
+        takePersistedId(record) ??
+        (planState === undefined
+          ? undefined
+          : takePlanId(planState, record.reason));
+      return {
+        group,
+        ...(runtimeId !== undefined ? { runtimeId } : {}),
+        record,
+      };
+    });
+
+  const records: AnnotatedRecoveryRecord[] = [
+    ...annotate("reaped", report.reaped),
+    ...annotate("needsHuman", report.needsHuman, "needs_human"),
+    ...annotate("skipped", report.skipped, "skip"),
+  ];
+
+  const blocked: BlockedRuntime[] = [];
+  const blockedKeys = new Set<string>();
+  const addBlocked = (runtimeId: string | undefined, reason: string): void => {
+    const key = `${runtimeId ?? ""} ${reason}`;
+    if (blockedKeys.has(key)) return;
+    blockedKeys.add(key);
+    blocked.push({ ...(runtimeId !== undefined ? { runtimeId } : {}), reason });
+  };
+  for (const plan of preflight.needsHuman) {
+    addBlocked(plan.runtimeId, plan.reason);
+  }
+  for (const entry of records) {
+    if (entry.group === "needsHuman") addBlocked(entry.runtimeId, entry.record.reason);
+  }
+
+  return { report, records, blocked };
+}
+
+async function reconcileOrphansBeforeRun(
+  repoRoot: string,
+  command: "start" | "resume",
+): Promise<void> {
+  const outcome = await reconcileRuntimeOrphans(repoRoot);
+  if (outcome.blocked.length === 0) return;
+
+  const detail = outcome.blocked
+    .map(
+      (entry) =>
+        `${entry.runtimeId ?? "<unidentified runtime>"}: ${entry.reason}`,
+    )
+    .join("; ");
+  throw new Error(
+    `supervisor ${command}: orphan runtime reconciliation needs human review ` +
+      `for ${outcome.blocked.length} candidate(s): ${detail}; ` +
+      "resolve the preserved runtime evidence, then rerun " +
+      `(inspect with "cliyard supervisor reap --repo ${repoRoot} --json")`,
+  );
+}
+
+function printReconciliation(
+  outcome: ReconciliationOutcome,
+  log: (line: string) => void,
+): void {
+  const { report } = outcome;
+  log(`scanned: ${report.scanned}`);
+  log(`reaped: ${report.reaped.length}`);
+  log(`needs human: ${report.needsHuman.length}`);
+  log(`skipped: ${report.skipped.length}`);
+  for (const entry of outcome.records) {
+    const label = entry.group === "needsHuman" ? "needs human" : entry.group;
+    log(
+      `${label}${entry.runtimeId ? ` ${entry.runtimeId}` : ""}: ` +
+        entry.record.reason,
+    );
+    for (const service of entry.record.services) {
+      log(
+        `  service ${service.name}: ${service.action}` +
+          (service.portReleased ? " (port lease released)" : ""),
+      );
+    }
+  }
+}
+
+function planKey(state: RuntimeReapPlanState, reason: string): string {
+  return `${state} ${reason}`;
+}
+
+function sameRecovery(
+  a: RuntimeRecoveryRecord,
+  b: RuntimeRecoveryRecord,
+): boolean {
+  if (
+    a.state !== b.state ||
+    a.reason !== b.reason ||
+    a.at !== b.at ||
+    a.reaperPid !== b.reaperPid ||
+    a.reaperHost !== b.reaperHost ||
+    a.services.length !== b.services.length
+  ) {
+    return false;
+  }
+  return a.services.every((service, index) => {
+    const other = b.services[index]!;
+    return (
+      service.name === other.name &&
+      service.pgid === other.pgid &&
+      service.action === other.action &&
+      service.portReleased === other.portReleased
+    );
+  });
+}
+
+/** Read persisted recovery evidence without planning or mutating anything. */
+function readRuntimeRecoveryRecords(
+  repoRoot: string,
+): SupervisorRuntimeRecovery[] {
+  const runtimeDir = portAllocatorPaths(repoRoot).runtimeDir;
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(runtimeDir, { withFileTypes: true });
+  } catch {
+    // Status/read-only callers must stay usable without runtime state.
+    return [];
+  }
+
+  const records: SupervisorRuntimeRecovery[] = [];
+  for (const entry of entries
+    .filter((candidate) => candidate.isDirectory())
+    .sort((a, b) => a.name.localeCompare(b.name))) {
+    const path = join(runtimeDir, entry.name, RUNTIME_MANIFEST_FILE);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed)) continue;
+    const recovery = parsed.recovery;
+    if (!isRuntimeRecoveryRecord(recovery)) continue;
+
+    const runtimeId =
+      typeof parsed.runtimeId === "string" && parsed.runtimeId.trim() !== ""
+        ? parsed.runtimeId
+        : entry.name;
+    const cleanup = isRuntimeCleanupState(parsed.cleanup)
+      ? parsed.cleanup
+      : undefined;
+    records.push({
+      runtimeId,
+      ...(cleanup !== undefined ? { cleanup } : {}),
+      recovery,
+    });
+  }
+  return records;
+}
+
+function isRuntimeCleanupState(value: unknown): value is RuntimeCleanupState {
+  return (
+    value === "pending" ||
+    value === "running" ||
+    value === "complete" ||
+    value === "failed"
+  );
+}
+
+function isRuntimeRecoveryRecord(
+  value: unknown,
+): value is RuntimeRecoveryRecord {
+  if (!isRecord(value)) return false;
+  return (
+    (value.state === "reaped" ||
+      value.state === "needs_human" ||
+      value.state === "skipped") &&
+    typeof value.reason === "string" &&
+    typeof value.at === "string" &&
+    typeof value.reaperPid === "number" &&
+    typeof value.reaperHost === "string" &&
+    Array.isArray(value.services)
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -792,9 +1107,13 @@ Usage:
   cliyard supervisor resume --repo <path> [--run id] [--worker claude|codex]
                             [--model id] [--dry-run] [--keep-worktrees]
                             [--retry-rejected] [--force] [--verbose]
+  cliyard supervisor reap --repo <path> [--json]
   cliyard supervisor stop --repo <path> [--run id] [--force]
 
 Foreground only: start/resume hold .cliyard/supervisor.lock until exit.
 Resume rejects changed contracts, a moved base commit, or a missing
-integration branch, and never reruns accepted tasks.`);
+integration branch, and never reruns accepted tasks.
+Start/resume reap proven orphaned runtimes after acquiring the lock and fail
+closed when any runtime needs human review. Status only reads persisted
+recovery records; it never reconciles.`);
 }
