@@ -1,0 +1,37 @@
+{
+  "planId": "failure-cost-evidence-fix-v0",
+  "tasks": [
+    {
+      "taskId": "failure-cost-evidence-correction",
+      "goal": "Correct docs/evidence/FAILURE_COST_TRUTH.md so fixture-based implementation verification is separated from the real self-host execution that occurred. Record that failure-cost-durable used 9.939564 of a $10 guard and failure-cost-docs used 4.883416 of a $5 guard, while the legacy path reported both as implement failed: exitCode=1. Record that queue retries reused the dirty worktrees and used new provider sessions, and that hardening required one verifier repair before acceptance. State clearly that the new subtype-aware adapter path is covered by fake CLI fixtures and was not exercised by a new real provider session before merge. Preserve existing test counts, historical sections and all no-billing/no-balance caveats. Do not copy raw transcript content or secrets. Modify only the evidence document.",
+      "nonGoals": [
+        "Do not modify source, tests, schemas, status CLIs, runtime state or design documents.",
+        "Do not change acceptance, retry, routing, admission, queue authority or RunManifest semantics.",
+        "Do not claim DeepSeek billing, invoice, balance, provider-reported cost or production transcript compatibility.",
+        "Do not delete historical measurements or invent new measurements."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/failure-cost-truth-v0.md",
+        "docs/evidence/FAILURE_COST_TRUTH.md",
+        "src/failures.ts",
+        "src/agents/claude.ts",
+        "tests/failure-taxonomy.test.ts",
+        "tests/claude-failure-cost.test.ts"
+      ],
+      "writePaths": [
+        "docs/evidence/FAILURE_COST_TRUTH.md"
+      ],
+      "verifyCommands": [
+        "rg -q 'self-host' docs/evidence/FAILURE_COST_TRUTH.md",
+        "rg -q '9\\.939564' docs/evidence/FAILURE_COST_TRUTH.md",
+        "rg -q '4\\.883416' docs/evidence/FAILURE_COST_TRUTH.md",
+        "rg -q 'implement failed: exitCode=1' docs/evidence/FAILURE_COST_TRUTH.md",
+        "rg -qi 'worktree' docs/evidence/FAILURE_COST_TRUTH.md",
+        "git diff --check",
+        "npm test"
+      ],
+      "maxRepairs": 0
+    }
+  ]
+}
