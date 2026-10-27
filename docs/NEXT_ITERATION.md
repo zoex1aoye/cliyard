@@ -883,12 +883,18 @@ Chained Read Context v0（已完成）：
     `.cliyard/queue.json` 扩大 attempts。
 59. [未完成] 实现 CLI + 模型 `ExecutionProfile` 路由，覆盖多模型/多 CLI 的
     三种真实部署场景。
-60. [未完成] 完成并行 Supervisor/queue 架构 spike，再实现有界并行派发：
-    独立 branch/worktree/run/evidence、资源准入和分别恢复；同时把现有
-    Plan ready-wave 任务并行纳入统一 admission，不能只做 queue item 并行。
-61. [未完成] 先稳定本地 Control API/event stream；DSH 只做薄 cockpit，
+60. [未完成] 建立共享 hierarchical admission broker：结合 CPU/RAM、runtime/
+    port/browser、provider/model 并发和预算动态选择并行数。`3` 只作为
+    warm start；通过受控 calibration 调整 hard max，429、内存压力、swap
+    或 OOM 时立即降并发。设计见
+    [dynamic-parallel-admission-v0.md](../design/dynamic-parallel-admission-v0.md)。
+61. [未完成] 完成并行 Supervisor/queue 架构 spike，再基于共享 broker 实现
+    有界并行派发：独立 branch/worktree/run/evidence、资源准入和分别恢复；
+    同时把现有 Plan ready-wave 任务并行纳入统一 admission，不能只做
+    queue item 并行。
+62. [未完成] 先稳定本地 Control API/event stream；DSH 只做薄 cockpit，
     最小自有 Web UI 作为平台不可用时的后备入口。
-62. [未完成] 在路由和并行语义稳定后，实现 DesignRevision/EvidenceBundle，
+63. [未完成] 在路由和并行语义稳定后，实现 DesignRevision/EvidenceBundle，
     再引入 look-ahead foreground controller、bounded soak 和 daemon 决策。
 
 ## 5. 下一步顺序
@@ -936,13 +942,14 @@ Chained Read Context v0（已完成）：
             design/chained-read-context-v0.md /
             docs/evidence/PLAN_BACKED_CHAIN.md /
             docs/evidence/CHAINED_READ_CONTEXT.md
-16. 下一步 P0：ControlSnapshot/event journal、failure taxonomy/cost、
+16. 下一步 P0：ControlSnapshot/event、failure/cost/resource telemetry、
             CLI + 模型路由、两层并行 Supervisor/queue spike
-17. 然后：有界并行 queue + bounded Plan task waves、Control API、DSH thin
-            cockpit、最小自有 Web UI
-18. 再然后：DesignRevision/EvidenceBundle、look-ahead controller、soak、
+17. 然后：共享 hierarchical admission broker → 固定上限并行 v0
+            （warm start 3）→ 实测自适应 ramp/backoff
+18. 再然后：Control API、DSH thin cockpit、最小自有 Web UI
+19. 最后：DesignRevision/EvidenceBundle、look-ahead controller、soak、
             daemon 决策
-19. 不重复已完成切片；不新增 daemon、跨主机、SQLite、无限并行、自动合入
+20. 不重复已完成切片；不新增 daemon、跨主机、SQLite、无限并行、自动合入
     main、provider 会话续跑、自动契约冻结或 24 小时声明
 ```
 

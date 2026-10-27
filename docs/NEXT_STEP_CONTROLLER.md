@@ -21,10 +21,12 @@ The implementation order was revised after the competitive and entry review:
 
 ```text
 queue observe / status
-  -> worker failure taxonomy + cost/usage truth
+  -> worker failure taxonomy + cost/resource telemetry
   -> CLI + model ExecutionProfile routing
   -> parallel Supervisor/queue architecture spike
-  -> parallel queue v0 with admission and independent recovery
+  -> shared hierarchical admission broker with fixed limits
+  -> parallel queue + Plan-wave v0, warm start 3
+  -> measured adaptive ramp/backoff
   -> stable local Control API + DSH better-sidebar cockpit
   -> DesignRevision + EvidenceBundle/verdict
   -> look-ahead foreground controller
@@ -173,7 +175,22 @@ paths are safe only when a transitive dependency makes the tasks serialize;
 otherwise they must be rejected or routed through a future integration
 envelope.
 
-### 7. `foreground-controller-v0` (P1)
+### 7. Dynamic admission calibration (P0 after fixed admission)
+
+Implement a shared broker before enabling adaptive scaling. It must combine:
+
+- host CPU/memory pressure and safety reserve;
+- per-task/profile resource history;
+- runtime/browser/port capacity;
+- provider/model concurrency and 429 feedback;
+- item and global task limits.
+
+`3` is the warm start. Ramp to 4/5/6 only through measured stable windows and an
+audited policy; decrease immediately on 429, memory pressure, swap growth or OOM.
+The detailed design is
+[design/dynamic-parallel-admission-v0.md](../design/dynamic-parallel-admission-v0.md).
+
+### 8. `foreground-controller-v0` (P1)
 
 Add a finite-process controller command, tentatively:
 
@@ -198,7 +215,7 @@ V0 should not auto-retry verifier rejections. Automatic retry is introduced
 only after the failure taxonomy can prove an infrastructure failure and only
 within an explicit attempt policy.
 
-### 8. Long-run verification
+### 9. Long-run verification
 
 Before any daemon claim:
 
@@ -264,3 +281,5 @@ The controller slice is ready to start when:
    provider/model/runtime/resource admission.
 8. Intra-item ready waves have bounded task concurrency and are observable in
    the same status projection as queue-item concurrency.
+9. Admission combines host/provider/runtime capacity and explains the binding
+   limit; the warm-start value 3 is not hardcoded as a permanent cap.

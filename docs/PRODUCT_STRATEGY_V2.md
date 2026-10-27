@@ -360,6 +360,31 @@ maxConcurrentByExecutionProfile
 7. rate-limit, runtime and port admission are global, not per-supervisor silos;
 8. crash recovery reconstructs every item/task wave independently.
 
+### 5.5 Dynamic capacity and provider feedback
+
+Parallelism is selected by one admission broker from host CPU/RAM pressure,
+runtime/browser slots, queue-item/task scope, provider/model concurrency and
+budget. The current adapter-level default `3` is a warm start, not a permanent
+limit.
+
+Use:
+
+```text
+warm start = 3
+minimum = 1
+hard max = configurable and calibrated
+policy = additive ramp / multiplicative backoff with cooldowns
+```
+
+DeepSeek's nominal model concurrency is far above what this 10-core/16 GiB local
+host can safely sustain once builds, browsers and runtime services are included.
+The provider limit still remains independent because account tier, subagents and
+429 feedback can differ from the nominal figure.
+
+See
+[dynamic-parallel-admission-v0.md](../design/dynamic-parallel-admission-v0.md)
+for the resource model, admission decision record and calibration protocol.
+
 ## 6. Entry strategy: Control API first, UI second
 
 DSH is currently an MVP shell, not the product boundary. If DSH stops
@@ -512,14 +537,16 @@ The earlier "observability -> foreground controller" ordering is too narrow.
 The revised execution order is:
 
 ```text
-1. ControlSnapshot + event journal + failure taxonomy
-2. ExecutionProfile routing and binding provenance
+1. ControlSnapshot + event journal + resource telemetry
+2. Failure taxonomy/cost + ExecutionProfile routing
 3. Parallel Supervisor/queue architecture spike
-4. Parallel queue v0 with admission and independent recovery
-5. DSH better-sidebar cockpit + stable Control API client
-6. DesignRevision + EvidenceBundle/verdict v0
-7. Look-ahead scheduler/foreground controller
-8. Bounded soak and process-manager/daemon decision
+4. Shared hierarchical admission broker with fixed limits
+5. Parallel queue + Plan-wave v0, warm start 3
+6. Measured adaptive ramp/backoff and calibration
+7. DSH better-sidebar cockpit + stable Control API client
+8. DesignRevision + EvidenceBundle/verdict v0
+9. Look-ahead scheduler/foreground controller
+10. Bounded soak and process-manager/daemon decision
 ```
 
 The controller is deliberately late because it automates whatever gates and
