@@ -3,8 +3,8 @@
 > Date: 2026-10-27
 >
 > Environment: macOS (Darwin 27.0.0), Node `v20.20.2`, npm `10.8.2`,
-> cliyard HEAD `fa2694b` (failure-cost-hardening-core merged; this
-> documentation change is uncommitted).
+> cliyard HEAD `ac9dc8d` (failure-cost-hardening-docs merged; this evidence
+> correction is uncommitted).
 >
 > Scope: the shared failure/cost shapes, the classifier and parsers, the
 > Claude/Codex adapter observations, closed-loop aggregation, durable
@@ -12,19 +12,30 @@
 > bounded event journal. These are local measurements, not a CI result, a
 > flake-rate claim, a DeepSeek invoice, or a provider-balance measurement.
 >
-> Verification is fixture-based. The adapter tests spawn temporary fake CLI
-> executables that emit shaped result records; no real Claude/DeepSeek session
-> was started or billed, and no real self-host transcript was parsed by the new
-> subtype path. The tests prove classification, parsing and persistence
-> behavior; they do not prove provider billing, balance, authorization,
-> routing or production transcript compatibility. The prior v0 round was
-> measured at HEAD `69f62de` and is preserved as historical evidence in §2.1;
-> §2.2 measures the post-review hardening tree at `fa2694b`.
+> Verification has two separate parts. The implementation is covered by
+> fixture-based tests: the adapter tests spawn temporary fake CLI executables
+> that emit shaped result records, start no real provider session and incur no
+> billing. Those tests prove classification, parsing and persistence behavior;
+> they do not prove provider billing, balance, authorization, routing or
+> production transcript compatibility. Separately, the v0 and hardening tasks
+> were implemented through cliyard's own queue with real Claude Code sessions
+> over the DeepSeek Anthropic-compatible endpoint; §2.3 records those runs, the
+> legacy path's `implement failed: exitCode=1` reports, and the failed first
+> attempts' CLI-side budget usage: 9.939564 USD of a `$10` guard for
+> `failure-cost-durable` and 4.883416 USD of a `$5` guard for
+> `failure-cost-docs`. Those are per-attempt CLI budget observations, not task
+> totals or provider invoices. Those real sessions did not exercise the new
+> subtype-aware adapter path, and no provider invoice, balance or
+> provider-reported cost was checked. The prior v0 round was measured at
+> HEAD `69f62de` and is preserved as historical evidence in §2.1; §2.2 measures
+> the post-review hardening tree at `fa2694b`.
 
 Failure and cost are **observational**. They do not grant acceptance, authorize
 an automatic retry, change dispatch, or replace the RunManifest as the
 task-level authority. No DeepSeek billing or balance authority is claimed, and
-no run-level authoritative cost total exists in v0.
+no run-level authoritative cost total exists in v0. The real self-host amounts
+in §2.3 are non-authoritative CLI-side budget observations, not provider
+invoices, bills or balances.
 
 ## 1. Implemented
 
@@ -323,7 +334,7 @@ Fix:
   even when glued to an identifier separator.
 
 Measured coverage: one new core taxonomy test and four new Claude adapter
-tests, listed in §2.5. The adapter tests use temporary fake CLI executables.
+tests, listed in §2.6. The adapter tests use temporary fake CLI executables.
 
 #### Finding 2 — provider cost authority was too permissive
 
@@ -346,18 +357,20 @@ Fix:
   `usage-only`/`unavailable` instead of emitting it.
 
 Measured coverage: one new core taxonomy test with positive and negative
-cases, plus the existing cost construction/parser tests, listed in §2.5.
+cases, plus the existing cost construction/parser tests, listed in §2.6.
 
-The hardening did not add provider billing, balance, authorization, routing,
-automatic retry or a real provider call. The subtype and authority tests use
-in-memory records and temporary fake CLI executables.
+The hardening added no provider billing, balance, authorization, routing,
+automatic retry or provider-call behavior. The subtype and authority tests use
+in-memory records and temporary fake CLI executables; the real self-host
+sessions that implemented the slice are recorded separately in §2.3.
 
 ## 2. Measured verification
 
-Two measurement rounds are recorded. §2.1 is the historical v0 round at HEAD
-`69f62de`. §2.2 is the post-review hardening round at HEAD `fa2694b`; its
-counts are the current claims. All commands were run from the cliyard checkout
-on 2026-10-27.
+Two fixture measurement rounds are recorded. §2.1 is the historical v0 round
+at HEAD `69f62de`. §2.2 is the post-review hardening round at HEAD `fa2694b`;
+its counts are the current claims. §2.3 records the separate real self-host
+execution that built and hardened the slice. All commands were run from the
+cliyard checkout on 2026-10-27.
 
 ### 2.1 Prior v0 round (historical, HEAD 69f62de)
 
@@ -392,9 +405,9 @@ above the prior 245-test baseline: 14 failure-taxonomy tests, 17 Claude adapter
 failure/cost tests, 12 supervisor/queue durable tests and 2 additional
 queue-control tests. The previous `245/245` measurement is historical, not a
 claim about this round. This subsection is retained as historical evidence and
-is superseded by §2.2 for the current tree.
+is superseded by §2.2 for the post-review tree.
 
-### 2.2 Hardening round (current, HEAD fa2694b)
+### 2.2 Hardening round (HEAD fa2694b)
 
 The hardening task changed only `src/failures.ts`, `src/agents/claude.ts` and
 the two focused test files; the durable paths were not modified.
@@ -433,11 +446,64 @@ above the 245 baseline and 6 above the v0 round's 290: 2 new failure-taxonomy
 tests and 4 new Claude adapter tests. The 14/17/12/7, 50/50 and 290/290 counts
 in §2.1 are historical, not the current claim.
 
-These tests use temporary fake CLI executables and in-memory records. No real
-provider was invoked, billed or queried for balance; no real self-host
-transcript was parsed by the new subtype path.
+The §2.1 and §2.2 test commands use temporary fake CLI executables and
+in-memory records. They invoke no real provider, incur no billing and query no
+balance; no real self-host transcript was parsed by the new subtype path. Real
+provider sessions were used to build the slice, recorded separately in §2.3.
 
-### 2.3 Exact enums (printed from the current build)
+### 2.3 Real self-host execution (historical)
+
+The slice itself was built by cliyard's own queue and Supervisor using the real
+Claude Code adapter over the DeepSeek Anthropic-compatible endpoint, not the
+fixture binaries. Two plan runs are relevant:
+
+```text
+plan failure-cost-truth-v0        run 9bfa2611-858c-4fdb-859b-6f6929f81baf
+                                  base 7193df6, completed 2026-10-27T15:35:06Z
+plan failure-cost-hardening-v0    run 4a374965-cda2-49d6-b2d1-cc48ebdbaae5
+                                  base f06fea4, completed 2026-10-27T15:51:54Z
+```
+
+What the real execution showed:
+
+- `failure-cost-core` was accepted in the first queue attempt.
+- `failure-cost-durable`'s first implementation attempt returned a non-zero
+  worker result. The legacy path — the control plane predated the durable
+  integration (run base `7193df6`) — reported only
+  `implement failed: exitCode=1`, with no structured failure category, stage or
+  code and no persisted cost. An explicit `queue retry` resumed the same run,
+  reused the task's existing dirty worktree, and started a new provider
+  session; that attempt was accepted and committed `64578d5`.
+- `failure-cost-docs` showed the same pattern one queue attempt later: the
+  first implementation attempt was reported as `implement failed: exitCode=1`,
+  the queue retry reused the dirty worktree with a new provider session, and
+  the retry was accepted and committed `3930fd2`.
+- The failed first `failure-cost-durable` attempt used 9.939564 of its `$10`
+  CLI budget guard; the failed first `failure-cost-docs` attempt used 4.883416
+  of its `$5` guard. These are Claude Code's own non-authoritative CLI-side
+  budget observations (`budget_usd.used` against `budget_usd.total`) for those
+  failed sessions, not provider invoices, bills, balances, persisted
+  `CostTruth` records or provider-reported cost; the guards are configured
+  caps, not spend. They are not task-level or run-level totals, and the
+  accepted retries were separate provider sessions.
+- The hardening plan required one verifier repair before acceptance.
+  `failure-cost-hardening-core` was rejected by the verifier once, then
+  accepted after a repair session (two provider sessions in total, ledger
+  `repairCount: 1`, committed `58471b6`); `failure-cost-hardening-docs` was
+  accepted after one provider session with no repair (committed `9bb60f5`).
+
+Boundary: these real sessions ran against control-plane code that predated the
+subtype hardening, so they did not exercise the new subtype-aware adapter path.
+That path is covered by the fake CLI fixtures described in §2.2 and §2.6, with
+in-memory unit coverage for the classifier; no new real provider session
+exercised it before merge. The real execution also did not persist or surface
+structured failure/cost through the new durable fields (its run manifests carry
+neither), and no provider billing, invoice or balance was checked. The legacy
+`implement failed: exitCode=1` text is the reporting gap this slice addresses;
+the observed CLI-side budget usage alone does not establish the legacy
+failure's category.
+
+### 2.4 Exact enums (printed from the current build)
 
 ```text
 FAILURE_CATEGORIES=["budget_exhausted","timeout","provider_transient","provider_auth","provider_protocol","worker_process_exit","verifier_rejected","policy_blocked","resource_exhausted","unknown"]
@@ -446,7 +512,7 @@ COST_STATES=["provider-reported","cli-estimated","usage-only","unavailable"]
 COST_SOURCES=["provider","cli","none"]
 ```
 
-### 2.4 Representative durable outputs (observed in the v0 round)
+### 2.5 Representative durable outputs (observed in the v0 round)
 
 The durable output-producing paths did not change in the hardening task. These
 outputs were observed in the v0 round and are retained as historical evidence.
@@ -475,7 +541,7 @@ pre  blocked  next=inspect-and-retry  ready=no  worker=claude  attempts=0/3
 The corresponding `queue run` reported `dispatched=0`; the item was blocked
 before any attempt increment or Supervisor call.
 
-### 2.5 Focused coverage
+### 2.6 Focused coverage
 
 The focused and durable tests prove:
 
@@ -538,8 +604,11 @@ The focused and durable tests prove:
 - `queue status` prefers durable run categories over stale item text and
   reports non-authoritative cost; mixed currencies are not combined;
 - the adapter tests are temporary fake CLI executables emitting shaped result
-  records. They verify adapter behavior only; no real provider session,
-  invoice, balance, authorization result or self-host transcript is involved.
+  records. They verify adapter behavior only; the fixture tests themselves
+  start no real provider session and involve no invoice, balance,
+  authorization result or self-host transcript. This is separate from the real
+  self-host execution in §2.3; no real provider session exercised the new
+  subtype-aware path before merge.
 
 ## 3. Acceptance matrix
 
@@ -559,16 +628,37 @@ Design acceptance items from
 | 9 | Existing build and full suite remain green | Implemented | Hardening round (§2.2): `npm run build` exit `0`; full `npm test` 296/296; combined focused 56/56 |
 | 10 | No daemon, automatic retry, routing, admission or parallel dispatch introduced | Implemented (verified by code/test scope) | Queue remains sequential foreground; no retry path uses `retryableHint`; only the pre-existing Claude transient retry remains; tests assert a non-transient category does not add an attempt |
 
+Separately from the fixture counts, acceptance of the implementation tasks was
+observed in the real self-host execution (§2.3): `failure-cost-durable` and
+`failure-cost-docs` each required a queue retry after
+`implement failed: exitCode=1`, and `failure-cost-hardening-core` required one
+verifier repair before acceptance. Those are execution facts, not fixture test
+results, and they add no billing, balance or provider-authority evidence.
+
 ## 4. Limits and boundaries
 
 - **No billing or balance authority.** `cli-estimated` is Claude Code's own
-  `total_cost_usd`, not a DeepSeek invoice, bill, quota or balance. No
-  provider quota/balance discovery is implemented.
-- **Fixture-based verification, not a provider call.** The adapter tests spawn
-  temporary fake CLI executables and assert on shaped result records. No real
-  Claude/DeepSeek session was started or billed, no balance, authorization or
-  routing result was observed, and no real self-host transcript was parsed by
-  the new subtype path. No raw fixture payload is copied into this document.
+  `total_cost_usd`, not a DeepSeek invoice, bill, quota or balance. The
+  9.939564 USD and 4.883416 USD observations in §2.3 are the failed first
+  attempts' non-authoritative CLI-side budget usage, not provider-reported
+  cost. No provider quota/balance discovery is implemented.
+- **Fixture-based implementation verification.** The adapter tests spawn
+  temporary fake CLI executables and assert on shaped result records. Those
+  fixture tests start no real Claude/DeepSeek session, incur no billing, and
+  observe no balance, authorization or routing result; no real self-host
+  transcript was parsed by the new subtype path. This does not mean no real
+  provider execution occurred: §2.3 records the real queue-driven sessions that
+  built the slice. Neither the fixtures nor those real runs establish provider
+  billing, balance, authorization or routing truth. No raw fixture or
+  transcript payload is copied into this document.
+- **Real self-host execution is not billing evidence.** The real runs in §2.3
+  produced observed CLI-side budget usage and included the non-zero exits and
+  verifier repair described there; the tasks were accepted only through the
+  existing queue retry and repair paths. The 9.939564 USD and 4.883416 USD
+  amounts from the failed first attempts are not a DeepSeek invoice, bill,
+  quota, available balance or provider-reported cost; no invoice or balance was
+  queried. The failed attempts' `$10` and `$5` guards are configured caps, not
+  spend.
 - **No run-level authoritative total.** Supervisor tasks expose per-task cost;
   the control snapshot's run-wide cost is always `authoritative: false`, even
   when every observation is provider-reported. Known CLI amounts may form an
@@ -602,7 +692,8 @@ Design acceptance items from
 - **Local measurement.** These are local macOS runs and focused fixtures, not
   a CI result, long-term flake rate, provider invoice, cost forecast or
   cross-host claim. The v0 and hardening rounds were measured separately at
-  different HEADs, as recorded in §2.1 and §2.2.
+  different HEADs, as recorded in §2.1 and §2.2. The real self-host execution
+  is a separate local run recorded in §2.3.
 
 ## 5. Links
 
