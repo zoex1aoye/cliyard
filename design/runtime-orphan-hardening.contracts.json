@@ -1,0 +1,201 @@
+{
+  "planId": "runtime-orphan-hardening",
+  "contracts": [
+    {
+      "taskId": "hardening-owner-exact",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Tighten orphan preflight ownership correlation. Require the exact port lease owner PID to equal the RuntimeManifest owner PID before any service can be safe_to_reap. A dead or live mismatched lease owner must be needs_human and must preserve the process group, lease and manifest. Add a new focused test file covering equal-owner safe classification plus dead and live different-owner rejections, without modifying existing shared runtime test files."
+      ],
+      "nonGoals": [
+        "No executor changes",
+        "No supervisor changes",
+        "No test port pool edits",
+        "No process signals"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "design/runtime-orphan-hardening.md",
+        "design/runtime-orphan-reaper-v0.md",
+        "src/runtime/reaper.ts",
+        "src/runtime/types.ts",
+        "tests/runtime-reaper-plan.test.ts"
+      ],
+      "writePaths": [
+        "src/runtime/reaper.ts",
+        "tests/runtime-owner-lease-safety.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "8c405ed3dd1003edb37455cb82c4dfc8a77bf739",
+      "verifyCommands": [
+        "grep -q 'lease.pid' src/runtime/reaper.ts",
+        "test -f tests/runtime-owner-lease-safety.test.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "hardening-recovery-runtime-id",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Add optional runtimeId to RuntimeRecoveryRecord for backward compatibility, populate it on every new executor record, and persist it in runtime manifests. Do not derive it from reason strings. Add a new focused test file that verifies reaped, skipped and needs_human records carry runtimeId and old records without it remain readable."
+      ],
+      "nonGoals": [
+        "No Supervisor CLI changes",
+        "No reaper preflight owner changes",
+        "No test port pool edits"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "design/runtime-orphan-hardening.md",
+        "src/runtime/types.ts",
+        "src/runtime/reaper-execute.ts",
+        "src/runtime/reaper.ts",
+        "tests/runtime-reaper.test.ts"
+      ],
+      "writePaths": [
+        "src/runtime/types.ts",
+        "src/runtime/reaper-execute.ts",
+        "tests/runtime-recovery-record.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "8c405ed3dd1003edb37455cb82c4dfc8a77bf739",
+      "verifyCommands": [
+        "grep -q 'runtimeId' src/runtime/reaper-execute.ts",
+        "test -f tests/runtime-recovery-record.test.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "hardening-test-port-isolation",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Eliminate concurrent test-file port overlap. Add tests/test-port-ranges.ts with disjoint static pools for runtime-ports, runtime-manager, runtime-manager-identity, runtime-reaper-plan, runtime-reaper, and supervisor-runtime-reaper. Replace each file's ephemeral-port-plus-range helper with the shared pool while preserving expected range assertions. The pools must not overlap the existing runtime-verifier ranges. Run the full suite five consecutive times and leave no fixture listeners."
+      ],
+      "nonGoals": [
+        "No production source changes",
+        "No global production port registry",
+        "No changes to reaper safety rules"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "design/runtime-orphan-hardening.md",
+        "tests/runtime-ports.test.ts",
+        "tests/runtime-manager.test.ts",
+        "tests/runtime-manager-identity.test.ts",
+        "tests/runtime-reaper-plan.test.ts",
+        "tests/runtime-reaper.test.ts",
+        "tests/supervisor-runtime-reaper.test.ts",
+        "tests/runtime-verifier.test.ts"
+      ],
+      "writePaths": [
+        "tests/test-port-ranges.ts",
+        "tests/runtime-ports.test.ts",
+        "tests/runtime-manager.test.ts",
+        "tests/runtime-manager-identity.test.ts",
+        "tests/runtime-reaper-plan.test.ts",
+        "tests/runtime-reaper.test.ts",
+        "tests/supervisor-runtime-reaper.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "8c405ed3dd1003edb37455cb82c4dfc8a77bf739",
+      "verifyCommands": [
+        "test -f tests/test-port-ranges.ts",
+        "npm test",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "hardening-supervisor-record",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Consume RuntimeRecoveryRecord.runtimeId directly in Supervisor reap/status/reconciliation. Remove reason-based runtimeId reconstruction, sameRecovery helpers, duplicate preflight annotation logic and embedded NUL delimiters. Preserve old records through manifest.runtimeId fallback. Add a focused new test that asserts reports remain correctly labelled when reasons collide. Fail closed remains unchanged."
+      ],
+      "nonGoals": [
+        "No reaper preflight changes",
+        "No executor safety changes",
+        "No test port pool edits",
+        "No status mutation"
+      ],
+      "dependsOn": [
+        "hardening-recovery-runtime-id"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "design/runtime-orphan-hardening.md",
+        "src/runtime/types.ts",
+        "src/runtime/reaper.ts",
+        "src/runtime/reaper-execute.ts",
+        "src/supervisor/cli.ts",
+        "tests/supervisor-runtime-reaper.test.ts"
+      ],
+      "writePaths": [
+        "src/supervisor/cli.ts",
+        "tests/supervisor-runtime-recovery-record.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "8c405ed3dd1003edb37455cb82c4dfc8a77bf739",
+      "verifyCommands": [
+        "grep -q 'record.runtimeId' src/supervisor/cli.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "hardening-docs",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Document the hardening fixes and measured evidence: exact lease owner PID, runtimeId-bearing recovery records, text-clean Supervisor source, disjoint test port pools, five consecutive full-suite results and any remaining flakes or gaps. Update README, RuntimeManager, Runtime orphan recovery and NEXT_ITERATION without expanding capability claims."
+      ],
+      "nonGoals": [
+        "No source changes",
+        "No claim of global cross-repo port coordination",
+        "No daemon or SQLite claim"
+      ],
+      "dependsOn": [
+        "hardening-owner-exact",
+        "hardening-test-port-isolation",
+        "hardening-supervisor-record"
+      ],
+      "readPaths": [
+        "README.md",
+        "docs/RUNTIME_MANAGER.md",
+        "docs/RUNTIME_ORPHAN_RECOVERY.md",
+        "docs/NEXT_ITERATION.md",
+        "design/runtime-orphan-hardening.md",
+        "src/runtime/reaper.ts",
+        "src/runtime/reaper-execute.ts",
+        "src/supervisor/cli.ts",
+        "tests/test-port-ranges.ts"
+      ],
+      "writePaths": [
+        "README.md",
+        "docs/RUNTIME_MANAGER.md",
+        "docs/RUNTIME_ORPHAN_RECOVERY.md",
+        "docs/NEXT_ITERATION.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "8c405ed3dd1003edb37455cb82c4dfc8a77bf739",
+      "verifyCommands": [
+        "grep -q 'lease owner' docs/RUNTIME_ORPHAN_RECOVERY.md",
+        "grep -q 'test port' docs/NEXT_ITERATION.md",
+        "npm run build"
+      ],
+      "maxRepairs": 0
+    }
+  ]
+}
