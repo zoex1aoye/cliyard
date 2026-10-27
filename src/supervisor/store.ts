@@ -848,12 +848,19 @@ function parseTaskExtensions(
   }
 
   const seen = new Set<string>();
+  const continuationIndexes = new Set<string>();
   return raw.map((value, index) => {
     const path = `${source}[${index}]`;
     const extension = parseTaskExtensionRecord(value);
     if (!extension) {
+      const label =
+        isRecord(value) && value.kind === "budget-continuation"
+          ? "budget continuation"
+          : isRecord(value) && value.kind === "deadline"
+            ? "deadline"
+            : "task";
       throw new RunManifestError(
-        `${path} is not a valid deadline extension record`,
+        `${path} is not a valid ${label} extension record`,
       );
     }
     if (seen.has(extension.extensionId)) {
@@ -862,6 +869,16 @@ function parseTaskExtensions(
       );
     }
     seen.add(extension.extensionId);
+    if (extension.kind === "budget-continuation") {
+      const key = `${extension.attempt}:${extension.continuationIndex}`;
+      if (continuationIndexes.has(key)) {
+        throw new RunManifestError(
+          `${path}.continuationIndex duplicates budget continuation ` +
+            `${extension.continuationIndex} for attempt ${extension.attempt}`,
+        );
+      }
+      continuationIndexes.add(key);
+    }
     return extension;
   });
 }

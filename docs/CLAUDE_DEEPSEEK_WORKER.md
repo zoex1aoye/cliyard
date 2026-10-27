@@ -142,6 +142,80 @@ adapter 原有的有限 transient retry 保持不变（默认 2 次，指数退�
 failure/cost 50/50、full suite 290/290、build exit 0；详见
 [docs/evidence/FAILURE_COST_TRUTH.md](evidence/FAILURE_COST_TRUTH.md)。
 
+## 4.2 预算续接（v0）
+
+预算续接不是“给正在运行的进程加钱”。Claude 进程退出后，cliyard 只有在新
+调用使用更大的 `--max-budget-usd` 时才能继续；旧进程的活动 guard 不会原地
+改变。默认关闭，默认 continuation 数为 0。
+
+policy 的 guard 计算是：
+
+```text
+首次调用 guard = baseGuardUsd
+下一次累计 guard = 上次累计 guard + continuationGuardUsd
+恢复调用 guard = 下一次累计 guard
+空间检查 = 下一次累计 guard + overshootReserveUsd
+           <= maxCumulativeGuardUsd
+```
+
+只有同时满足以下条件才 grant：
+
+- 当前 invocation 已停止，最终结构化结果是 `is_error=true`，subtype 精确为
+  `error_max_budget_usd`；
+- 没有 timeout、signal、未解决 error/retry、malformed JSON stream、auth、
+  transient、protocol、policy、resource 或 changed-path 失败；
+- 该 invocation 已映射至少一个 `assistant`、`tool.start` 或 `tool.result`
+  事件；thinking token 和 heartbeat 不算任务进度；
+- 有 provider session id、`onExtension` callback、`autoContinue=true`；
+- continuation 数量未耗尽，且累计 guard 加 overshoot reserve 仍在
+  `maxCumulativeGuardUsd` 内；
+- 当前 task 仍是未接受的 running task，worktree/branch/contract 未改变。
+
+grant 先通过 `onExtension` 写入 RunManifest 的 `extensions`；callback 成功后
+adapter 才启动：
+
+```bash
+claude ... --resume <provider-session-id> \
+  --max-budget-usd <larger-cumulative-guard>
+```
+
+第二次调用不再传 `--session-id`。cwd/worktree、branch、prompt 和
+TaskContract 保持原样。callback 失败、resume 进程失败或 resume 输出不满足
+policy 时，不会自动再 grant 一次，也不会静默改成一个新的 provider session。
+原有 transient retry 仍使用 fresh session；它和 budget continuation 是两条
+独立路径。没有 RunManifest-backed `onExtension` 的普通 batch 会在 grant
+前 fail closed，不会因为缺少持久化目标而继续启动新调用。
+
+每个 initial、transient retry 和 resumed invocation 都保留独立 cost
+observation。CLI 报告的 session id 会被保留；最终仍是
+`error_max_budget_usd` 时，failure 仍是 `budget_exhausted` /
+`provider`，code 为 `error_max_budget_usd`。
+
+Supervisor `start`/`resume` 和 `claude-batch` 接受：
+
+```text
+--max-budget-usd <positive decimal>
+--auto-continue-budget
+--continuation-guard-usd <positive decimal>
+--max-budget-continuations <0..64>
+--max-cumulative-budget-guard-usd <positive decimal>
+--budget-overshoot-reserve-usd <non-negative decimal>
+```
+
+参数在 lock 和 worker dispatch 前校验。只传 `--max-budget-usd` 时只设置首次
+guard；需要显式 `--auto-continue-budget` 且 continuation 数大于 0。
+Codex worker 不接受这些 budget continuation flags。
+
+`total_cost_usd` 始终是 non-authoritative CLI estimate。guard 不是
+DeepSeek/Claude 的余额、发票价格、额度或严格 hard cap；单次 provider 请求
+可以 overshoot，reserve 只是保守估计。fake-CLI 行为、测试结果和限制见
+[docs/evidence/BUDGET_CONTINUATION.md](evidence/BUDGET_CONTINUATION.md)。
+
+本 slice 的最终检查：`npm run build` 通过，focused budget fake-CLI
+15/15，受影响回归串行 90/90。完整测试命令仍受当前 sandbox 的 `tsx` IPC
+`EPERM` 和固定测试端口不可绑定的影响，不能报告为全绿；这不是 provider
+运行结果，也没有调用真实 Claude/DeepSeek API。
+
 ## 5. Plan / DSH
 
 ```bash
@@ -168,6 +242,8 @@ permissionMode: acceptEdits
 allowedTools: Read, Edit, Write, Bash
 maxBudgetUsd: 5
 timeoutMs: 20 minutes
+auto budget continuation: false
+max budget continuations: 0
 ```
 
 运行前提：
