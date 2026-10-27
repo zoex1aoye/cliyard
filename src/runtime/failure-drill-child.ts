@@ -38,6 +38,7 @@ import type {
 import {
   DRILL_CLEANUP_RELEASE_FAULT,
   DRILL_EXPECTED_FAILURES,
+  DRILL_HANG_AFTER_READY_ENV,
   DRILL_SCENARIOS,
   type DrillCheck,
   type DrillChildResult,
@@ -405,8 +406,11 @@ async function runCleanupFailure(args: ChildArgs): Promise<ScenarioOutcome> {
   let callbackRan = false;
   let rejection: unknown;
   try {
-    await manager.run(spec, () => {
+    await manager.run(spec, async () => {
       callbackRan = true;
+      // Test-only: hang after readiness while the service is still live, so a
+      // parent timeout leaves a real orphan for the exact executor to reap.
+      await maybeHangAfterReadiness(args.scenario);
     });
   } catch (error) {
     rejection = error;
@@ -463,6 +467,38 @@ async function runCleanupFailure(args: ChildArgs): Promise<ScenarioOutcome> {
   ];
 
   return { checks, observed };
+}
+
+/**
+ * Test-only abnormal-recovery hook.
+ *
+ * Only the cleanup-failure scenario reaches this point: it drives
+ * RuntimeManager directly, and the manager callback runs after readiness but
+ * before cleanup. When the hook selects this scenario the child stops here
+ * forever and ignores SIGTERM, forcing the parent through its bounded SIGKILL
+ * escalation and then the exact orphan executor. The hook does nothing unless
+ * the test-only environment variable is set for this scenario.
+ */
+async function maybeHangAfterReadiness(
+  scenario: DrillScenarioName,
+): Promise<void> {
+  const raw = process.env[DRILL_HANG_AFTER_READY_ENV];
+  if (raw === undefined || raw.trim() === "") return;
+  const target = raw.trim();
+  if (target !== scenario && target !== "1" && target !== "all") return;
+
+  process.on("SIGTERM", () => {
+    console.log(
+      `[runtime-drill-child] ${scenario}: test hook ignoring SIGTERM ` +
+        "after readiness",
+    );
+  });
+  console.log(
+    `[runtime-drill-child] ${scenario}: test hook hanging after readiness`,
+  );
+  await new Promise<void>(() => {
+    /* intentionally never settles */
+  });
 }
 
 // ---------------------------------------------------------------------------
