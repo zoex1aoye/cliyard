@@ -2,24 +2,62 @@
 
 > 日期：2026-10-27（更新）
 >
-> 结论：RuntimeManager v0、Runtime Orphan Reaper v0、orphan hardening 与
-> **runtime failure drills v0** 均已实现。failure drill 实测 **3/3 通过**
-> （三个独立子进程），完整套件 **166/166**，runtime/恢复相关 **80/80**
-> （13 个文件），`npm run build` 通过。`cleanup-failure` 按设计保留 1 条
-> lease 和 `cleanup: "failed"` 证据，同时确认服务进程和端口已清理。
+> 结论：RuntimeManager v0、Runtime Orphan Reaper v0、orphan hardening、
+> **runtime failure drills v0**，以及 **attempt continuity / worker progress /
+> drill abnormal recovery v0** 均已实现。本轮实测：focus 组
+> （attempt reuse、Claude progress、worker progress、failure drills 四个文件）
+> **13/13**，runtime/恢复相关 **81/81**（13 个文件），完整套件 **177/177**，
+> `npm run build` 通过。failure drill 的正常路径仍为 3/3；超时异常路径报告
+> 2/3（`cleanup-failure` 子进程超时，按设计不能通过 child-exit 检查），但
+> 精确 reaper 回收 1 个 runtime、0 个 `needs_human`，manifest 收尾为
+> `cleanup: "complete"` + `reaped`，端口与 lease 均已核实干净。
 >
-> 下一具体缺口：**Task Architect 与持久化持续编排（durable continuous
-> orchestration）**。这两项尚未实现，需要各自的设计与验收；本轮文档不把
-> 它们写成已完成能力。
+> 下一具体能力：**Task Architect**。**持久化持续编排（durable continuous
+> orchestration）** 是其后独立的缺口。两者尚未实现，需要各自的设计与验收；
+> 本轮文档不把它们写成已完成能力。
 >
-> 已完成的 failure-drill 切片明确不引入 daemon、跨主机回收、浏览器证据、
-> SQLite 或 CPU/内存/浏览器准入调度。failure drill 只是前台诊断，不改变
-> reaper 的 `needs_human` 规则。
+> 本轮明确不引入 daemon、跨主机回收、浏览器证据、SQLite、准入调度或
+> 24 小时无人值守声明。attempt reuse 只是 worktree 连续性（不是 provider
+> 会话续跑）；worker progress 只是观察信息；drill 异常回收只走既有精确
+> reaper 规则，不改变 `needs_human` 规则。
 
 ## 0. 当前状态
 
 已落地（单机、本机仓库、有限服务）：
 
+- **Attempt Continuity v0**
+  - RunManifest 的 task 增加可选 `attemptWorktree`、`attemptBranch`、
+    `attemptBaseCommit`、`attemptStartedAt`、`attemptRejectedAt`；
+  - worktree 创建后、worker 启动前写入 checkpoint；rejected 保留脏 worktree
+    （即使未传 `--keep-worktrees`），accepted 清除全部 attempt 字段并删除
+    worktree（除非传了 `--keep-worktrees`）；
+  - `resume --retry-rejected` 默认复用已记录且校验通过的 rejected attempt；
+    `--reuse-attempt` 是默认行为的显式写法；`--fresh-attempt` 显式丢弃 draft
+    并新建干净 worktree；两者互斥且在任何派发前拒绝；
+  - 复用 fail closed：路径不在 `.cliyard/worktrees/` 下、未注册为 git
+    worktree、分支或 HEAD 与 checkpoint 不符、缺少 rejection 元数据、或
+    attempt 属于其他 task/run，均拒绝且不派发；`--fresh-attempt` 是恢复路径；
+  - 只复用 rejected attempt；不会给 interrupted active worker 再挂一个
+    worker；复用是 worktree 连续性，不恢复 provider 会话；
+  - `status` 只读暴露 `reusableAttempts`，human 输出打印每个可复用 attempt。
+- **Worker Progress v0**
+  - Claude Code 使用 `--output-format stream-json --verbose`，增量解析完整
+    JSONL，保留最终 `type: "result"` 记录用于验收；仍兼容 plain single-JSON；
+  - 事件立即 append 到 `.cliyard/worker-events/<runId>/<taskId>.jsonl`，每条
+    一个完整 JSON 对象；同一 task 跨 attempt append-only；
+  - 类型为 `session.start` / `assistant` / `tool.start` / `tool.result` /
+    `heartbeat` / `result` / `retry` / `error`；阶段为 `starting` /
+    `thinking` / `tool` / `finishing` / `waiting` / `ending`；
+  - provider 静默时按固定间隔产生 `heartbeat`（默认 15 s，
+    `CLIYARD_CLAUDE_HEARTBEAT_MS` 可覆盖）；heartbeat 只表示仍在等待，不表示
+    成功、健康或进度质量；
+  - `status` 只读读取每个 task 最新有效事件，返回 `workerProgress`
+    （含 `ageMs` 和 display-only `stale`），human 输出最新事件；missing、
+    malformed、foreign-task 或 stale 文件不改变 run status；
+  - 事件文本 bounded/redacted，tool input 只保留 path/program 元数据，tool
+    output 只记录大小；事件不是 acceptance authority，无 retention/rotation；
+  - 本轮用本地 stream-json fixture 实测：assistant/tool 事件在 worker 退出前
+    可见，provider 静默产生 heartbeat，`status` 前后 manifest hash 不变。
 - **PortAllocator**
   - 默认端口范围 `19000-19999`，可用 `CLIYARD_PORT_RANGE="start-end"` 覆盖；
   - `.cliyard/runtime/port-leases.json` + `.cliyard/runtime/port-leases.lock`；
@@ -75,9 +113,29 @@
     性和 lease store；
   - 输出 `runtime-failure-drills.json`（version 1）及每个场景的
     `child.log`、`child-result.json`、`control/` 和 `worktree/`；
-  - 实测 3/3 通过；三个服务均退出、三个端口均可重新绑定；前两个场景 lease
-    store 为空，cleanup-failure 保留 1 条证据 lease。详见
+  - 正常路径实测 3/3 通过；三个服务均退出、三个端口均可重新绑定；前两个场景
+    lease store 为空，cleanup-failure 保留 1 条证据 lease。详见
     [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md)。
+- **Runtime Drill Abnormal Recovery v0**
+  - 子进程 timeout、被 signal、非零退出或 spawn 失败时，父进程只对 drill
+    **child PID** 执行 SIGTERM → 1 s 宽限 → SIGKILL（再等 2 s），不直接
+    signal service group；
+  - 只有 child 确认消失后，才对返回的 scratch control root 运行既有 exact
+    orphan executor；结果写入报告 `abnormalRecovery`（trigger、
+    childTermination、executed、executor report/error）；
+  - 回收后重跑 manifest/log/process/port/lease 检查；`needs_human` 或无法
+    清理会使 drill 失败；异常 child 仍不能通过 child-exit 检查，绝不被解释为
+    accepted；
+  - 实测：`portBase 24800`、`childTimeoutMs 5000`、test-only hook 选择
+    `cleanup-failure`，报告 `fail` / `{ total: 3, passed: 2, failed: 1 }`；
+    child 5000 ms 超时、忽略 1000 ms SIGTERM 宽限后记录为 SIGKILL（duration
+    6009 ms）；executor `scanned=1, reaped=1, needs_human=0, skipped=0`；
+    manifest `cleanup: "complete"` + `recovery.state: "reaped"`；
+    lease 0，端口 24860 可绑定；service manifest 的 `signal`/`exitedAt` 为
+    null（组由 reaper 外部终止），这是本轮实测细节；
+  - hook `CLIYARD_RUNTIME_DRILL_TEST_HANG_AFTER_READY` 仅为测试用，public
+    CLI 不暴露 `childTimeoutMs`。详见
+    [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md)。
 - **测试端口隔离（`test port` pools）**
   - 七个会启动真实进程或绑定真实端口的 runtime 测试文件使用
     `tests/test-port-ranges.ts` 的静态、互不重叠端口池（22000–22699；六个文件
@@ -100,9 +158,16 @@
 
 明确未落地：
 
-- **Task Architect**（结构化任务架构 / 契约生成）；
-- **durable continuous orchestration**（持久化持续编排）；这两项是下一具体
-  缺口，需要独立设计与验收；
+- **Task Architect**（结构化任务架构 / 契约生成）：下一具体能力，需要独立
+  设计与验收；
+- **durable continuous orchestration**（持久化持续编排）：Task Architect
+  之后的独立缺口，需要独立设计与验收；
+- provider 会话续跑：attempt reuse 只复用 worktree/draft，不恢复 provider
+  对话；也不会给 interrupted active worker 再挂一个 worker；
+- 自动 worktree/manifest GC：`--fresh-attempt` 丢弃的 draft、保留的 rejected
+  worktree、run/branch/manifest 都会累积，需手工清理；
+- worker event 的 retention/rotation 或长期查询；事件只是 append-only 观察
+  信息，不是 run authority；
 - 跨主机 runtime 回收或远程 kill；外来 host 的 runtime 只会 `skip`，主机名变化
   也会使旧 manifest 看起来属于外来 host；
 - 第三方 dead owner 租约的自动回收（按 hardening 规则只能 `needs_human` 并保留
@@ -126,7 +191,11 @@
 [docs/RUNTIME_ORPHAN_RECOVERY.md](RUNTIME_ORPHAN_RECOVERY.md)；RuntimeManager
 的正常生命周期与 failure drill 用法见
 [docs/RUNTIME_MANAGER.md](RUNTIME_MANAGER.md)；failure drill 的实测结果见
-[docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md)。
+[docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md)；
+attempt continuity、worker progress 与异常 drill 回收的实测结果见
+[docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md)。
+Supervisor 的 attempt/progress 操作语义见
+[docs/SUPERVISOR_V0.md](SUPERVISOR_V0.md)。
 
 ## 1. 孤儿回收验收对照
 
@@ -162,30 +231,60 @@ failure drill 的设计验收对照
 | 4 | cleanup release 失败拒绝、`cleanup: "failed"`、绝不 accepted | 已实现 | `RuntimeCleanupError`；failureReason 含注入故障；`cleanup: "failed"` |
 | 5 | 每个场景服务端口事后可绑定 | 已实现 | 22800 / 22830 / 22860 均 `portFree=true`；事后 `lsof` 无监听 |
 | 6 | 机器可读报告 + 每场景证据 | 已实现 | `runtime-failure-drills.json`、`child.log`、`child-result.json`、manifest/log/lease |
-| 7 | focused drill、full suite 与 build 通过 | 已实现 | 2/2、166/166、build pass |
-| 8 | 文档只记录实测结果、不扩大能力 | 已实现 | [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md) 与本次文档更新 |
+| 7 | focused drill、full suite 与 build 通过 | 已实现 | drill 文件 3/3、full suite 177/177、build pass |
+| 8 | 文档只记录实测结果、不扩大能力 | 已实现 | [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md) 与本轮文档更新 |
+
+本轮 attempt continuity / worker progress / drill abnormal recovery 的设计验收
+对照（[design/attempt-continuity-progress-v0.md](../design/attempt-continuity-progress-v0.md)）：
+
+| # | 设计要求 | 状态 | 实测覆盖 |
+|---|----------|------|----------|
+| 1 | rejected dirty worktree 被持久化并跨真实进程退出保留 | 已实现 | start exit 1 后 worktree 仍注册，draft 在盘，manifest 五个 attempt 字段完整 |
+| 2 | 默认重试使用同一 worktree 并看到 prior draft | 已实现 | verbose `reuse attempt worktree`；fixture 两次 cwd 相同，第二次 `draftSeen=true` |
+| 3 | `--fresh-attempt` 创建不同的干净 worktree | 已实现 | 新 cwd，`draftSeen=false`；旧 draft 保留；integration 不含 draft |
+| 4 | 非法/篡改 attempt fail closed | 已实现（测试级） | focused test：路径逃逸、分支不符、缺 `attemptRejectedAt`、互斥 flag；0 次派发 |
+| 5 | accepted 清除 attempt 元数据且 completed run 不被重跑 | 已实现 | 最终 task 只剩 accepted/resultCommit；worktree 删除；`reusableAttempts=[]`；既有 completed resume no-op |
+| 6 | Claude stream 事件在 worker 退出前出现 | 已实现 | live status 在 worker 运行时显示 `tool.start`；focused test 在 collect 完成前断言 |
+| 7 | provider 静默产生 heartbeat，且不声称成功 | 已实现 | 200 ms heartbeat 配置下 39 个 heartbeat；status 仍 `running`/`accepted=0` |
+| 8 | `status` 读取 progress 而不改变 run state | 已实现 | live status 前后 manifest sha256 相同；focused test 断言 manifest/event 字节不变 |
+| 9 | 超时 drill child 的已证明 service 在 child 退出后被回收 | 已实现 | child SIGKILL(6009 ms)；executor scanned 1 / reaped 1 / needs_human 0 |
+| 10 | drill report 保留异常回收并证明端口 free | 已实现 | `abnormalRecovery` 持久化；manifest `cleanup=complete`+`reaped`；lease 0；24860 free |
+| 11 | focused tests、full suite、TypeScript build 通过 | 已实现 | 13/13、177/177、build pass；runtime 组 81/81 |
+| 12 | 文档只记录实测行为并保留全部非目标 | 已实现 | [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md) 与四份文档更新 |
 
 未覆盖的能力不会被写成“已实现”：跨主机回收、leader-dead 自动 kill、daemon
 周期回收、Windows 进程身份、生产或跨仓库端口协调、Task Architect、durable
-continuous orchestration。
+continuous orchestration、provider 会话续跑、自动 worktree GC。
 
 ## 2. 验证（2026-10-27，本工作树，macOS）
 
-当前套件（包含 failure drill 测试）：
+当前套件（包含 attempt continuity / worker progress 与 failure drill 测试）：
 
 ```text
 npm run build                                      → 通过
-npx tsx --test tests/runtime-failure-drills.test.ts → 2/2 通过（1981.8 ms）
-runtime/恢复 focused group（13 个文件）            → 80/80 通过（3150.8 ms）
-npm test（完整套件）                               → 166/166 通过（8194.6 ms）
+focused attempt/progress/drill group（4 个文件）   → 13/13 通过（9769.2 ms）
+runtime/恢复 focused group（13 个文件）            → 81/81 通过（9968.0 ms）
+npm test（完整套件）                               → 177/177 通过（10887.8 ms）
 ```
 
 以上均为本机单次运行；这是本机 macOS 证据，不是长期 flake 率、CI 或跨主机
 结论。failure drill 实测细节（子进程、场景、端口、lease）见
-[docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md)。
+[docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md)；
+attempt continuity、worker progress 与异常 drill 回收的实测细节见
+[docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md)。
 
-Drill 前的 hardening 基线（同日，drill 测试加入前）：5 次独立的 `npm test`
-进程顺序执行，均为 164/164：
+本轮另外做了 CLI 级实测（使用本地 stream-json fixture，不是真实
+DeepSeek/Claude provider）：一次 rejected attempt 在默认 resume 中复用同一
+worktree（第二次 `draftSeen=true`），一次 `--fresh-attempt` 使用不同 worktree
+（`draftSeen=false`），live `status` 在 worker 运行时显示 `tool.start` 与
+heartbeat，且 status 前后 manifest hash 不变。异常 drill 以
+`CLIYARD_RUNTIME_DRILL_TEST_HANG_AFTER_READY=cleanup-failure`、
+`childTimeoutMs 5000`、`portBase 24800` 运行：报告 2/3（超时场景按设计
+fail），child 被 SIGKILL，exact executor `scanned=1/reaped=1/needs_human=0/
+skipped=0`，manifest `cleanup=complete` + `reaped`，lease 0，端口 24860 free。
+
+历史基线：drill 前的 hardening 阶段（同日）5 次独立 `npm test` 顺序执行，
+均为 164/164：
 
 | 次数 | 结果 | test-runner duration |
 |------|------|----------------------|
@@ -197,7 +296,7 @@ Drill 前的 hardening 基线（同日，drill 测试加入前）：5 次独立�
 
 当时未观察到 flake；这不是长期 flake 率或 CI 结论。
 
-Runtime/恢复相关 80 项（13 个文件；其中 78 项为 drill 前已有）：
+Runtime/恢复相关 81 项（13 个文件；其中 78 项为 drill 测试前已有）：
 
 ```text
 tests/contract-runtime.test.ts                     10
@@ -212,10 +311,10 @@ tests/runtime-reaper-plan.test.ts                   9
 tests/runtime-reaper.test.ts                       10
 tests/supervisor-runtime-reaper.test.ts             5
 tests/supervisor-runtime-recovery-record.test.ts    2
-tests/runtime-failure-drills.test.ts                2
+tests/runtime-failure-drills.test.ts                3
 ```
 
-其余 12 个文件在 drill 前已各单独运行一次；drill 文件本轮单独运行 2/2。
+13 文件组本轮运行一次；更早的单独运行结果只作为历史记录。
 
 端口隔离：七个会启动真实进程或绑定真实端口的 runtime 测试文件从
 `tests/test-port-ranges.ts` 取静态、互不重叠的端口池（22000–22699；六个文件
@@ -243,26 +342,31 @@ Worker 验收演练，因此不把它们当作 drill、reaper 或跨主机证据
 
 ## 3. 下一迭代范围
 
-已完成的 RuntimeManager v0、Orphan Reaper v0、hardening 与 failure drills v0
-不在下一迭代重复。下一具体缺口只有两项：
+已完成的 RuntimeManager v0、Orphan Reaper v0、hardening、failure drills v0，以及
+attempt continuity / worker progress / drill abnormal recovery v0 不在下一迭代
+重复。下一具体能力是 **Task Architect**；其后的独立缺口是 **持久化持续编排
+（durable continuous orchestration）**：
 
-1. **Task Architect**
+1. **Task Architect（下一具体能力）**
    - 把需求/计划转成结构化任务架构与可冻结契约（在现有 plan bridge 之上补齐
      设计缺口）；
    - 需要独立设计与验收，本文档不预写实现细节。
-2. **持久化持续编排（durable continuous orchestration）**
+2. **持久化持续编排（Task Architect 之后）**
    - 跨 wave 的持久状态与连续推进；
    - 需要独立设计与验收；本轮不把它写成已完成能力。
 
-对本轮已完成的 failure-drill 切片，以下仍是明确非目标，不得用 drill 结果
-反推为已实现：
+对本轮已完成的 attempt continuity / progress / drill 切片，以下仍是明确
+非目标，不得用本轮结果反推为已实现：
 
-- daemon、周期扫描或后台常驻；
+- daemon、周期扫描、后台常驻或 24 小时无人值守；
 - 跨主机回收、远程 kill 或共享租约存储；
 - Playwright、axe、截图或无障碍证据；
 - SQLite 或其他状态存储迁移；
 - CPU/内存/浏览器并发准入调度或无限并行 runtime；
 - 生产级、跨 run 或跨仓库端口协调（测试端口池只服务本仓库测试文件）；
+- provider 会话续跑或把 second worker 挂到 interrupted active worker；
+- 自动 worktree/manifest GC（`--fresh-attempt` 丢弃的 draft 会保留）；
+- worker event 的 retention/rotation 或作为 acceptance authority；
 - leader-dead 进程组的启发式回收；
 - Docker / 远程沙箱 / 多租户 / 云执行；
 - 自动合入 main 或自动 push；
@@ -270,8 +374,10 @@ Worker 验收演练，因此不把它们当作 drill、reaper 或跨主机证据
 - Windows POSIX 进程组等价清理；
 - 自定义优雅关闭命令或日志轮转。
 
-“持久化持续编排”是下一缺口，不是本轮 daemon 声明；若未来设计需要后台执行
-模型，必须单独设计和验收，不能从本切片的单机前台 drill 证据推导出来。
+Attempt reuse 是 worktree 连续性，不是 provider 会话续跑；worker progress 是
+观察信息，不是验收依据；“持久化持续编排”仍是后续独立缺口，不是本轮 daemon
+声明。若未来设计需要后台执行模型，必须单独设计和验收，不能从本切片的单机
+前台证据推导出来。
 
 ## 4. 完成标准
 
@@ -302,14 +408,40 @@ Failure drills v0（已完成）：
 12. [已完成] 每个场景确认服务进程/进程组消失且租约端口可绑定；cleanup-failure
     保留 1 条 lease 作为证据。
 13. [已完成] 机器可读报告与 per-scenario 证据保留；父进程独立复核。
-14. [已完成] focused drill 2/2、full suite 166/166、`npm run build` 通过。
+14. [已完成] drill 文件 3/3（含超时异常回收）、full suite 177/177、
+    `npm run build` 通过。
 15. [已完成] 文档只记录实测结果；daemon、跨主机、浏览器证据、SQLite 与
     准入调度仍为非目标。
 
+Attempt continuity / worker progress / drill abnormal recovery v0（已完成）：
+
+16. [已完成] rejected attempt 在 worker 启动前 checkpoint 精确
+    worktree/branch/base/startedAt；真实进程退出后脏 worktree 与 draft 仍保留。
+17. [已完成] 默认 `resume --retry-rejected` 复用同一 worktree 并看到 prior
+    draft；`--reuse-attempt` 显式断言默认；`--fresh-attempt` 使用不同、
+    干净的 worktree。
+18. [已完成] 非法/篡改 attempt 在派发前 fail closed；accepted 清除全部
+    attempt 字段，worktree 删除（除非 `--keep-worktrees`），
+    `reusableAttempts` 为空。
+19. [已完成] Claude stream-json 事件在 worker 运行时可见；provider 静默产生
+    heartbeat，且不把等待解释为成功。
+20. [已完成] `status` 读取 progress 不改变 manifest/event 字节；
+    missing/malformed/stale 事件不改变 run status。
+21. [已完成] 超时 drill child 被 SIGTERM→SIGKILL 终止；child 消失后由既有
+    exact reaper 回收已证明 service group 与精确 lease；报告持久化
+    `abnormalRecovery`。
+22. [已完成] 异常 child 绝不被解释为 accepted；manifest 收尾
+    `cleanup: "complete"` + `recovery.state: "reaped"`，`needs_human=0`，
+    端口 free，lease 0。
+23. [已完成] focused 13/13、runtime 组 81/81、full suite 177/177、
+    `npm run build` 通过。
+24. [已完成] 文档只记录实测行为，保留 daemon、跨主机、SQLite、浏览器证据、
+    准入调度与 24 小时声明等全部非目标；Task Architect 未实现。
+
 下一缺口（未完成）：
 
-16. [未完成] Task Architect：独立设计与验收。
-17. [未完成] 持久化持续编排：独立设计与验收。
+25. [未完成] Task Architect：独立设计与验收。
+26. [未完成] 持久化持续编排：独立设计与验收。
 
 ## 5. 下一步顺序
 
@@ -319,19 +451,28 @@ Failure drills v0（已完成）：
 3. [已完成] hardening：精确 lease owner、record runtimeId、Supervisor 无 NUL、
             测试端口池；完整套件连续 5 次 164/164
 4. [已完成] Runtime failure drills v0：三个独立子进程、报告、证据、端口/lease
-            验证；focused 2/2、full 166/166、build 通过
+            验证；当时 focused 2/2、full 166/166、build 通过
 5. [已完成] 文档按实测结果更新：README / NEXT_ITERATION / RUNTIME_MANAGER /
             RUNTIME_ORPHAN_RECOVERY / docs/evidence/RUNTIME_FAILURE_DRILLS.md
-6. 下一迭代：Task Architect（独立设计与验收）
-7. 下一迭代：durable continuous orchestration（独立设计与验收）
-8. 不重复已完成切片；不新增 daemon、跨主机、浏览器证据、SQLite、准入调度
-   或生产/跨仓库端口协调声明
+6. [已完成] Attempt continuity / worker progress / drill abnormal recovery v0：
+            默认复用 + --fresh-attempt + 篡改 fail-closed、stream events +
+            heartbeat、status 只读、超时 drill 精确回收；focused 13/13、
+            runtime 81/81、full 177/177、build 通过
+7. [已完成] 本轮文档更新：README / NEXT_ITERATION / SUPERVISOR_V0 /
+            RUNTIME_MANAGER / docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md
+8. 下一迭代：Task Architect（独立设计与验收）
+9. 后续：durable continuous orchestration（独立设计与验收）
+10. 不重复已完成切片；不新增 daemon、跨主机、浏览器证据、SQLite、准入调度、
+    provider 会话续跑、自动 worktree GC 或 24 小时声明
 ```
 
 ## 6. 上一迭代状态
 
 Supervisor v0（前台、原子 JSON RunManifest、进程级 SIGKILL 恢复）已完成，
 其操作语义与自举手册见 [docs/SUPERVISOR_V0.md](SUPERVISOR_V0.md)。当前完整套件
-包含 supervisor 测试（166/166 通过）。本轮没有引入 daemon 或 SQLite，也没有
-把 supervisor 的后台化列入计划。RuntimeManager、Orphan Reaper、hardening 与
-failure drills 均已收口；下一缺口是 Task Architect 与持久化持续编排。
+包含 supervisor、attempt continuity/progress 与 runtime/drill 测试
+（177/177 通过）。本轮没有引入 daemon 或 SQLite，也没有把 supervisor 的
+后台化列入计划。attempt reuse 是 worktree 连续性，worker progress 是观察
+信息；两者都不改变验收权威。RuntimeManager、Orphan Reaper、hardening、
+failure drills 与 attempt continuity/progress/异常 drill 回收均已收口；
+下一具体能力是 Task Architect，之后是持久化持续编排。

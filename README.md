@@ -16,7 +16,8 @@ North star: stop babysitting AI. **Master 壳 = DeepSeek Harness GUI**；**cliya
 **RuntimeManager v0:** [docs/RUNTIME_MANAGER.md](docs/RUNTIME_MANAGER.md) — finite local services, leased ports, runtime manifest/evidence, cleanup, limitations.
 **Runtime orphan recovery:** [docs/RUNTIME_ORPHAN_RECOVERY.md](docs/RUNTIME_ORPHAN_RECOVERY.md) — exact-identity preflight, exact lease-owner PID, `runtimeId`-bearing recovery records, `supervisor reap`, start/resume reconciliation, evidence-preserving gaps.
 **Runtime failure drills:** [docs/evidence/RUNTIME_FAILURE_DRILLS.md](docs/evidence/RUNTIME_FAILURE_DRILLS.md) — three measured failure scenarios in independent child processes, report, leases, ports.
-**Next iteration:** [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md) — Task Architect plus durable continuous orchestration. Daemon, cross-host, browser evidence, SQLite and admission scheduling remain non-goals for the completed drill slice.
+**Attempt continuity, worker progress, abnormal drill recovery:** [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md) — measured rejected-attempt reuse, `--fresh-attempt`, live stream events, heartbeats, read-only status, and timed-out drill recovery.
+**Next iteration:** [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md) — Task Architect is the next capability; durable continuous orchestration follows. Daemon, cross-host, browser evidence, SQLite and admission scheduling remain non-goals.
 
 ## What we want (ideal)
 
@@ -37,19 +38,20 @@ Human: requirements + prototype in DeepSeek Harness
 - **Claude Code + DeepSeek worker:** `claude-ds` + `npm run claude-batch`
 - **Continuous waves:** accepted work enters an integration branch before dependent tasks start
 - **Supervisor v0 (durable foreground):** `supervisor start/status/resume/reap/stop`, atomic JSON RunManifest, integration-branch checkpoint, one-lock recovery; resume skips accepted tasks (no daemon, no SQLite)
+- **Attempt continuity + worker progress v0 (foreground):** a rejected task checkpoints its exact worktree, branch and base and keeps the dirty draft even without `--keep-worktrees`; default `resume --retry-rejected` reuses that draft, while `--fresh-attempt` deliberately starts a clean worktree. Claude `stream-json` events are appended to `.cliyard/worker-events/<runId>/<taskId>.jsonl` and shown read-only by `supervisor status`, with heartbeats during provider silence. Events are observational only; no conversation resume, daemon or SQLite
 - **RuntimeManager v0 (single host):** finite verification services started from the exact task worktree, leased `127.0.0.1` ports, HTTP readiness, URL env injection into `verifyCommands`, runtime manifest + service logs, process-group cleanup; no daemon, SQLite, or browser evidence
 - **Runtime orphan recovery v0 (single host):** persisted owner/pid/pgid/OS start identity, exact lease-owner PID correlation, read-only preflight, `supervisor reap`, automatic `start`/`resume` reconciliation, exact lease release after group exit, `runtimeId`-bearing recovery records; `needs_human` instead of heuristic kills. No daemon or cross-host kill
-- **Runtime failure drills v0:** `npm run runtime-drill` runs readiness-timeout, verify-failure and cleanup-failure in three independent child processes, writes a versioned JSON report plus per-scenario manifests/logs/leases, and verifies the service/port is clean afterward. Diagnostic only — no daemon
+- **Runtime failure drills v0:** `npm run runtime-drill` runs readiness-timeout, verify-failure and cleanup-failure in three independent child processes, writes a versioned JSON report plus per-scenario manifests/logs/leases, and verifies the service/port is clean afterward. A timed-out/abnormal child is terminated (SIGTERM → bounded SIGKILL) and its proven orphan runtime is reconciled by the exact reaper; the recovery is persisted in the report, while the abnormal scenario itself still reports failure. Diagnostic only — no daemon
 - **Windows track:** `doctor` / `run` / `batch` via WSL (deferred for CodeBuddy E2E)
 
-Not yet: **Task Architect plus durable continuous orchestration** (the next concrete gap), Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, Multica runtime, Supervisor daemon/background service, daemon-based or periodic orphan cleanup, cross-host runtime recovery, automatic reaping of leader-dead process groups, cross-repository port coordination, SQLite manifests, Playwright/axe/screenshot or a11y evidence, unlimited parallel runtimes. The completed failure-drill slice adds none of these.
+Not yet: **Task Architect** (the next concrete capability) and then **durable continuous orchestration**, Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, Multica runtime, Supervisor daemon/background service, daemon-based or periodic orphan cleanup, cross-host runtime recovery, automatic reaping of leader-dead process groups, cross-repository port coordination, SQLite manifests, Playwright/axe/screenshot or a11y evidence, unlimited parallel runtimes, and a resumed provider conversation (attempt reuse is worktree continuity only). The completed attempt-continuity/progress and failure-drill slices add none of these.
 
-Measured suite (2026-10-27): `npm run build` passes; the focused drill file is
-**2/2**, the runtime/recovery group is **80/80 across 13 files**, and `npm test`
-is **166/166** in one run. The pre-drill hardening baseline was 164/164 in five
-consecutive runs; no flakes were observed there. These are local macOS results,
-not a long-term flake-rate or CI claim. Drill evidence:
-[docs/evidence/RUNTIME_FAILURE_DRILLS.md](docs/evidence/RUNTIME_FAILURE_DRILLS.md);
+Measured suite (2026-10-27, HEAD `3093508`): `npm run build` passes; the focused
+attempt-continuity/progress/drill group is **13/13**, the runtime/recovery group
+is **81/81 across 13 files**, and `npm test` is **177/177** in one run. These are
+local macOS results, not a long-term flake-rate or CI claim. Evidence:
+[docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md)
+and [docs/evidence/RUNTIME_FAILURE_DRILLS.md](docs/evidence/RUNTIME_FAILURE_DRILLS.md);
 per-run hardening durations and acceptance matrix:
 [docs/RUNTIME_ORPHAN_RECOVERY.md](docs/RUNTIME_ORPHAN_RECOVERY.md#verification).
 
@@ -127,6 +129,10 @@ npm run glass-dispatch   # deepseek-flash, keep worktrees
 npm run dev -- supervisor start <contracts.json> --repo <scratch-repo> --worker claude
 npm run dev -- supervisor status --repo <scratch-repo> --json
 npm run dev -- supervisor resume --repo <scratch-repo>   # after interruption
+# Rejected retry reuses the recorded dirty worktree by default:
+npm run dev -- supervisor resume --repo <scratch-repo> --retry-rejected
+# Discard that draft and start a clean worktree:
+npm run dev -- supervisor resume --repo <scratch-repo> --retry-rejected --fresh-attempt
 npm run dev -- supervisor stop --repo <scratch-repo>     # cooperative SIGTERM
 npm run dev -- supervisor reap --repo <scratch-repo> --json  # orphan runtime recovery
 # start/resume also reconcile proven orphan runtimes automatically and fail
@@ -141,8 +147,11 @@ cycles, repo-external paths, and overlapping task `writePaths`.
 
 Ledger: `<target>/.cliyard/ledger.json` (gitignored).  
 Supervisor state: `<target>/.cliyard/runs/<runId>.json` + `active.json` + `supervisor.lock`
-(gitignored); accepted tasks and the integration head are checkpointed there.
-Supervisor details: [docs/SUPERVISOR_V0.md](docs/SUPERVISOR_V0.md) — foreground only, JSON manifest, manual review/merge, no daemon or SQLite.
+(gitignored); accepted tasks, the integration head and rejected-attempt
+worktree/branch/base fields are checkpointed there. Worker progress is
+append-only at `<target>/.cliyard/worker-events/<runId>/<taskId>.jsonl`
+(gitignored, advisory only; never run authority).
+Supervisor details: [docs/SUPERVISOR_V0.md](docs/SUPERVISOR_V0.md) — foreground only, JSON manifest, manual review/merge, no daemon or SQLite; attempt reuse is worktree continuity, not provider-conversation resume.
 
 Runtime evidence: `<target>/.cliyard/runtime/<runtimeId>/runtime-manifest.json`
 plus `<service>.log` and `data/<service>/`; port leases live in
@@ -160,7 +169,9 @@ recovery is never cross-host.
 Failure-drill evidence:
 `<target>/.cliyard/runtime-drills/<UTC>-<pid>/runtime-failure-drills.json` plus
 per-scenario `child.log`, `child-result.json`, runtime manifests, service logs
-and lease stores (gitignored). Measured summary and artifact layout:
+and lease stores (gitignored). An abnormal scenario records its child
+termination and exact-reaper recovery under `abnormalRecovery`; it is never
+reinterpreted as accepted. Measured summary and artifact layout:
 [docs/evidence/RUNTIME_FAILURE_DRILLS.md](docs/evidence/RUNTIME_FAILURE_DRILLS.md)
 and [docs/RUNTIME_MANAGER.md](docs/RUNTIME_MANAGER.md#runtime-failure-drills).
 Glass 实机：[docs/GLASS_TRIAL.md](docs/GLASS_TRIAL.md) · DSH 插件：[plugins/dsh-cliyard/README.md](plugins/dsh-cliyard/README.md).

@@ -1,14 +1,21 @@
 # Supervisor v0 — Durable Foreground Runs
 
 > Status: implemented (Supervisor v0 slice) — 2026-10-26
+> Attempt continuity and worker progress added 2026-10-27
 > Design authority: [design/supervisor-v0.md](../design/supervisor-v0.md)
+> Attempt continuity / progress design:
+> [design/attempt-continuity-progress-v0.md](../design/attempt-continuity-progress-v0.md)
 > Scope: one local git repository, one supervisor at a time
 
 Supervisor v0 makes a worker batch resumable. It persists a **RunManifest** in
 the target repository, checkpoints every accepted task and the integration
 head, and after a crash replays only the unfinished part of the contract DAG.
+A rejected attempt also keeps its exact dirty worktree, and Claude stream-json
+progress is appended for read-only observation while the worker runs.
 
-It is deliberately **not** a service:
+Attempt continuity is **worktree continuity**, not provider-conversation
+resume. Worker progress is **advisory**, not run authority. Neither addition
+turns the supervisor into a service; it is deliberately **not** a service:
 
 - `start` and `resume` run in the foreground and hold a lock until they exit;
 - state is atomic JSON, not SQLite;
@@ -26,6 +33,8 @@ It is deliberately **not** a service:
 | Preconditions before dispatch | Resume refuses changed contracts, a moved base commit, a missing integration branch, or an unreviewed rejected task. |
 | One writer per repo | `.cliyard/supervisor.lock` is created with `O_EXCL` and records run id, PID, host and timestamp. |
 | Diagnosable interruption | `status` reports a stale owner as `interrupted` without mutating the run. |
+| Attempt continuity | A rejected task checkpoints its exact worktree, branch, base and timestamps and keeps the dirty draft. Default `resume --retry-rejected` reuses it; `--fresh-attempt` discards it for a clean worktree. |
+| Observational progress | Claude stream-json events are appended during dispatch to `.cliyard/worker-events/<runId>/<taskId>.jsonl`; `status` shows the latest event and emits heartbeats while waiting. Missing, malformed or stale events never change run status or acceptance. |
 
 `status` is read-only and is always safe to run. Of the supervisor commands,
 only `start` and `resume` dispatch workers.
@@ -39,7 +48,8 @@ cliyard supervisor start <contracts.json> --repo <path> [--worker claude|codex]
 cliyard supervisor status --repo <path> [--run id] [--json]
 cliyard supervisor resume --repo <path> [--run id] [--worker claude|codex]
                           [--model id] [--dry-run] [--keep-worktrees]
-                          [--retry-rejected] [--force] [--verbose]
+                          [--retry-rejected] [--reuse-attempt | --fresh-attempt]
+                          [--force] [--verbose]
 cliyard supervisor stop --repo <path> [--run id] [--force]
 ```
 
@@ -65,6 +75,8 @@ After `npm run build`, use `node dist/cli.js supervisor …`, or the installed
 | `--dry-run` | Use the mock worker and mock verifier. Verify commands are **not** executed, but real git branches and checkpoints are still created. Rehearsal only. |
 | `--keep-worktrees` | Keep task and integration worktrees after the batch. |
 | `--verbose` | Forward scheduler progress to stdout. |
+| `--reuse-attempt` | Resume a rejected task in its recorded worktree. This is the default; the flag is an explicit assertion of it. |
+| `--fresh-attempt` | Discard the recorded rejected attempt and create a clean worktree. Mutually exclusive with `--reuse-attempt`. |
 
 ### `start`
 
@@ -97,7 +109,12 @@ cliyard supervisor status --repo <path> [--run <id>] [--json]
 
 Read-only. Reports the manifest status, the effective status, task counts,
 integration branch and recorded head, lock state and owner, last checkpoint,
-the last accepted task in manifest order, and the contracts hash.
+the last accepted task in manifest order, and the contracts hash. It also
+reports `reusableAttempts` (recorded rejected attempts whose worktree still
+validates) and `workerProgress` (the latest valid event per task with its age
+and a display-only `stale` flag). Human output prints the latest event and each
+reusable attempt. Reading either does not rewrite the manifest or the event
+log.
 
 `effectiveStatus` is `interrupted` when the manifest still says `running` but
 the owner PID is gone on the same host. A hard-killed supervisor therefore
@@ -141,8 +158,24 @@ Flags specific to resume:
 
 - `--retry-rejected` — explicitly retry rejected (and other non-accepted)
   tasks. Retry is all-or-nothing; there is no per-task selection.
+- `--reuse-attempt` — attach to the recorded rejected worktree. This is the
+  default when a rejected task has attempt metadata; the flag makes the choice
+  explicit.
+- `--fresh-attempt` — discard the recorded attempt and create a clean worktree
+  at the current integration base. This is the recovery path for a missing,
+  invalid or unwanted draft.
 - `--force` — replace an **invalid** lock file. It does not override a live
   lock, and it does not skip contracts/base/integration checks.
+
+`--reuse-attempt` and `--fresh-attempt` together fail before any dispatch.
+Reuse is fail-closed: an attempt outside `<repo>/.cliyard/worktrees/`, an
+unregistered worktree, a branch mismatch, a worktree `HEAD` different from the
+checkpointed base, missing rejection metadata, or an attempt associated with
+another task/run is refused. Reuse is only for rejected attempts; an active
+interrupted worker is not attached to a second worker. Acceptance clears the
+attempt fields and, unless `--keep-worktrees` was given, removes the worktree;
+a fresh attempt leaves the discarded draft on disk because worktree garbage
+collection is not implemented.
 
 Exit code is `0` only for a completed run (including the already-completed
 no-op); otherwise `1`.
@@ -183,6 +216,7 @@ sequence; an error (wrong run, unresponsive owner, still-held lock without
 <repo>/.cliyard/runs/active.json       pointer to the run used by default
 <repo>/.cliyard/supervisor.lock        exclusive supervisor ownership
 <repo>/.cliyard/ledger.json            dispatch ledger (default)
+<repo>/.cliyard/worker-events/<runId>/<taskId>.jsonl   advisory progress
 <repo>/.cliyard/worktrees/<id>-…       transient task / integration worktrees
 <repo> refs/heads/cliyard/integration/<runId>   integration checkpoint
 ```
@@ -216,6 +250,17 @@ and mode `0600`, then populated with the owner record.
       "status": "accepted",
       "accepted": true,
       "resultCommit": "full-git-sha"
+    },
+    "draft-task": {
+      "taskId": "draft-task",
+      "status": "rejected",
+      "accepted": false,
+      "reason": "verify failed and maxRepairs=0 exhausted",
+      "attemptWorktree": "/abs/path/.cliyard/worktrees/<id>-draft-task",
+      "attemptBranch": "cliyard/<id>-draft-task",
+      "attemptBaseCommit": "full-git-sha",
+      "attemptStartedAt": "2026-10-27T00:02:00.000Z",
+      "attemptRejectedAt": "2026-10-27T00:03:00.000Z"
     }
   }
 }
@@ -247,6 +292,14 @@ Task state:
 | `resultCommit` | Snapshot commit produced by the accepted task and merged into the integration branch. |
 | `reason` | Rejection reason or `blocked: dependencies not accepted`. |
 | `runId` | Reserved for worker-run correlation; the v0 checkpoint path does not populate it. |
+| `attemptWorktree` | Absolute path of the attempt worktree, checkpointed before the worker starts. |
+| `attemptBranch` | Task branch recorded with the attempt. |
+| `attemptBaseCommit` | Full commit sha the attempt worktree was based on. |
+| `attemptStartedAt` | ISO timestamp written before the worker starts. |
+| `attemptRejectedAt` | Present only after a rejection; makes the attempt eligible for reuse. Acceptance removes all five attempt fields. |
+
+These fields are optional so manifests written before the feature still load.
+Their identity is revalidated at reuse time, not assumed from the manifest.
 
 `runId`, `repoRoot` and `version` are immutable; the store rejects a mutation
 that changes any of them. All other manifest fields are written only by the
@@ -277,22 +330,28 @@ start / resume
    creates the integration branch at `integrationHead` (initially the base
    commit). A resume reuses the existing branch and verifies ancestry.
 3. Ready tasks are taken wave by wave from the contract DAG. Each task gets an
-   isolated worktree based on the current integration head.
+   isolated worktree based on the current integration head, or — on a retry —
+   the validated recorded attempt worktree. The exact worktree, branch, base
+   and start time are checkpointed **before** the worker starts.
 4. After the worker exits, the verifier runs the contract's `verifyCommands`.
    On acceptance, only the declared `writePaths` are snapshotted into a task
-   commit and merged into the integration branch.
+   commit and merged into the integration branch. A rejection retains the
+   dirty worktree and its exact attempt fields; nothing is merged.
 5. Immediately after the merge, the manifest is checkpointed with
-   `accepted: true`, `resultCommit`, and the new `integrationHead`. A rejected
-   task is checkpointed with `accepted: false` and a reason; nothing is merged.
+   `accepted: true`, `resultCommit`, and the new `integrationHead`; acceptance
+   clears every attempt field. A rejected task is checkpointed with
+   `accepted: false`, a reason, and `attemptRejectedAt`.
 6. The loop continues until every task is accepted or no ready task remains.
    Tasks that cannot progress are written as `blocked` with
    `blocked: dependencies not accepted`.
 7. The final checkpoint sets `integrationHead` and marks the run `completed`
    only when every task was accepted; otherwise it is `blocked`.
-8. Worktrees are removed unless `--keep-worktrees` was given. With a manifest,
-   the integration worktree is removed but the **branch is kept** as the
-   checkpoint. The lock is released on normal exit, on a thrown error and on
-   the signal handlers.
+8. Worktrees are removed unless `--keep-worktrees` was given, except that a
+   rejected attempt worktree is retained as durable draft state. A
+   `--fresh-attempt` retry leaves the discarded draft on disk. With a
+   manifest, the integration worktree is removed but the **branch is kept** as
+   the checkpoint. The lock is released on normal exit, on a thrown error and
+   on the signal handlers.
 
 The ledger records dispatch/repair history. The RunManifest is the resume
 authority; the ledger is not used to decide what to rerun.
@@ -374,7 +433,109 @@ contracts file is immutable for the run, and editing it breaks the hash
 precondition. Fix the inputs and start a new run, or restore the original
 contracts bytes and retry the task against the same frozen contract.
 
-## 6. Limitations
+## 6. Attempt continuity
+
+A Supervisor-backed task checkpoints its attempt before dispatch. On rejection
+the task keeps:
+
+```json
+{
+  "status": "rejected",
+  "accepted": false,
+  "attemptWorktree": "/abs/path/.cliyard/worktrees/<id>-task",
+  "attemptBranch": "cliyard/<id>-task",
+  "attemptBaseCommit": "full-sha",
+  "attemptStartedAt": "ISO-8601",
+  "attemptRejectedAt": "ISO-8601"
+}
+```
+
+Rules:
+
+- The dirty worktree survives process exit even without `--keep-worktrees`;
+  this is durable run state, not a transient batch artifact.
+- `resume --retry-rejected` reuses a recorded rejected attempt **by default**.
+  `--reuse-attempt` says the same thing explicitly.
+- `--fresh-attempt` deliberately discards the recorded draft and creates a
+  clean worktree at the current integration base. The old draft remains on
+  disk; worktree garbage collection is not implemented.
+- The two flags are mutually exclusive and are rejected before any dispatch.
+- Reuse fails closed (no dispatch) when the path is outside
+  `<repo>/.cliyard/worktrees/`, is not a registered git worktree, its branch
+  differs from the checkpoint, its `HEAD` differs from `attemptBaseCommit`,
+  rejection metadata is missing/malformed, or the attempt is recorded for
+  another task or run.
+- Only rejected attempts are reusable. An interrupted active worker may still
+  exist; there is no process-ownership design for attaching a second worker to
+  it.
+- A reused worktree keeps its recorded `attemptBaseCommit`, which may be older
+  than the current integration head; acceptance merges it like any task
+  branch.
+- Reuse is worktree continuity only. The provider conversation/session is not
+  resumed.
+- Acceptance clears all attempt fields and removes the worktree unless
+  `--keep-worktrees` was given; `status` exposes validated attempts as
+  `reusableAttempts` in JSON and human output.
+
+Measured behavior and fail-closed test coverage:
+[docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md).
+
+## 7. Worker progress
+
+Claude Code is invoked with `--output-format stream-json --verbose`. The
+adapter parses complete JSONL records incrementally and keeps the final
+`type: "result"` record for acceptance; a plain single-JSON result remains
+supported for fixtures/providers that emit one object.
+
+Events are appended immediately to:
+
+```text
+<repo>/.cliyard/worker-events/<runId>/<taskId>.jsonl
+```
+
+Each line is one complete version-1 event:
+
+```json
+{
+  "version": 1,
+  "at": "2026-10-27T11:32:32.517Z",
+  "source": "claude",
+  "taskId": "draft-task",
+  "sessionId": "…",
+  "type": "tool.start",
+  "phase": "tool",
+  "message": "tool Write started",
+  "detail": "path draft.txt"
+}
+```
+
+Types are `session.start`, `assistant`, `tool.start`, `tool.result`,
+`heartbeat`, `result`, `retry` and `error`; phases are `starting`, `thinking`,
+`tool`, `finishing`, `waiting` and `ending`.
+
+Behavior:
+
+- Progress is written during dispatch and does not wait for a RunManifest
+  checkpoint. The log is append-only across attempts of the same task.
+- `status` reads the latest valid event per tracked task and reports `ageMs`
+  and a display-only `stale` flag (older than 60 s). Human output prints the
+  newest event.
+- Missing, unreadable, malformed, foreign-task or stale event files never
+  change run status, counts, or acceptance.
+- Claude emits a `heartbeat` after a fixed interval of provider silence. The
+  default is 15 s (`CLIYARD_CLAUDE_HEARTBEAT_MS` overrides it). A heartbeat
+  means the adapter is still waiting; it does not claim progress, health or
+  success.
+- Message/detail text is collapsed, bounded and secret-redacted; tool inputs
+  are reduced to path/program metadata, and tool outputs are represented by a
+  size, not their contents.
+- Events are observational only: they are not run authority, are not embedded
+  in the RunManifest, and have no retention/rotation policy.
+
+Measured live events, heartbeat output and read-only status:
+[docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md).
+
+## 8. Limitations
 
 - **Foreground only.** The supervisor process is the run. Closing the terminal
   or losing the host stops it; no daemon restarts it. V0 is not 24h unattended
@@ -399,8 +560,19 @@ contracts bytes and retry the task against the same frozen contract.
   with `--retry-rejected`. Start a new run to redo work.
 - **At-least-once crash window.** A crash between merge and checkpoint can
   rerun an otherwise accepted task. Work is not lost; it can be regenerated.
-- **No worktree/manifest garbage collection.** Runs, branches, manifests and
-  any kept worktrees accumulate. Cleanup is manual.
+- **Attempt reuse is rejected-only and worktree-only.** An interrupted active
+  worker is not attached to a second worker, and the provider conversation is
+  not resumed. Only a rejected attempt with valid recorded metadata is reused;
+  anything else means `--fresh-attempt`.
+- **No worktree/manifest garbage collection.** Runs, branches, manifests,
+  kept worktrees and drafts discarded by `--fresh-attempt` accumulate. Cleanup
+  is manual.
+- **Worker progress is advisory.** Event files are not checkpointed with the
+  RunManifest, have no retention/rotation policy, and only the latest valid
+  event per task is displayed. `stale` is display-only.
+- **A heartbeat is a silence observation.** It indicates the adapter is still
+  waiting for provider output; it does not prove provider health or eventual
+  success.
 - **Worker set is claude or codex.** CodeBuddy is not wired into the
   supervisor path.
 - **Dry-run is not verification.** It uses mock worker/verifier output, skips
@@ -414,20 +586,37 @@ contracts bytes and retry the task against the same frozen contract.
 - **No backgrounding, multi-tenant, remote execution, Web/GUI or
   RuntimeManager.** These remain outside v0.
 
-## 7. Verification evidence
+## 9. Verification evidence
 
-On 2026-10-27 in this checkout:
+On 2026-10-27 in this checkout (HEAD `3093508`):
 
 ```text
-npm run build   → pass
-npm test        → 86/86 pass
+npm run build                                             → pass
+focused attempt/progress/drill group (4 files)            → 13/13 pass (9769.2 ms)
+npm test (full suite)                                     → 177/177 pass (10887.8 ms)
 ```
+
+These are single local runs, not a repeated-run flake rate or CI claim.
 
 The supervisor suites cover manifest durability, active pointer, atomic writes,
 lock exclusivity/staleness, contracts/base rejection, `start`/`status`/
 `resume`/`stop`, and an interruption scenario where the first wave is accepted,
 the second wave's dispatch fails, a new scheduler invocation reloads the
 manifest from disk, and only unfinished tasks run.
+
+Attempt continuity and progress coverage is in
+`tests/supervisor-attempt-reuse.test.ts`,
+`tests/claude-progress.test.ts` and
+`tests/supervisor-worker-progress.test.ts`: default reuse sees the prior draft;
+`--fresh-attempt` uses a different clean worktree and leaves the discarded
+draft; `--reuse-attempt` asserts the default; conflicting flags and three
+tampered-attempt cases fail before dispatch; acceptance clears attempt fields;
+live stream events and heartbeats are visible while `collect()` is still
+pending; `status` exposes live progress and leaves the manifest/event bytes
+unchanged; malformed, missing, foreign-task and stale events never alter run
+status. The measured CLI run used a local stream-json fixture provider
+(not a real DeepSeek/Claude run) and is recorded with exact commands and output
+in [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md).
 
 The CLI suite also launches a separate Supervisor process with a controlled
 worker, waits until the first task is checkpointed and the second task is
@@ -436,7 +625,7 @@ running, then sends `SIGKILL` to the whole process group. A new process reads
 starts only the unfinished task, preserves the accepted task commit, and
 finishes with the integration branch containing both outputs.
 
-## 8. Safe tool self-hosting procedure
+## 10. Safe tool self-hosting procedure
 
 Goal: use the **stable** cliyard to change cliyard itself, with reviewable
 diffs and a rollback path. This remains a manual merge procedure. The first
@@ -562,6 +751,13 @@ npm run dev -- supervisor resume --repo /path/to/cliyard-control --worker claude
 # Only after fixing an environmental failure; retries all non-accepted tasks:
 npm run dev -- supervisor resume --repo /path/to/cliyard-control --retry-rejected
 
+# If the recorded draft should be discarded, start a clean worktree instead:
+npm run dev -- supervisor resume --repo /path/to/cliyard-control \
+  --retry-rejected --fresh-attempt
+
+# Live progress is read-only; do not use it as acceptance evidence:
+npm run dev -- supervisor status --repo /path/to/cliyard-control --json
+
 # Abort cooperatively:
 npm run dev -- supervisor stop --repo /path/to/cliyard-control
 ```
@@ -574,6 +770,10 @@ Rules during the run:
 - Do not remove `.cliyard/` or the integration branch.
 - If a task rejects because the contract is wrong, stop and start a new run
   with corrected contracts; do not edit the running contracts.
+- A retry reuses the recorded draft by default. Inspect
+  `status --json` (`reusableAttempts`) and the worktree before retrying; use
+  `--fresh-attempt` when the draft should not be reused. Worker progress is
+  observational and is not a review gate.
 
 ### Phase D — validate the integration branch
 
@@ -605,8 +805,9 @@ Review gates:
 - [ ] No task modified the design authority files unless that was an explicit,
       reviewed deliverable.
 - [ ] The diff is reviewable task by task; rejection reasons are understood.
-- [ ] `status --json` shows all tasks accepted, `completed`, and the expected
-      integration head.
+- [ ] `status --json` shows all tasks accepted, `completed`, the expected
+      integration head, empty `reusableAttempts`, and no attempt fields in the
+      final task states.
 
 Then drill the new supervisor's first boot without giving it a real run:
 
@@ -649,10 +850,15 @@ it is allowed to own a real run.
 - The run cannot be trusted: `stop`, keep the manifests and branch for
   diagnosis, and start a fresh run from the old baseline.
 
-## 9. Related documents
+## 11. Related documents
 
 - [design/supervisor-v0.md](../design/supervisor-v0.md) — design authority.
-- [docs/NEXT_ITERATION.md](NEXT_ITERATION.md) — current status and the next
-  verification/self-hosting iteration.
+- [design/attempt-continuity-progress-v0.md](../design/attempt-continuity-progress-v0.md)
+  — attempt continuity and worker progress design.
+- [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md)
+  — measured reuse, fresh-attempt, live stream, heartbeat and drill-recovery
+  evidence.
+- [docs/NEXT_ITERATION.md](NEXT_ITERATION.md) — current status; Task Architect
+  is the next capability.
 - [README.md](../README.md) — command overview.
 - [docs/KEY_MIND.md](KEY_MIND.md) — product thesis and the supervisor's role.
