@@ -7,9 +7,9 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { createServer, type AddressInfo, type Server } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
+import { takeTestPortRange } from "./test-port-ranges.js";
 import { PortAllocator } from "../src/runtime/ports.js";
 import { ProcessInspector } from "../src/runtime/process.js";
 import {
@@ -99,39 +99,6 @@ function writeScript(dir: string, filename: string, source: string): string {
   return path;
 }
 
-function listenOn(server: Server, port: number): Promise<void> {
-  return new Promise((resolveListen, rejectListen) => {
-    server.once("error", rejectListen);
-    server.listen({ host: "127.0.0.1", port }, () => {
-      server.off("error", rejectListen);
-      resolveListen();
-    });
-  });
-}
-
-function closeServer(server: Server): Promise<void> {
-  return new Promise((resolveClose, rejectClose) => {
-    server.close((error) => (error ? rejectClose(error) : resolveClose()));
-  });
-}
-
-async function ephemeralPort(): Promise<number> {
-  const server = createServer();
-  await listenOn(server, 0);
-  const { port } = server.address() as AddressInfo;
-  await closeServer(server);
-  return port;
-}
-
-async function freshRange(
-  size: number,
-): Promise<{ range: string; start: number; end: number }> {
-  const base = await ephemeralPort();
-  const start = Math.min(base, 65535 - size + 1);
-  const end = start + size - 1;
-  return { range: `${start}-${end}`, start, end };
-}
-
 function readManifest(path: string): RuntimeManifest {
   return JSON.parse(readFileSync(path, "utf8")) as RuntimeManifest;
 }
@@ -195,7 +162,7 @@ test("persists owner, pid==pgid, and exact OS identity, then retains it after st
       "fixture-server.mjs",
       FIXTURE_SERVER_SOURCE,
     );
-    const { range } = await freshRange(4);
+    const { range } = takeTestPortRange("runtime-manager-identity", 4);
     const allocator = new PortAllocator({ repoRoot: repo, range });
     const manager = new RuntimeManager({
       ...baseManagerOptions(repo, worktree),
@@ -273,7 +240,7 @@ test("persists spawn evidence before readiness and retains it after a failed sta
       "fixture-server.mjs",
       FIXTURE_SERVER_SOURCE,
     );
-    const { range } = await freshRange(4);
+    const { range } = takeTestPortRange("runtime-manager-identity", 4);
     const allocator = new PortAllocator({ repoRoot: repo, range });
     const runtimeId = "task-unready-attempt-1";
     const manifestPath = runtimePaths(repo, runtimeId).manifestPath;
@@ -341,7 +308,7 @@ test("persists owner but no process evidence when the service never spawns", asy
   await withTempBase(async (base) => {
     const repo = makeRepo(base);
     const worktree = makeWorktree(base);
-    const { range } = await freshRange(4);
+    const { range } = takeTestPortRange("runtime-manager-identity", 4);
     const allocator = new PortAllocator({ repoRoot: repo, range });
     const runtimeId = "task-no-spawn-attempt-1";
     const manifestPath = runtimePaths(repo, runtimeId).manifestPath;
@@ -404,7 +371,7 @@ test("replaces spawn evidence when the EADDRINUSE retry starts a new process", a
       FIXTURE_SERVER_SOURCE,
     );
     const marker = join(worktree, "retry-marker");
-    const { range } = await freshRange(8);
+    const { range } = takeTestPortRange("runtime-manager-identity", 8);
     const allocator = new PortAllocator({ repoRoot: repo, range });
     const runtimeId = "task-identity-retry-attempt-1";
     const manager = new RuntimeManager({

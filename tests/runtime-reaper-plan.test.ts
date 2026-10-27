@@ -11,9 +11,9 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { createServer, type AddressInfo } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { takeTestPortRange } from "./test-port-ranges.js";
 import { runtimePaths } from "../src/runtime/manager.js";
 import { PortAllocator } from "../src/runtime/ports.js";
 import { ProcessInspector } from "../src/runtime/process.js";
@@ -76,39 +76,6 @@ function leaseStorePath(repo: string): string {
   return join(runtimeDir(repo), "port-leases.json");
 }
 
-function listenOn(server: ReturnType<typeof createServer>, port: number): Promise<void> {
-  return new Promise((resolveListen, rejectListen) => {
-    server.once("error", rejectListen);
-    server.listen({ host: "127.0.0.1", port }, () => {
-      server.off("error", rejectListen);
-      resolveListen();
-    });
-  });
-}
-
-function closeServer(server: ReturnType<typeof createServer>): Promise<void> {
-  return new Promise((resolveClose, rejectClose) => {
-    server.close((error) => (error ? rejectClose(error) : resolveClose()));
-  });
-}
-
-async function ephemeralPort(): Promise<number> {
-  const server = createServer();
-  await listenOn(server, 0);
-  const { port } = server.address() as AddressInfo;
-  await closeServer(server);
-  return port;
-}
-
-async function freshRange(
-  size: number,
-): Promise<{ range: string; start: number; end: number }> {
-  const base = await ephemeralPort();
-  const start = Math.min(base, 65535 - size + 1);
-  const end = start + size - 1;
-  return { range: `${start}-${end}`, start, end };
-}
-
 /**
  * Allocate real PortAllocator leases for every requested service, then rewrite
  * their owner pid to the dead owner. Allocation must happen first because the
@@ -118,7 +85,7 @@ async function allocateOrphanLeases(
   repo: string,
   requests: ReadonlyArray<{ runtimeId: string; service: string }>,
 ): Promise<PortLease[]> {
-  const { range } = await freshRange(requests.length + 2);
+  const { range } = takeTestPortRange("runtime-reaper-plan", requests.length + 2);
   const allocator = new PortAllocator({ repoRoot: repo, range });
   const allocated: PortLease[] = [];
   for (const request of requests) {
