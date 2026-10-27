@@ -3,6 +3,7 @@
 > Status: implemented (single host, local repository, macOS/Linux process identity).
 >
 > Design authority: [design/runtime-orphan-reaper-v0.md](../design/runtime-orphan-reaper-v0.md).
+> Hardening: [design/runtime-orphan-hardening.md](../design/runtime-orphan-hardening.md).
 > This document describes the behavior implemented in `src/runtime/process.ts`,
 > `src/runtime/reaper.ts` (read-only preflight), `src/runtime/reaper-execute.ts`
 > (destructive executor), and `src/supervisor/cli.ts` (`supervisor reap` and
@@ -61,7 +62,9 @@ A runtime is eligible only when every one of these holds:
    process group, or bind port.
 8. No additional lease exists under this `runtimeId` without a matching
    manifest service.
-9. A lease with the same key is not owned by a different live PID.
+9. The exact lease owner PID equals the manifest owner PID
+   (`lease.pid === manifest.owner.pid`). Any mismatch is `needs_human`,
+   whether the lease owner is live or dead.
 
 Anything else is `needs_human`: a missing legacy identity, a reused PID, a
 leader that exited while group members remain, a competing manifest, a port
@@ -75,6 +78,29 @@ The reaper never:
 - matches command lines or scans for "looks like a cliyard service";
 - releases leases as garbage collection while a service may still be alive;
 - acts on a runtime owned by another host.
+
+## Hardening changes
+
+The current revision incorporates four correctness fixes from
+[design/runtime-orphan-hardening.md](../design/runtime-orphan-hardening.md):
+
+- **Exact lease owner PID.** Preflight previously ignored a lease owned by a
+  different *dead* PID. It now requires `lease.pid === manifest.owner.pid`; a
+  live or dead mismatch is `needs_human`, and the group, lease, and manifest are
+  preserved.
+- **`runtimeId` in recovery evidence.** New executor records carry the runtime
+  id themselves. `supervisor reap` reports from the executor report directly,
+  without a second preflight or reason-keyed id reconstruction; `status` uses
+  the record id first and falls back to the manifest id, then the directory name,
+  for legacy records.
+- **Text-clean Supervisor source.** Blocked-candidate de-duplication uses a
+  JSON-encoded key rather than a NUL-delimited string. At this revision a byte
+  scan of `src/` found no NUL bytes.
+- **Disjoint test port pools.** Runtime test files that bind real ports use
+  static, non-overlapping pools (`tests/test-port-ranges.ts`). This is test-run
+  isolation only; it does not coordinate ports across runs or repositories.
+
+Measured evidence is in [Verification](#verification).
 
 ## Persisted identity fields
 
@@ -111,6 +137,7 @@ The manifest root records the process that owned the runtime:
   "startedAt": "2026-10-27T10:00:00.000Z",
   "cleanup": "complete",
   "recovery": {
+    "runtimeId": "runtime-e2e",
     "state": "reaped",
     "reason": "...",
     "at": "2026-10-27T10:05:00.000Z",
@@ -138,6 +165,7 @@ The manifest root records the process that owned the runtime:
 | `processIdentity.startedAt` | OS-reported start identity from `ps -p <pid> -o pid=,pgid=,lstart=`, whitespace-normalized. It is captured immediately after spawn with `LC_ALL=C`, `LANG=C`, and `TZ=UTC`. It is never derived from manifest write time. |
 | `services[].startedAt` | Wall-clock bookkeeping only; never used for ownership. |
 | `recovery` | Optional record written by the reaper. Legacy manifests do not have it. |
+| `recovery.runtimeId` | Runtime this record describes. Optional only in records written before the field existed; every new executor record sets it. |
 
 Persistence timing matters:
 
@@ -166,11 +194,14 @@ lease.service   === service.name
 lease.key       === `${runtimeId}:${service.name}`
 lease.host      === "127.0.0.1"
 lease.port      === service.port
+lease.pid       === manifest.owner.pid
 ```
 
-The lease must also not be owned by a different **live** PID. A lease whose
-owner is a different but dead PID is treated as reclaimable evidence; a lease
-owned by a different live PID is `needs_human`.
+The lease must also be owned by the manifest owner PID:
+`lease.pid === manifest.owner.pid`. Any mismatch is `needs_human`, whether the
+lease owner is live or dead. A dead third-party owner does not prove this
+runtime's service; the process group, lease, and manifest are preserved for
+human review.
 
 The lease store is single-host. Liveness and identity are local concepts; do
 not share `.cliyard/runtime` across machines or network filesystems.
@@ -259,7 +290,8 @@ Preflight rules, in order:
    - no `pid` and no lease → `none`;
    - missing `pgid` or `pgid !== pid` → `preserve`;
    - no exact lease → `preserve`;
-   - lease owned by a different live PID → `preserve`;
+   - lease owner PID differs from the manifest owner PID (live or dead)
+     → `preserve`;
    - legacy manifest with no identity: live leader → `preserve`; non-empty
      group → `preserve`; provably empty group → `already-exited`;
    - identity capture failure → `preserve`;
@@ -321,6 +353,8 @@ Failure semantics:
 
 ```ts
 interface RuntimeRecoveryRecord {
+  /** Optional only in legacy records; every new executor record sets it. */
+  runtimeId?: string;
   state: "reaped" | "needs_human" | "skipped";
   reason: string;
   at: string;
@@ -334,6 +368,13 @@ interface RuntimeRecoveryRecord {
   }>;
 }
 ```
+
+Every new executor record carries its `runtimeId`, including report-only
+`skipped` and preflight `needs_human` records; persisted manifest records carry
+it too. Records written before the field existed remain readable. `status` uses
+the record id first, then falls back to the manifest `runtimeId`, then the
+runtime directory name. The Supervisor never reconstructs ids by matching state
+or reason text.
 
 On `reaped`, the manifest is finalized with `cleanup: "complete"` and a
 `stoppedAt` timestamp (the existing value is retained; otherwise the recovery
@@ -363,9 +404,12 @@ The report buckets are `reaped`, `needsHuman`, and `skipped`. The persisted
 record states are `reaped`, `needs_human`, and `skipped`; the bundled executor
 writes only `reaped` and its own `needs_human` records to disk.
 
-Execution records do not carry a `runtimeId`; `--json` prints the report as-is.
-The human-readable output annotates records with a runtime id when it can match
-a preflight plan or a persisted record, and omits the id when it cannot.
+Execution records carry their `runtimeId`; `--json` prints the report as-is.
+The human-readable output labels each record from its own `runtimeId` and does
+not match state or reason text. The Supervisor's `reap` reporting uses the
+executor report directly and does not run a second preflight. Report keys and
+lines are plain strings; the Supervisor source contains no NUL delimiters
+(blocked-candidate de-duplication uses a JSON-encoded key).
 
 ## Supervisor commands
 
@@ -397,9 +441,11 @@ lock after the failure; `resume` leaves the run unchanged (for example
 
 `status` reads `recovery` records from every runtime manifest under
 `.cliyard/runtime` (not only the selected run) and exposes them as
-`runtimeRecovery` in `--json`. It does not run preflight, signal, release, or
-write. Preflight-only and `skipped` results are not persisted, so they do not
-appear in `status`.
+`runtimeRecovery` in `--json`. The record's own `runtimeId` wins; for legacy
+records without one, `status` falls back to the manifest `runtimeId`, then the
+runtime directory name. It does not run preflight, signal, release, or write.
+Preflight-only and `skipped` results are not persisted, so they do not appear
+in `status`.
 
 ## Process-level incident workflow
 
@@ -519,6 +565,7 @@ changed lease can turn a previously safe runtime into `needs_human`.
 | Owner killed after the service exited and before cleanup | Leader gone, group empty, lease present | `safe_to_reap` → `already-exited` |
 | Leader gone but helper still in the group | Leader identity cannot prove group ownership | `needs_human`; group and lease preserved |
 | PID reused by an unrelated process | Persisted identity differs | `needs_human`; no signal |
+| Lease owner PID differs from the manifest owner PID | Exact lease ownership fails; the third-party owner may be dead or live | `needs_human`; group, lease, and manifest preserved |
 | Manifest without a valid `owner` | Owner identity absent | `needs_human` (unless already complete/reaped) |
 | Legacy service without `processIdentity` | Live leader cannot be correlated; an empty group has nothing to signal | `needs_human` if the leader is live or the group is non-empty; `already-exited` if the group is empty |
 | Manifest from another host | Owner host differs | `skip`; no local action |
@@ -550,6 +597,9 @@ changed lease can turn a previously safe runtime into `needs_human`.
 - **PID reuse is deliberately conservative.** A reused PID yields an identity
   mismatch and `needs_human`; the original process cannot be reclaimed
   automatically.
+- **Exact lease ownership is required.** A lease acquired by any PID other than
+  the manifest owner is `needs_human`, even when that PID is already dead. A
+  dead third-party lease cannot be reclaimed automatically.
 - **Legacy manifests fail closed.** Manifests without `owner` or service
   `processIdentity` cannot be proven orphaned; a live group is `needs_human`.
   An already-empty group with a valid lease may still be classified
@@ -590,32 +640,62 @@ changed lease can turn a previously safe runtime into `needs_human`.
 
 ## Verification
 
-Measured on 2026-10-27 in this worktree:
+Measured on 2026-10-27 in this worktree (macOS):
 
 ```text
 npm run build   → pass
-npm test        → 156/156 pass
+npm test        → 164/164 pass, five consecutive runs
 ```
 
-Runtime and recovery-focused suites (70 tests across 9 files):
+Five consecutive full-suite runs, each a separate `npm test` process run
+sequentially in this worktree:
+
+| Run | Result | Test-runner duration |
+|-----|--------|----------------------|
+| 1 | 164/164 pass | 8.44 s |
+| 2 | 164/164 pass | 8.45 s |
+| 3 | 164/164 pass | 8.17 s |
+| 4 | 164/164 pass | 8.29 s |
+| 5 | 164/164 pass | 8.16 s |
+
+No flakes were observed in these five runs. This is local macOS evidence, not a
+long-term flake rate or CI claim.
+
+Runtime and recovery-focused suites (78 tests across 12 files):
 
 ```text
-tests/runtime-ports.test.ts               10
-tests/runtime-manager.test.ts              8
-tests/runtime-verifier.test.ts             5
-tests/contract-runtime.test.ts            10
-tests/runtime-manager-identity.test.ts     5
-tests/runtime-process.test.ts              8
-tests/runtime-reaper-plan.test.ts          9
-tests/runtime-reaper.test.ts              10
-tests/supervisor-runtime-reaper.test.ts    5
+tests/contract-runtime.test.ts                     10
+tests/runtime-ports.test.ts                        10
+tests/runtime-manager.test.ts                       8
+tests/runtime-manager-identity.test.ts              5
+tests/runtime-process.test.ts                       8
+tests/runtime-verifier.test.ts                      5
+tests/runtime-owner-lease-safety.test.ts            3
+tests/runtime-recovery-record.test.ts               3
+tests/runtime-reaper-plan.test.ts                   9
+tests/runtime-reaper.test.ts                       10
+tests/supervisor-runtime-reaper.test.ts             5
+tests/supervisor-runtime-recovery-record.test.ts    2
 ```
+
+Each of those files also passed when run alone once during this measurement.
+
+The six runtime test files that start real processes or bind real ports take
+static, disjoint port pools from `tests/test-port-ranges.ts` (22000–22599, 100
+ports per file); the shell-verifier tests keep 21400–21499 and 21500–21599. The
+helper asserts overlap/inversion at import time and throws on pool exhaustion
+when a range is taken; every allocation still goes through the real
+`PortAllocator` probe/retry path inside the assigned pool.
+This only prevents overlaps between test files in this repository; it is not a
+production port registry, cross-run coordinator, or cross-repository claim.
 
 Process-level coverage in those tests includes a real detached RuntimeManager
 HTTP service whose owner process is `SIGKILL`ed, escalation from `SIGTERM` to
 `SIGKILL`, a leader-dead group that must stay `needs_human`, a port held by a
-foreign listener, concurrent reaper serialization, and supervisor `reap`,
-`start`, and `resume` run as separate child processes.
+foreign listener, concurrent reaper serialization, supervisor `reap`, `start`,
+and `resume` run as separate child processes, exact lease-owner correlation,
+and `runtimeId`-bearing recovery records for reaped, skipped, and needs_human
+buckets.
 
 Design test intent coverage:
 
@@ -633,11 +713,24 @@ Design test intent coverage:
 | Concurrent reapers serialized | `runtime-reaper` |
 | Supervisor start/resume fail closed | `supervisor-runtime-reaper` |
 
+Hardening acceptance
+([design/runtime-orphan-hardening.md](../design/runtime-orphan-hardening.md)):
+
+| Acceptance | Evidence |
+|------------|----------|
+| Dead or live lease PID mismatch is `needs_human` | `runtime-owner-lease-safety` (3/3): equal dead owner is safe; dead and live third-party owners both preserve the group, lease, and byte-identical manifest |
+| Executor recovery records and manifests contain `runtimeId` | `runtime-recovery-record` (3/3): reaped, skipped, and needs_human records; the persisted record matches the report; legacy records remain readable |
+| Supervisor output does not infer ids from reasons | `supervisor-runtime-recovery-record` (2/2): colliding reasons stay distinctly labelled; `status` prefers the record id and falls back for legacy records |
+| Supervisor source is text-clean (no embedded NUL) | byte scan of `src/` found no NUL bytes; the report test asserts no NUL delimiter in output |
+| `npm test` passes five consecutive isolated runs | 5 × 164/164 on 2026-10-27, no flakes observed |
+| RuntimeManager, reaper, and Supervisor suites remain green | full suite 164/164; 78 runtime/recovery-focused tests across 12 files |
+
 No cross-host recovery or daemon-based cleanup is claimed or tested.
 
 ## Related documents
 
 - Design: [design/runtime-orphan-reaper-v0.md](../design/runtime-orphan-reaper-v0.md)
+- Hardening: [design/runtime-orphan-hardening.md](../design/runtime-orphan-hardening.md)
 - Normal runtime lifecycle: [docs/RUNTIME_MANAGER.md](RUNTIME_MANAGER.md)
 - Supervisor run recovery: [docs/SUPERVISOR_V0.md](SUPERVISOR_V0.md)
 - Next iteration: [docs/NEXT_ITERATION.md](NEXT_ITERATION.md)
