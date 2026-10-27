@@ -36,7 +36,7 @@
         "tests/architect.test.ts"
       ],
       "sharedResources": [],
-      "baseCommit": "57d85ff976bbbd31504ff181e87d685ed9e22453",
+      "baseCommit": "74ee768ae91fe0d19c5050df5f704b5d62f788b9",
       "verifyCommands": [
         "npx tsx --test tests/architect.test.ts",
         "npm test",
@@ -77,7 +77,7 @@
         "docs/evidence/TASK_ARCHITECT.md"
       ],
       "sharedResources": [],
-      "baseCommit": "57d85ff976bbbd31504ff181e87d685ed9e22453",
+      "baseCommit": "74ee768ae91fe0d19c5050df5f704b5d62f788b9",
       "verifyCommands": [
         "npm test",
         "npm run build",
