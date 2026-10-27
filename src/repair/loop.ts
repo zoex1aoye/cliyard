@@ -7,6 +7,14 @@ import type {
 } from "../agents/types.js";
 import type { Verifier } from "../verification/verifier.js";
 import {
+  aggregateCostTruth,
+  createFailureRecord,
+  parseCostTruth,
+  parseFailureRecord,
+  type CostTruth,
+  type FailureRecord,
+} from "../failures.js";
+import {
   appendEvent,
   updateLedger,
   type LedgerTaskRecord,
@@ -35,6 +43,13 @@ export interface LoopResult {
   reason: string;
   ledgerPath: string;
   events: { type: string; status?: TaskStatus; detail?: string }[];
+  /** Final structured failure for a rejected task; absent when accepted. */
+  failure?: FailureRecord;
+  /**
+   * Aggregated cost truth across every worker session the loop started,
+   * including repairs. Never an authoritative run total.
+   */
+  cost?: CostTruth;
 }
 
 function setStatus(
@@ -79,6 +94,11 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
 
   let attempt = 0;
   let priorFailure: AgentStartInput["priorFailure"];
+  /**
+   * Every worker session started by this loop, including repairs. Unknown
+   * observations stay missing rather than becoming zero.
+   */
+  const attemptCosts: CostTruth[] = [];
 
   while (true) {
     await updateLedger(ledgerPath, (ledger) => {
@@ -94,6 +114,15 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
       ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
     });
     const agentResult = await worker.collect(sessionId);
+    // Fail closed on malformed adapter observations: an unusable record is
+    // omitted (cost becomes missing), never guessed at.
+    const parsedCost = agentResult.cost
+      ? parseCostTruth(agentResult.cost)
+      : null;
+    if (parsedCost) attemptCosts.push(parsedCost);
+    const parsedFailure = agentResult.failure
+      ? parseFailureRecord(agentResult.failure)
+      : null;
 
     await updateLedger(ledgerPath, (ledger) => {
       record = ledger.tasks[contract.taskId]!;
@@ -109,6 +138,16 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
 
     if (agentResult.exitCode !== 0) {
       const v = await verifier.run(contract, agentResult);
+      // A worker exit is never relabeled as a verifier rejection, even when
+      // the verifier also fails afterward. Adapters without structured
+      // failure metadata fall back to normal bounded classification.
+      const failure =
+        parsedFailure ??
+        createFailureRecord({
+          exitCode: agentResult.exitCode,
+          text: agentResult.logTail,
+          messageDetail: `implement failed: exitCode=${agentResult.exitCode}`,
+        });
       await updateLedger(ledgerPath, (ledger) => {
         record = ledger.tasks[contract.taskId]!;
         setStatus(record, "verifying", log);
@@ -117,6 +156,8 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         record.verdict = "rejected";
         record.reason = `implement failed: exitCode=${agentResult.exitCode}`;
         record.lastVerifyLog = v.logTail;
+        record.failure = failure;
+        record.cost = aggregateCostTruth(attemptCosts);
         appendEvent(record, "verdict", record.reason);
       });
       return finish(record, ledgerPath);
@@ -140,6 +181,8 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         setStatus(record, "accepted", log);
         record.verdict = "accepted";
         record.reason = `verified after ${attempt} repair(s)`;
+        record.cost = aggregateCostTruth(attemptCosts);
+        delete record.failure;
         appendEvent(record, "verdict", record.reason);
       });
       return finish(record, ledgerPath);
@@ -153,6 +196,15 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         setStatus(record, "rejected", log);
         record.verdict = "rejected";
         record.reason = `verify failed and maxRepairs=${contract.maxRepairs} exhausted`;
+        // The worker succeeded and the verifier rejected its result. No raw
+        // verifier log is copied into the bounded record.
+        record.failure = createFailureRecord({
+          workerSucceeded: true,
+          verifierRejected: true,
+          stage: "verifier",
+          messageDetail: `maxRepairs=${contract.maxRepairs} exhausted`,
+        });
+        record.cost = aggregateCostTruth(attemptCosts);
         appendEvent(record, "verdict", record.reason);
         return true;
       }
@@ -191,5 +243,7 @@ function finish(record: LedgerTaskRecord, ledgerPath: string): LoopResult {
       status: e.status,
       detail: e.detail,
     })),
+    ...(record.failure !== undefined ? { failure: record.failure } : {}),
+    ...(record.cost !== undefined ? { cost: record.cost } : {}),
   };
 }

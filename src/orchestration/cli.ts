@@ -30,6 +30,10 @@ import {
   type ControlItemSnapshot,
   type ControlSnapshot,
 } from "./control-snapshot.js";
+import {
+  formatCostObservation,
+  formatFailureObservation,
+} from "../supervisor/cli.js";
 
 export interface QueueCliOptions {
   /** Output sink; defaults to console.log. */
@@ -315,6 +319,9 @@ function printItemDetail(
   item: QueueItem,
   log: (line: string) => void,
 ): void {
+  if (item.failure) {
+    log(`  failure: ${formatFailureObservation(item.failure)}`);
+  }
   if (isPlanBackedQueueItem(item)) {
     printPlanDetail(item, log);
     if (item.reason) log(`  reason: ${item.reason}`);
@@ -408,7 +415,12 @@ function printRunSummary(
 
   for (const item of summary.items) {
     if (item.status === "blocked") {
-      log(`blocked ${item.id}: ${item.reason ?? "no reason recorded"}`);
+      log(
+        `blocked ${item.id}: ${item.reason ?? "no reason recorded"}` +
+          (item.failure
+            ? ` [failure ${formatFailureObservation(item.failure)}]`
+            : ""),
+      );
     }
   }
 
@@ -451,6 +463,8 @@ function printControlSnapshot(
         ? `, read error: ${snapshot.journal.readError}`
         : ""),
   );
+  log(`failure categories: ${formatFailureCounts(snapshot.failureCounts)}`);
+  log(`cost: ${formatControlCost(snapshot.cost)}`);
   if (snapshot.resources.provider.length > 0) {
     log("provider capacity:");
     for (const provider of snapshot.resources.provider) {
@@ -488,8 +502,24 @@ function printControlItem(
         `tasks=${item.run.accepted}/${item.run.total} accepted  ` +
         `ownerAlive=${String(item.run.ownerAlive)}`,
     );
+    // Durable per-task observations from the RunManifest authority.
+    for (const task of item.run.tasks) {
+      if (!task.failure && !task.cost) continue;
+      const parts = [`  task ${task.taskId}: ${task.status}`];
+      if (task.failure) {
+        parts.push(`failure=${formatFailureObservation(task.failure)}`);
+      }
+      if (task.cost) {
+        parts.push(`cost=${formatCostObservation(task.cost)}`);
+      }
+      log(parts.join(" "));
+    }
   } else if (item.lastRunId) {
     log(`  run: ${item.lastRunId} (manifest unavailable)`);
+  }
+  if (item.failure) {
+    // Deterministic pre-dispatch block with no RunManifest.
+    log(`  failure: ${formatFailureObservation(item.failure)}`);
   }
   if (item.materialization) {
     log(
@@ -517,6 +547,30 @@ function printControlItem(
     log(`  journal: ${latest.type} at ${latest.at}`);
   }
   for (const error of item.errors) log(`  warning: ${error}`);
+}
+
+function formatFailureCounts(
+  counts: ControlSnapshot["failureCounts"],
+): string {
+  const entries = Object.entries(counts);
+  return entries.length === 0
+    ? "none"
+    : entries.map(([category, count]) => `${category} ${count}`).join(" / ");
+}
+
+/**
+ * Render only observed cost. A missing amount stays missing; the subtotal is
+ * always labelled non-authoritative and completeness/missing reasons follow.
+ */
+function formatControlCost(cost: ControlSnapshot["cost"]): string {
+  const base =
+    cost.amount !== null
+      ? `${cost.state} ${cost.amount} ${cost.currency ?? "<currency unknown>"}` +
+        " observed; non-authoritative"
+      : `${cost.state}; non-authoritative`;
+  const missing =
+    cost.missing.length > 0 ? `; missing ${cost.missing.join(", ")}` : "";
+  return `${base}; completeness ${cost.completeness}${missing}`;
 }
 
 function formatQueueLock(snapshot: ControlSnapshot): string {
