@@ -193,6 +193,11 @@ Lease identity is `runId:service`; RuntimeManager passes its `runtimeId` as
 `runId`. A lease records `key`, `runId`, `service`, `host` (`127.0.0.1`),
 `port`, owner `pid`, and `acquiredAt`.
 
+The recorded `pid` is the control-process PID that acquired the lease. Orphan
+recovery requires `lease.pid === manifest.owner.pid`; any other owner — live or
+dead — is `needs_human`. A dead third-party lease is evidence, not permission to
+reap. See [RUNTIME_ORPHAN_RECOVERY.md](RUNTIME_ORPHAN_RECOVERY.md).
+
 Allocation semantics:
 
 - Load–modify–save and bind probes run under one cross-process lock
@@ -202,7 +207,9 @@ Allocation semantics:
 - Re-allocating the same `runtimeId + service` while the recorded owner pid is
   alive returns the same lease and port.
 - A lease whose owner pid is gone is reclaimable on the same host; liveness is
-  local-pid-based, so this store must not be shared across machines.
+  local-pid-based, so this store must not be shared across machines. This is an
+  allocation concern; orphan recovery additionally requires
+  `lease.pid === manifest.owner.pid`.
 - A port is checked by binding `127.0.0.1:<port>` (2 s probe timeout) and is
   reserved before the service spawns.
 - Occupied ports are skipped. If the range is exhausted,
@@ -332,6 +339,7 @@ Manifest shape (version 1):
   "cleanup": "complete",       // pending | running | complete | failed
   "failureReason": "optional",
   "recovery": {                // optional; written only by the orphan reaper
+    "runtimeId": "run-42-task-web-attempt-1", // new records; legacy may omit
     "state": "reaped",         // reaped | needs_human | skipped
     "reason": "...",
     "at": "ISO-8601",
@@ -362,6 +370,11 @@ Recovery identity fields:
   `manifest.startedAt` or any wall-clock value. It is what distinguishes the
   original process from a reused PID. The field is absent when identity capture
   is unsupported (for example on Windows), and absence means unknown.
+- `recovery.runtimeId` names the runtime the record describes. Every new
+  executor record sets it. It is optional only for records written before the
+  field existed; `status` then falls back to the manifest `runtimeId`, then the
+  runtime directory name. The Supervisor does not reconstruct ids from reason
+  text.
 - `recovery` is appended by the orphan reaper during reconciliation; it is not
   written by the normal RuntimeManager path.
 
@@ -423,6 +436,11 @@ Reconciliation has three outcomes:
 | `reaped` | Proven groups stopped or already exited, ports confirmed bindable, exact leases released, manifest finalized `cleanup: "complete"` with a recovery record. |
 | `needs_human` | Any identity, group, port, lease, or manifest uncertainty. Evidence is preserved; executor-detected failures leave `cleanup: "failed"` when the recovery record can be written. `start`/`resume` fail closed while the candidate remains unsafe. |
 | `skipped` | No local action: already complete/reaped, foreign-host owner, or owner still alive. |
+
+A `safe_to_reap` plan also requires exact lease ownership: the lease PID must
+equal `manifest.owner.pid`. A lease owned by a different PID is `needs_human`
+whether that PID is alive or dead, and the process group, lease, and manifest
+are preserved.
 
 `status` is read-only and only exposes recovery records already persisted in
 runtime manifests. It never scans, signals, releases, or rewrites.
@@ -487,41 +505,66 @@ and remaining gaps are documented in
 - **Logs are append-only.** No rotation or size cap; the manifest normally
   stores paths and readiness probe history, while failure messages may embed a
   bounded log tail.
-- **PID reuse.** A lease owner is considered live while its pid exists; pid
-  reuse can delay reclamation of a dead owner's lease. Orphan recovery compares
-  the exact persisted `pid`/`pgid`/OS start identity and reports `needs_human`
-  on a mismatch rather than signalling the reused PID.
+- **PID reuse and exact lease ownership.** A lease owner is considered live
+  while its pid exists; pid reuse can delay reclamation of a dead owner's lease.
+  Orphan recovery requires `lease.pid === manifest.owner.pid` and compares the
+  exact persisted `pid`/`pgid`/OS start identity, reporting `needs_human` on a
+  mismatch rather than signalling the reused PID. A lease owned by a different
+  dead PID is also `needs_human`.
 - **No automatic merge** to any branch and no automatic push.
 - The shell Verifier does not populate `artifactHash`; it is available only to
   direct `RuntimeManager` callers that pass one.
 
 ## Verification
 
-Measured on 2026-10-27 in this worktree:
+Measured on 2026-10-27 in this worktree (macOS):
 
 ```text
 npm run build   → pass
-npm test        → 156 tests, 156 pass
+npm test        → 164/164 pass, five consecutive runs
 ```
 
-Runtime and recovery-focused suites (70 tests across 9 files):
+Each of the five runs was a separate `npm test` process, run sequentially in
+this worktree. Test-runner durations were 8.44 s, 8.45 s, 8.17 s, 8.29 s, and
+8.16 s; no flakes were observed. This is local evidence, not a long-term flake
+rate or CI claim.
+
+Runtime and recovery-focused suites (78 tests across 12 files):
 
 ```text
-tests/runtime-ports.test.ts               10
-tests/runtime-manager.test.ts              8
-tests/runtime-verifier.test.ts             5
-tests/contract-runtime.test.ts            10
-tests/runtime-manager-identity.test.ts     5
-tests/runtime-process.test.ts              8
-tests/runtime-reaper-plan.test.ts          9
-tests/runtime-reaper.test.ts              10
-tests/supervisor-runtime-reaper.test.ts    5
+tests/contract-runtime.test.ts                     10
+tests/runtime-ports.test.ts                        10
+tests/runtime-manager.test.ts                       8
+tests/runtime-manager-identity.test.ts              5
+tests/runtime-process.test.ts                       8
+tests/runtime-verifier.test.ts                      5
+tests/runtime-owner-lease-safety.test.ts            3
+tests/runtime-recovery-record.test.ts               3
+tests/runtime-reaper-plan.test.ts                   9
+tests/runtime-reaper.test.ts                       10
+tests/supervisor-runtime-reaper.test.ts             5
+tests/supervisor-runtime-recovery-record.test.ts    2
 ```
+
+Each of those files also passed when run alone once during this measurement.
+
+The six runtime test files that start real processes or bind real ports take
+static, disjoint port pools from `tests/test-port-ranges.ts` (22000–22599, 100
+ports per file); the shell-verifier tests keep 21400–21499 and 21500–21599. The
+helper asserts overlap/inversion at import time and throws on pool exhaustion
+when a range is taken; every allocation still goes through the real
+`PortAllocator` probe/retry path inside the assigned pool.
+This only prevents overlaps between test files in this repository; it is not a
+production port registry, cross-run coordinator, or cross-repository claim.
 
 Process-level coverage includes a real detached RuntimeManager service whose
 owner is `SIGKILL`ed, `SIGTERM` → `SIGKILL` escalation, leader-dead groups,
-foreign port listeners, concurrent reaper serialization, and supervisor
-`reap`/`start`/`resume` run in separate child processes.
+foreign port listeners, concurrent reaper serialization, supervisor
+`reap`/`start`/`resume` run in separate child processes, exact lease-owner
+correlation (equal dead owner safe; live or dead third-party owner
+`needs_human` with evidence preserved), and `runtimeId`-bearing recovery
+records for reaped, skipped, and needs_human buckets, including legacy records
+without an id.
 
 Earlier RuntimeManager v0 drills (2026-10-27, before the reaper iteration):
 
@@ -534,6 +577,10 @@ Earlier RuntimeManager v0 drills (2026-10-27, before the reaper iteration):
   scratch Git repository. Its verifier used leased port `19000`, the service
   exited with `SIGTERM`, `cleanup` was `complete`, and the Worker changed only
   `runtime-smoke.txt`.
+
+A byte scan of `src/` found no NUL bytes, including `src/supervisor/cli.ts`;
+the supervisor recovery-record test also asserts its report output contains no
+NUL delimiter.
 
 ## Related documents
 
