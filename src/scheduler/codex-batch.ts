@@ -3,6 +3,7 @@
  * Ready-wave runs in parallel; each task has its own worktree + verifier cwd.
  */
 import {
+  appendFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -17,7 +18,11 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
 import { createClaudeAdapter } from "../agents/claude.js";
 import { createCodexAdapter } from "../agents/codex.js";
-import type { AgentAdapter } from "../agents/types.js";
+import {
+  isWorkerProgressEvent,
+  type AgentAdapter,
+  type WorkerProgressEvent,
+} from "../agents/types.js";
 import {
   createMockVerifier,
   createShellVerifier,
@@ -93,6 +98,75 @@ export interface CodexBatchResult {
   };
   /** Final checkpoint, when the batch ran with `runManifest`. */
   manifest?: RunManifest;
+}
+
+// ---------------------------------------------------------------------------
+// Worker progress events
+// ---------------------------------------------------------------------------
+
+const SAFE_EVENT_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/** `<repo>/.cliyard/worker-events/<runId>` — advisory progress, not authority. */
+export function workerEventsDir(repoRoot: string, runId: string): string {
+  return join(resolve(repoRoot), ".cliyard", "worker-events", runId);
+}
+
+export function workerEventLogPath(
+  repoRoot: string,
+  runId: string,
+  taskId: string,
+): string {
+  return join(workerEventsDir(repoRoot, runId), `${taskId}.jsonl`);
+}
+
+/**
+ * Append one complete JSONL record immediately, before any RunManifest
+ * checkpoint. Progress is advisory: an unwritable path or malformed event is
+ * ignored so it can never change a task verdict or run status.
+ */
+export function appendWorkerProgressEvent(
+  repoRoot: string,
+  runId: string,
+  event: WorkerProgressEvent,
+): void {
+  if (
+    !SAFE_EVENT_SEGMENT.test(runId) ||
+    !SAFE_EVENT_SEGMENT.test(event.taskId) ||
+    !isWorkerProgressEvent(event)
+  ) {
+    return;
+  }
+  const bounded: WorkerProgressEvent = {
+    version: 1,
+    at: event.at,
+    source: clipEventText(event.source, 64),
+    taskId: event.taskId,
+    sessionId: clipEventText(event.sessionId, 128),
+    type: event.type,
+    phase: event.phase,
+    message: clipEventText(event.message, 500),
+    ...(event.detail === undefined
+      ? {}
+      : { detail: clipEventText(event.detail, 1_000) }),
+  };
+  try {
+    mkdirSync(workerEventsDir(repoRoot, runId), {
+      recursive: true,
+      mode: 0o700,
+    });
+    appendFileSync(
+      workerEventLogPath(repoRoot, runId, event.taskId),
+      `${JSON.stringify(bounded)}\n`,
+      "utf8",
+    );
+  } catch {
+    /* progress is best-effort; never fail the task */
+  }
+}
+
+function clipEventText(value: string, max: number): string {
+  if (value.length <= max) return value;
+  return `${value.slice(0, max - 1)}…`;
 }
 
 // ---------------------------------------------------------------------------
@@ -663,6 +737,18 @@ export async function runCodexBatch(
             verifier,
             ledgerPath,
             verbose: opts.verbose,
+            // Only a manifest-backed Supervisor run has a run-scoped progress
+            // log. The event is appended during dispatch, not at checkpoint.
+            ...(requestedManifest
+              ? {
+                  onProgress: (event: WorkerProgressEvent) =>
+                    appendWorkerProgressEvent(
+                      repoRoot,
+                      requestedManifest.runId,
+                      event,
+                    ),
+                }
+              : {}),
           });
         }),
       );
