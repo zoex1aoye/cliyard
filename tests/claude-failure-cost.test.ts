@@ -528,6 +528,121 @@ console.log(JSON.stringify(${JSON.stringify({
   }
 });
 
+test("Claude classifies error_max_budget_usd as budget exhaustion with the subtype code", async () => {
+  const f = fixture(`#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(__filename + ".attempts", "attempt\\n");
+console.log(JSON.stringify({
+  type: "result",
+  subtype: "error_max_budget_usd",
+  is_error: true,
+  result: "Claude AI usage limit reached for this session",
+  total_cost_usd: 5
+}));
+`);
+  try {
+    const result = await runClaude(f, { maxBudgetUsd: 5 });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.failure?.category, "budget_exhausted");
+    assert.equal(result.failure?.stage, "provider");
+    assert.equal(result.failure?.code, "error_max_budget_usd");
+    assert.equal(result.failure?.retryableHint, false);
+    assert.match(result.failure?.message ?? "", /usage limit/);
+    // The subtype is observational; it cannot introduce a new retry.
+    assert.equal(
+      readFileSync(`${f.binary}.attempts`, "utf8").trim().split("\n").length,
+      1,
+    );
+    assert.equal(result.cost?.state, "cli-estimated");
+    assert.equal(result.cost?.amount, 5);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("Claude wall-clock timeout outranks a budget subtype", async () => {
+  // A shell fixture emits the result before the wall-clock timeout fires, so
+  // the subtype is definitely parsed when classification runs. Keep generous
+  // headroom between spawn and the timeout: under a loaded test runner the
+  // fixture must get a chance to write its result record.
+  const f = fixture(`#!/bin/sh
+printf '%s\\n' '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"result":"Claude AI usage limit reached"}'
+exec sleep 10
+`);
+  try {
+    const result = await runClaude(f, { timeoutMs: 3000 });
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.finalText, "Claude AI usage limit reached");
+    assert.equal(result.failure?.category, "timeout");
+    assert.equal(result.failure?.stage, "worker");
+    assert.equal(result.failure?.code, "timeout");
+    // The provider text stays bounded in the message; timeout is carried by
+    // the category and code.
+    assert.match(result.failure?.message ?? "", /usage limit/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("Claude preserves an unknown subtype as the failure code without a new category", async () => {
+  const f = fixture(
+    claudeResult({
+      type: "result",
+      subtype: "error_max_turns",
+      is_error: true,
+      result: "stopped after the maximum number of turns",
+    }),
+  );
+  try {
+    const result = await runClaude(f);
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.failure?.category, "unknown");
+    assert.equal(result.failure?.stage, "provider");
+    assert.equal(result.failure?.code, "error_max_turns");
+    assert.match(result.failure?.message ?? "", /maximum number of turns/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("Claude bounds and redacts a result subtype before using it as a code", async () => {
+  const long = fixture(
+    claudeResult({
+      type: "result",
+      subtype: `error_custom_${"x".repeat(200)}`,
+      is_error: true,
+      result: "provider error",
+    }),
+  );
+  try {
+    const result = await runClaude(long);
+    assert.ok(result.failure?.code);
+    assert.ok(result.failure.code.length <= 64);
+  } finally {
+    long.cleanup();
+  }
+
+  const secret = fixture(
+    claudeResult({
+      type: "result",
+      subtype: "error_custom_sk-live-SUBSECRET123456789012345",
+      is_error: true,
+      result: "provider error",
+    }),
+  );
+  try {
+    const result = await runClaude(secret);
+    assert.equal(
+      JSON.stringify(result.failure).includes("SUBSECRET"),
+      false,
+    );
+    assert.ok(result.failure?.code);
+    assert.ok(result.failure.code.length <= 64);
+  } finally {
+    secret.cleanup();
+  }
+});
+
 test("Claude reports a non-zero provider process as worker_process_exit", async () => {
   const f = fixture(`#!/bin/sh
 echo "fatal worker error" >&2

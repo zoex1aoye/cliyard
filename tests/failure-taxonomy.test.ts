@@ -203,6 +203,82 @@ test("classification follows the design priority", () => {
   }
 });
 
+test("provider result subtypes classify budget and preserve unknown codes", () => {
+  const budget = createFailureRecord({
+    subtype: "error_max_budget_usd",
+    exitCode: 1,
+  });
+  assert.equal(budget.category, "budget_exhausted");
+  assert.equal(budget.stage, "provider");
+  assert.equal(budget.code, "error_max_budget_usd");
+  assert.equal(budget.retryableHint, false);
+
+  // An explicit wall-clock timeout outranks the provider subtype, including
+  // in the record code.
+  for (const signals of [
+    { subtype: "error_max_budget_usd", timedOut: true },
+    { subtype: "error_max_budget_usd", exitCode: 124 },
+    {
+      subtype: "error_max_budget_usd",
+      exitCode: 1,
+      text: "provider operation timed out",
+    },
+  ] satisfies FailureSignals[]) {
+    const record = createFailureRecord(signals);
+    assert.equal(record.category, "timeout", JSON.stringify(signals));
+    assert.equal(record.code, "timeout", JSON.stringify(signals));
+  }
+
+  // Unknown subtypes stay codes; they never invent a category.
+  const processExit = createFailureRecord({
+    subtype: "error_max_turns",
+    exitCode: 1,
+    text: "stopped after the configured turn limit",
+  });
+  assert.equal(processExit.category, "worker_process_exit");
+  assert.equal(processExit.stage, "worker");
+  assert.equal(processExit.code, "error_max_turns");
+  assert.ok(FAILURE_CATEGORIES.includes(processExit.category));
+
+  const providerError = createFailureRecord({
+    subtype: "error_during_execution",
+    providerError: true,
+  });
+  assert.equal(providerError.category, "unknown");
+  assert.equal(providerError.stage, "provider");
+  assert.equal(providerError.code, "error_during_execution");
+
+  // The success marker is not a failure code, and explicit codes still win.
+  assert.equal(
+    createFailureRecord({ subtype: "success", exitCode: 1 }).code,
+    "exit_1",
+  );
+  assert.equal(
+    createFailureRecord({
+      subtype: "error_max_turns",
+      exitCode: 1,
+      code: "explicit_code",
+    }).code,
+    "explicit_code",
+  );
+
+  // Only a bounded, credential-free subtype may reach the code field.
+  const longCode = createFailureRecord({
+    subtype: `error_custom_${"x".repeat(200)}`,
+  }).code;
+  assert.ok(longCode);
+  assert.ok(longCode.length <= 64);
+  const redacted = createFailureRecord({
+    subtype: "error_custom_sk-live-SECRET123456789012345",
+  });
+  assert.ok(redacted.code);
+  assert.equal(redacted.code.includes("SECRET"), false);
+  assert.equal(
+    createFailureRecord({ subtype: 42 as unknown as string }).code,
+    undefined,
+  );
+});
+
 test("failure records are bounded and credential-free", () => {
   const observedAt = "2026-10-27T10:00:00.000Z";
   const secretTexts: Array<[string, string]> = [
@@ -692,6 +768,148 @@ test("provider-reported cost stays authoritative only when the amount is complet
   assert.equal(incomplete.state, "provider-reported");
   assert.equal(incomplete.authoritative, false);
   assert.ok(incomplete.missing.includes("cost.amount"));
+});
+
+test("provider observations require currency and authoritative totals require complete provenance", () => {
+  const providerObservation = {
+    sessionId: "provider",
+    state: "provider-reported",
+    source: "provider",
+    currency: "USD",
+    amount: 2,
+    usage: FULL_USAGE,
+  };
+  assert.ok(parseCostObservation(providerObservation));
+  assert.equal(
+    parseCostObservation({ ...providerObservation, currency: null }),
+    null,
+  );
+  assert.equal(
+    parseCostObservation({ ...providerObservation, currency: undefined }),
+    null,
+  );
+
+  const authoritative = {
+    version: 1,
+    state: "provider-reported",
+    source: "provider",
+    authoritative: true,
+    currency: "USD",
+    amount: 2,
+    usage: null,
+    guardBudgetUsd: null,
+    observations: [providerObservation],
+    missing: ["cost.usage"],
+  };
+  const parsed = parseCostTruth(authoritative);
+  assert.ok(parsed);
+  assert.equal(parsed.authoritative, true);
+  assert.equal(parsed.currency, "USD");
+
+  // Empty observations are allowed for an authoritative provider total.
+  assert.ok(parseCostTruth({ ...authoritative, observations: [] }));
+
+  const cliObservation = {
+    sessionId: "cli",
+    state: "cli-estimated",
+    source: "cli",
+    currency: "USD",
+    amount: 1,
+    usage: null,
+  };
+  const usageOnlyObservation = {
+    sessionId: "usage",
+    state: "usage-only",
+    source: "none",
+    currency: null,
+    amount: null,
+    usage: FULL_USAGE,
+  };
+  const invalid = [
+    { ...authoritative, source: "cli" },
+    { ...authoritative, amount: null },
+    { ...authoritative, currency: null },
+    { ...authoritative, missing: ["cost.amount"] },
+    { ...authoritative, missing: ["cost.currency"] },
+    { ...authoritative, observations: [cliObservation] },
+    { ...authoritative, observations: [usageOnlyObservation] },
+    { ...authoritative, observations: [providerObservation, cliObservation] },
+    // A provider observation without currency is invalid even when the
+    // aggregate carries a currency.
+    {
+      ...authoritative,
+      observations: [
+        { ...providerObservation, currency: null },
+      ],
+    },
+  ];
+  for (const value of invalid) {
+    assert.equal(parseCostTruth(value), null, JSON.stringify(value));
+  }
+
+  // A non-authoritative provider total may still report a missing currency,
+  // but it can never become authoritative.
+  const partialProvider = {
+    ...authoritative,
+    authoritative: false,
+    currency: null,
+    observations: [],
+    missing: ["cost.currency", "cost.usage"],
+  };
+  assert.ok(parseCostTruth(partialProvider));
+  assert.equal(
+    parseCostTruth({ ...partialProvider, authoritative: true }),
+    null,
+  );
+
+  // Valid CLI estimates with unknown currency remain parseable and
+  // non-authoritative.
+  const cliUnknownCurrency = {
+    version: 1,
+    state: "cli-estimated",
+    source: "cli",
+    authoritative: false,
+    currency: null,
+    amount: 1,
+    usage: FULL_USAGE,
+    guardBudgetUsd: null,
+    observations: [
+      {
+        sessionId: "cli",
+        state: "cli-estimated",
+        source: "cli",
+        currency: null,
+        amount: 1,
+        usage: FULL_USAGE,
+      },
+    ],
+    missing: ["cost.currency"],
+  };
+  const parsedCli = parseCostTruth(cliUnknownCurrency);
+  assert.ok(parsedCli);
+  assert.equal(parsedCli.authoritative, false);
+  assert.equal(parsedCli.currency, null);
+  assert.equal(
+    parseCostTruth({ ...cliUnknownCurrency, authoritative: true }),
+    null,
+  );
+
+  // Creation fails closed to token-only truth when a provider amount has no
+  // currency instead of emitting an observation the parser would reject.
+  const downgraded = createCostObservation({
+    sessionId: "provider-no-currency",
+    amount: 2,
+    usage: FULL_USAGE,
+    source: "provider",
+  });
+  assert.equal(downgraded.state, "usage-only");
+  assert.equal(downgraded.source, "none");
+  assert.equal(downgraded.amount, null);
+  assert.deepEqual(downgraded.usage, FULL_USAGE);
+  const downgradedTruth = createCostTruth({ observations: [downgraded] });
+  assert.equal(downgradedTruth.state, "usage-only");
+  assert.equal(downgradedTruth.authoritative, false);
+  assert.equal(downgradedTruth.amount, null);
 });
 
 test("cost truth parser fails closed and drops unknown fields", () => {
