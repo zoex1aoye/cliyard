@@ -1,0 +1,74 @@
+{
+  "planId": "attempt-continuity-v0",
+  "tasks": [
+    {
+      "taskId": "attempt-continuity",
+      "goal": "Implement durable rejected-attempt reuse for Supervisor runs. Add optional RunTaskState fields attemptWorktree, attemptBranch, attemptBaseCommit, attemptStartedAt and attemptRejectedAt with backward-compatible validation. When runCodexBatch receives a runManifest, checkpoint the exact worktree/branch/base before starting the worker. Retain a rejected dirty worktree even without --keep-worktrees; retain its attempt fields on rejection; clear them on acceptance. Add CodexBatchOptions reuseAttempts. On supervisor resume --retry-rejected, reuse a valid rejected attempt by default, accept --reuse-attempt as the explicit default assertion, and add --fresh-attempt to force a new worktree; reject conflicting flags. Fail closed on an invalid recorded attempt unless fresh was requested. Validate the path is under <repo>/.cliyard/worktrees, is a registered git worktree, branch matches, HEAD equals the recorded base, and attemptRejectedAt is present. Expose reusable attempts in supervisor status JSON and human output. Add an end-to-end focused test proving a fake worker writes a draft and exits 1, its worktree survives, default resume reuses the same path and sees the draft, fresh retry gets a different path, and tampered metadata fails closed. Do not change progress telemetry or runtime drill files.",
+      "nonGoals": [
+        "No concurrent attach to an interrupted active worker",
+        "No provider-session resume",
+        "No daemon or periodic scheduler",
+        "No worktree garbage collector",
+        "No automatic merge to main"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "design/attempt-continuity-progress-v0.md",
+        "docs/SUPERVISOR_V0.md",
+        "src/supervisor/types.ts",
+        "src/supervisor/store.ts",
+        "src/supervisor/cli.ts",
+        "src/scheduler/codex-batch.ts",
+        "src/workspace/worktree.ts",
+        "tests/supervisor-resume.test.ts",
+        "tests/supervisor-cli.test.ts",
+        "tests/supervisor-store.test.ts"
+      ],
+      "writePaths": [
+        "src/supervisor/types.ts",
+        "src/supervisor/store.ts",
+        "src/supervisor/cli.ts",
+        "src/scheduler/codex-batch.ts",
+        "tests/supervisor-attempt-reuse.test.ts"
+      ],
+      "verifyCommands": [
+        "npx tsx --test tests/supervisor-attempt-reuse.test.ts",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "drill-abnormal-recovery",
+      "goal": "Close the runtime-drill abnormal-child cleanup gap. When a drill child times out or exits abnormally after starting services, terminate the child with SIGTERM then a bounded SIGKILL escalation, wait until it is gone, and run the existing exact orphan executor against that scenario's scratch control root. Persist an abnormalRecovery section in runtime-failure-drills.json and re-run the normal manifest/log/process/port checks after recovery. Fail the drill if the executor reports needs_human or any service/port remains. Never signal an unproven service group directly. Add a test-only environment hook that makes a child hang after readiness, use a short child timeout in a focused test, and prove the child was killed, recovery completed, cleanup is complete, the service process/group is gone, the port is free, and the failed child cannot be reported as accepted. Keep normal and timeout paths distinct and documented in code.",
+      "nonGoals": [
+        "No change to global reaper ownership rules",
+        "No cross-host recovery",
+        "No production runtime-drill timeout flag",
+        "No daemon or periodic cleanup"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "design/attempt-continuity-progress-v0.md",
+        "docs/RUNTIME_MANAGER.md",
+        "docs/RUNTIME_ORPHAN_RECOVERY.md",
+        "src/runtime/failure-drills.ts",
+        "src/runtime/failure-drill-child.ts",
+        "src/runtime/reaper-execute.ts",
+        "src/runtime/reaper.ts",
+        "tests/runtime-failure-drills.test.ts"
+      ],
+      "writePaths": [
+        "src/runtime/failure-drills.ts",
+        "src/runtime/failure-drill-child.ts",
+        "tests/runtime-failure-drills.test.ts"
+      ],
+      "verifyCommands": [
+        "npx tsx --test tests/runtime-failure-drills.test.ts",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
