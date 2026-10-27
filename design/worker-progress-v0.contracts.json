@@ -38,7 +38,7 @@
         "tests/supervisor-worker-progress.test.ts"
       ],
       "sharedResources": [],
-      "baseCommit": "2eccd3a2f07e68f1ac7904ef9b31e7a92fe768fa",
+      "baseCommit": "d4ba56f3d3752a6ead6c61a29e251a7130f52b0d",
       "verifyCommands": [
         "npx tsx --test tests/claude-progress.test.ts tests/supervisor-worker-progress.test.ts",
         "npm test",
@@ -86,7 +86,7 @@
         "docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md"
       ],
       "sharedResources": [],
-      "baseCommit": "2eccd3a2f07e68f1ac7904ef9b31e7a92fe768fa",
+      "baseCommit": "d4ba56f3d3752a6ead6c61a29e251a7130f52b0d",
       "verifyCommands": [
         "npm test",
         "npm run build",
