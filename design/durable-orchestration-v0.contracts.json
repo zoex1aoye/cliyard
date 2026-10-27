@@ -38,7 +38,7 @@
         "tests/orchestration-queue.test.ts"
       ],
       "sharedResources": [],
-      "baseCommit": "f82b3e3fcaee486e4300d014cd4e778a8e7c3e97",
+      "baseCommit": "eecc96536f034ff02e0eb1b8412798d8430efdec",
       "verifyCommands": [
         "npx tsx --test tests/orchestration-queue.test.ts",
         "npm test",
@@ -79,7 +79,7 @@
         "docs/evidence/ORCHESTRATION_QUEUE.md"
       ],
       "sharedResources": [],
-      "baseCommit": "f82b3e3fcaee486e4300d014cd4e778a8e7c3e97",
+      "baseCommit": "eecc96536f034ff02e0eb1b8412798d8430efdec",
       "verifyCommands": [
         "npm test",
         "npm run build",
