@@ -28,6 +28,7 @@ import type {
   RuntimeRecoveryRecord,
 } from "../runtime/types.js";
 import {
+  listReusableAttempts,
   runCodexBatch,
   type CodexBatchOptions,
   type CodexBatchResult,
@@ -52,6 +53,7 @@ import {
   type SupervisorLockInspection,
 } from "./store.js";
 import type {
+  ReusableAttempt,
   RunManifest,
   RunOwner,
   RunStatus,
@@ -112,6 +114,8 @@ export interface SupervisorStatus {
   /** Timestamp of the last manifest checkpoint write. */
   lastCheckpoint: string;
   lastAccepted: RunTaskState | null;
+  /** Rejected attempts whose recorded worktree still validates for reuse. */
+  reusableAttempts: ReusableAttempt[];
   /** Recovery evidence persisted by earlier reaper runs; never reconciled here. */
   runtimeRecovery: SupervisorRuntimeRecovery[];
 }
@@ -203,6 +207,8 @@ async function startCommand(
     options,
     log,
     resumed: false,
+    // A new run never has a draft; always start a clean worktree.
+    reuseAttempts: false,
   });
 }
 
@@ -215,6 +221,14 @@ async function resumeCommand(
   options: SupervisorCliOptions,
   log: (line: string) => void,
 ): Promise<number> {
+  const reuseAttempt = has("--reuse-attempt", rest);
+  const freshAttempt = has("--fresh-attempt", rest);
+  if (reuseAttempt && freshAttempt) {
+    throw new Error(
+      "supervisor resume: --reuse-attempt and --fresh-attempt are mutually exclusive",
+    );
+  }
+
   const repoRoot = repoFrom(rest);
   const manifest = loadRunManifest(repoRoot, arg("--run", rest));
 
@@ -257,8 +271,10 @@ async function resumeCommand(
       current.status = "running";
       current.owner = { pid: process.pid, host: hostname() };
       for (const task of Object.values(current.tasks)) {
-        if (!task.accepted) {
+        if (!task.accepted && task.status !== "rejected") {
           // A previous owner may have died mid-task; rebuild it as ready.
+          // Rejected attempts keep their status until the batch decides
+          // whether to reuse or discard the recorded draft.
           task.status = "ready";
           delete task.reason;
         }
@@ -277,6 +293,9 @@ async function resumeCommand(
     options,
     log,
     resumed: true,
+    // Reuse is the default for rejected attempts. --fresh-attempt is the
+    // explicit recovery path for a missing, invalid or unwanted draft.
+    reuseAttempts: !freshAttempt,
   });
 }
 
@@ -338,7 +357,7 @@ async function statusCommand(
   const repoRoot = repoFrom(rest);
   const inspection = inspectRun(repoRoot, arg("--run", rest));
   const lock = inspectSupervisorLock(repoRoot);
-  const status = buildStatus(repoRoot, inspection, lock);
+  const status = await buildStatus(repoRoot, inspection, lock);
 
   if (has("--json", rest)) {
     log(JSON.stringify(status, null, 2));
@@ -348,11 +367,11 @@ async function statusCommand(
   return 0;
 }
 
-function buildStatus(
+async function buildStatus(
   repoRoot: string,
   inspection: RunInspection,
   lock: SupervisorLockInspection,
-): SupervisorStatus {
+): Promise<SupervisorStatus> {
   const manifest = inspection.manifest;
   const tasks = Object.values(manifest.tasks);
   const counts = taskCounts(manifest);
@@ -360,6 +379,11 @@ function buildStatus(
   const branchHead = tryResolveCommit(
     repoRoot,
     `refs/heads/${manifest.integrationBranch}`,
+  );
+  // Status is read-only. Git/FS failures only hide reuse metadata; they must
+  // never make the run unreadable or mutate state.
+  const reusableAttempts = await listReusableAttempts(repoRoot, manifest).catch(
+    () => [] as ReusableAttempt[],
   );
 
   return {
@@ -391,6 +415,7 @@ function buildStatus(
     },
     lastCheckpoint: manifest.updatedAt,
     lastAccepted: lastAccepted ? { ...lastAccepted } : null,
+    reusableAttempts,
     // Read-only: expose evidence written by previous reaper runs; status never
     // plans, signals, releases a lease, or rewrites a manifest.
     runtimeRecovery: readRuntimeRecoveryRecords(repoRoot),
@@ -448,6 +473,17 @@ function printStatus(
       ? ` @ ${status.lastAccepted.resultCommit}`
       : "";
     log(`last accepted: ${status.lastAccepted.taskId}${commit}`);
+  }
+  if (status.reusableAttempts.length === 0) {
+    log("reusable attempts: none");
+  } else {
+    for (const attempt of status.reusableAttempts) {
+      log(
+        `reusable attempt: ${attempt.taskId} ${attempt.worktree} ` +
+          `(${attempt.branch} @ ${attempt.baseCommit}; ` +
+          `rejected ${attempt.rejectedAt})`,
+      );
+    }
   }
   log(
     `contracts: ${status.contractsPath} (sha256 ${status.contractsHash})`,
@@ -808,6 +844,8 @@ interface ExecuteRunInput {
   options: SupervisorCliOptions;
   log: (line: string) => void;
   resumed: boolean;
+  /** Reuse validated rejected attempt worktrees instead of fresh ones. */
+  reuseAttempts: boolean;
 }
 
 async function executeRun(input: ExecuteRunInput): Promise<number> {
@@ -831,6 +869,7 @@ async function executeRun(input: ExecuteRunInput): Promise<number> {
       keepWorktrees: has("--keep-worktrees", rest),
       verbose: has("--verbose", rest),
       runManifest: manifest,
+      reuseAttempts: input.reuseAttempts,
       workerFactory: options.workerFactory,
     });
     const finalManifest =
@@ -1035,13 +1074,16 @@ Usage:
   cliyard supervisor status --repo <path> [--run id] [--json]
   cliyard supervisor resume --repo <path> [--run id] [--worker claude|codex]
                             [--model id] [--dry-run] [--keep-worktrees]
-                            [--retry-rejected] [--force] [--verbose]
+                            [--retry-rejected] [--reuse-attempt | --fresh-attempt]
+                            [--force] [--verbose]
   cliyard supervisor reap --repo <path> [--json]
   cliyard supervisor stop --repo <path> [--run id] [--force]
 
 Foreground only: start/resume hold .cliyard/supervisor.lock until exit.
 Resume rejects changed contracts, a moved base commit, or a missing
 integration branch, and never reruns accepted tasks.
+A rejected attempt keeps its dirty worktree. Resume reuses a valid recorded
+attempt by default; --fresh-attempt discards it for a clean worktree.
 Start/resume reap proven orphaned runtimes after acquiring the lock and fail
 closed when any runtime needs human review. Status only reads persisted
 recovery records; it never reconciles.`);

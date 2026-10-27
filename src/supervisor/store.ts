@@ -764,7 +764,19 @@ function parseRunManifest(raw: unknown, source: string): RunManifest {
         `${source}: task ${key}.accepted must be boolean`,
       );
     }
-    for (const optional of ["runId", "resultCommit", "reason"] as const) {
+    // Attempt-continuity fields are optional so manifests written before the
+    // feature (and active attempts without a rejection) still parse. Their
+    // semantics are validated at reuse time by the worker batch.
+    for (const optional of [
+      "runId",
+      "resultCommit",
+      "reason",
+      "attemptWorktree",
+      "attemptBranch",
+      "attemptBaseCommit",
+      "attemptStartedAt",
+      "attemptRejectedAt",
+    ] as const) {
       if (
         task[optional] !== undefined &&
         typeof task[optional] !== "string"
