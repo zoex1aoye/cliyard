@@ -14,7 +14,8 @@ North star: stop babysitting AI. **Master 壳 = DeepSeek Harness GUI**；**cliya
 **Harness boundaries and DSH replacement strategy:** [docs/HARNESS_BOUNDARIES.md](docs/HARNESS_BOUNDARIES.md).
 **Supervisor v0 operations:** [docs/SUPERVISOR_V0.md](docs/SUPERVISOR_V0.md) — durable foreground runs, recovery, limitations, safe self-hosting.
 **RuntimeManager v0:** [docs/RUNTIME_MANAGER.md](docs/RUNTIME_MANAGER.md) — finite local services, leased ports, runtime manifest/evidence, cleanup, limitations.
-**Next iteration:** [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md) — RuntimeManager v0 verification and runtime-contract drill.
+**Runtime orphan recovery:** [docs/RUNTIME_ORPHAN_RECOVERY.md](docs/RUNTIME_ORPHAN_RECOVERY.md) — exact-identity preflight, `supervisor reap`, start/resume reconciliation, evidence-preserving gaps.
+**Next iteration:** [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md) — process-level failure drills and incident-evidence review.
 
 ## What we want (ideal)
 
@@ -34,14 +35,15 @@ Human: requirements + prototype in DeepSeek Harness
 - **Codex worker spike (S2):** `npm run codex-batch -- … --dry-run` (real Codex without `--dry-run`)
 - **Claude Code + DeepSeek worker:** `claude-ds` + `npm run claude-batch`
 - **Continuous waves:** accepted work enters an integration branch before dependent tasks start
-- **Supervisor v0 (durable foreground):** `supervisor start/status/resume/stop`, atomic JSON RunManifest, integration-branch checkpoint, one-lock recovery; resume skips accepted tasks (no daemon, no SQLite)
+- **Supervisor v0 (durable foreground):** `supervisor start/status/resume/reap/stop`, atomic JSON RunManifest, integration-branch checkpoint, one-lock recovery; resume skips accepted tasks (no daemon, no SQLite)
 - **RuntimeManager v0 (single host):** finite verification services started from the exact task worktree, leased `127.0.0.1` ports, HTTP readiness, URL env injection into `verifyCommands`, runtime manifest + service logs, process-group cleanup; no daemon, SQLite, or browser evidence
+- **Runtime orphan recovery v0 (single host):** persisted owner/pid/pgid/OS start identity, read-only preflight, `supervisor reap`, automatic `start`/`resume` reconciliation, exact lease release after group exit; `needs_human` instead of heuristic kills. No daemon or cross-host kill
 - **Windows track:** `doctor` / `run` / `batch` via WSL (deferred for CodeBuddy E2E)
 
-Not yet: Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, Multica runtime, Supervisor daemon/background service, SQLite manifests, Playwright/axe/screenshot or a11y evidence, unlimited parallel runtimes.
+Not yet: Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, Multica runtime, Supervisor daemon/background service, daemon-based or periodic orphan cleanup, cross-host runtime recovery, automatic reaping of leader-dead process groups, SQLite manifests, Playwright/axe/screenshot or a11y evidence, unlimited parallel runtimes.
 
-Measured suite (2026-10-27): `npm run build` passes; `npm test` reports **119/119**
-(33 runtime-focused). The earlier 105-test estimate was not confirmed.
+Measured suite (2026-10-27): `npm run build` passes; `npm test` reports **156/156**
+(70 runtime/recovery-focused).
 
 ## Recommended layout
 
@@ -107,6 +109,9 @@ npm run dev -- supervisor start <contracts.json> --repo <scratch-repo> --worker 
 npm run dev -- supervisor status --repo <scratch-repo> --json
 npm run dev -- supervisor resume --repo <scratch-repo>   # after interruption
 npm run dev -- supervisor stop --repo <scratch-repo>     # cooperative SIGTERM
+npm run dev -- supervisor reap --repo <scratch-repo> --json  # orphan runtime recovery
+# start/resume also reconcile proven orphan runtimes automatically and fail
+# closed when a runtime needs human review.
 # After `npm run build`: node dist/cli.js supervisor …
 ```
 
@@ -122,10 +127,14 @@ Supervisor details: [docs/SUPERVISOR_V0.md](docs/SUPERVISOR_V0.md) — foregroun
 
 Runtime evidence: `<target>/.cliyard/runtime/<runtimeId>/runtime-manifest.json`
 plus `<service>.log` and `data/<service>/`; port leases live in
-`<target>/.cliyard/runtime/port-leases.json` (all gitignored). Runtime services
+`<target>/.cliyard/runtime/port-leases.json`; orphan reconciliation serializes
+through `<target>/.cliyard/runtime/reaper.lock` (all gitignored). A completed
+recovery writes a `recovery` record into the runtime manifest. Runtime services
 are finite and single-host; details and limitations:
-[docs/RUNTIME_MANAGER.md](docs/RUNTIME_MANAGER.md). No daemon, SQLite,
-Playwright/axe, screenshot, or a11y evidence is produced.
+[docs/RUNTIME_MANAGER.md](docs/RUNTIME_MANAGER.md) and
+[docs/RUNTIME_ORPHAN_RECOVERY.md](docs/RUNTIME_ORPHAN_RECOVERY.md). No daemon,
+SQLite, Playwright/axe, screenshot, or a11y evidence is produced; orphan
+recovery is never cross-host.
 Glass 实机：[docs/GLASS_TRIAL.md](docs/GLASS_TRIAL.md) · DSH 插件：[plugins/dsh-cliyard/README.md](plugins/dsh-cliyard/README.md).
 Claude + DeepSeek：[docs/CLAUDE_DEEPSEEK_WORKER.md](docs/CLAUDE_DEEPSEEK_WORKER.md).
 

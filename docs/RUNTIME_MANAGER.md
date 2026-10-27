@@ -6,6 +6,9 @@
 > This document describes the behavior that is actually implemented in
 > `src/runtime/types.ts`, `src/runtime/ports.ts`, `src/runtime/manager.ts`, and
 > `src/verification/verifier.ts`.
+>
+> Crash recovery for runtime services lives in a separate component:
+> [RUNTIME_ORPHAN_RECOVERY.md](RUNTIME_ORPHAN_RECOVERY.md).
 
 RuntimeManager moves service lifecycle and temporary-port ownership out of
 Workers and into the Verifier. A Worker may create a server entry point; it
@@ -24,6 +27,12 @@ Worker exits
 
 This is a single-host, single-repository facility. It is not a daemon, queue,
 cloud runtime, or browser-test runner.
+
+If the control process is hard-killed while services are running,
+RuntimeManager cannot run its cleanup. The detached group, stale lease, and
+unfinished manifest are reconciled by the separate orphan reaper, which is
+invoked explicitly or by a new supervisor `start`/`resume`; it never runs as a
+daemon. See [RUNTIME_ORPHAN_RECOVERY.md](RUNTIME_ORPHAN_RECOVERY.md).
 
 ## Quick start
 
@@ -277,6 +286,10 @@ prefix (the Supervisor passes its `runId`), sanitizes unsupported characters,
 and truncates to 128 characters. `attempt` is 1-based and increments per
 verification call, so a repair gets a new runtime directory.
 
+`<repoRoot>/.cliyard/runtime/port-leases.lock` guards lease-store mutations;
+`<repoRoot>/.cliyard/runtime/reaper.lock` exists only while orphan
+reconciliation is running.
+
 Manifest shape (version 1):
 
 ```jsonc
@@ -286,6 +299,7 @@ Manifest shape (version 1):
   "taskId": "task-web",
   "attempt": 1,
   "worktree": "/path/to/task-worktree",
+  "owner": { "pid": 12345, "host": "workstation" },
   // "artifactHash": "<sha256>",  // optional; the shell Verifier does not set it
   "services": [
     {
@@ -293,6 +307,12 @@ Manifest shape (version 1):
       "host": "127.0.0.1",
       "port": 19000,
       "pid": 1234,
+      "pgid": 1234,
+      "processIdentity": {
+        "pid": 1234,
+        "pgid": 1234,
+        "startedAt": "Mon Oct 27 10:00:00 2026"
+      },
       "url": "http://127.0.0.1:19000",
       "healthUrl": "http://127.0.0.1:19000/health",
       "logPath": ".../web.log",
@@ -310,9 +330,40 @@ Manifest shape (version 1):
   "startedAt": "ISO-8601",
   "stoppedAt": "ISO-8601",
   "cleanup": "complete",       // pending | running | complete | failed
-  "failureReason": "optional"
+  "failureReason": "optional",
+  "recovery": {                // optional; written only by the orphan reaper
+    "state": "reaped",         // reaped | needs_human | skipped
+    "reason": "...",
+    "at": "ISO-8601",
+    "reaperPid": 23456,
+    "reaperHost": "workstation",
+    "services": [
+      {
+        "name": "web",
+        "pgid": 1234,
+        "action": "terminated", // terminated | already-exited | preserved
+        "portReleased": true
+      }
+    ]
+  }
 }
 ```
+
+Recovery identity fields:
+
+- `owner.host` is `os.hostname()`, not the `127.0.0.1` bind host recorded on a
+  port lease. Manifests written before this field existed have no owner and
+  fail closed during orphan recovery.
+- `pid` and `pgid` are recorded immediately after spawn; POSIX services are
+  spawned detached, so the leader pid is the group id and the two must be
+  equal. `processIdentity` is captured at the same time from
+  `ps -p <pid> -o pid=,pgid=,lstart=` and persisted before readiness.
+- `processIdentity.startedAt` is the OS-reported start identity, not
+  `manifest.startedAt` or any wall-clock value. It is what distinguishes the
+  original process from a reused PID. The field is absent when identity capture
+  is unsupported (for example on Windows), and absence means unknown.
+- `recovery` is appended by the orphan reaper during reconciliation; it is not
+  written by the normal RuntimeManager path.
 
 The Verifier returns `VerifyResult.runtime` with `runtimeId`, `manifestPath`,
 and the manifest for in-process callers. The ledger stores the verification log
@@ -344,6 +395,42 @@ On startup failure, cleanup runs before the `RuntimeStartError` is surfaced.
 It attempts to stop every started group and release every allocated lease; if
 cleanup itself fails, that failure is appended to the surfaced error.
 
+`SIGKILL`, host death, and any `process.exit` path that bypasses the verifier's
+`finally` do not run this sequence. They can leave a detached group, a stale
+lease, and a manifest at `cleanup: "pending"`/`"running"`. Cleanup is not
+retried by a daemon; the orphan reaper is the recovery path.
+
+## Orphan recovery integration
+
+`RuntimeManager` records the `owner`, service `pid`/`pgid`, and exact
+`processIdentity` needed by orphan recovery. The destructive work is performed
+by a separate reaper and is never automatic in the background:
+
+```bash
+# Explicit reconciliation of every runtime manifest in the repository
+cliyard supervisor reap --repo <path> [--json]
+
+# start and resume reconcile proven orphans after acquiring the supervisor
+# lock and before creating a run or marking a run running
+cliyard supervisor start <contracts.json> --repo <path> --worker claude
+cliyard supervisor resume --repo <path> --worker claude
+```
+
+Reconciliation has three outcomes:
+
+| Outcome | Runtime effect |
+|---------|----------------|
+| `reaped` | Proven groups stopped or already exited, ports confirmed bindable, exact leases released, manifest finalized `cleanup: "complete"` with a recovery record. |
+| `needs_human` | Any identity, group, port, lease, or manifest uncertainty. Evidence is preserved; executor-detected failures leave `cleanup: "failed"` when the recovery record can be written. `start`/`resume` fail closed while the candidate remains unsafe. |
+| `skipped` | No local action: already complete/reaped, foreign-host owner, or owner still alive. |
+
+`status` is read-only and only exposes recovery records already persisted in
+runtime manifests. It never scans, signals, releases, or rewrites.
+
+The safety rule, persisted identity fields, crash windows, incident checklist,
+and remaining gaps are documented in
+[RUNTIME_ORPHAN_RECOVERY.md](RUNTIME_ORPHAN_RECOVERY.md).
+
 ## Integration behavior
 
 | Situation | Runtime started? | Verification result |
@@ -361,7 +448,17 @@ cleanup itself fails, that failure is appended to the surfaced error.
 ## Current limitations
 
 - **Single host / local repo only.** Port liveness uses local pids; do not share
-  the lease store over a network filesystem.
+  the lease store over a network filesystem. Orphan recovery is local-only too:
+  a foreign-host owner is `skipped`, never killed remotely.
+- **Crash cleanup requires reconciliation.** A hard kill or a bypassed
+  `finally` leaves the group, lease, and manifest behind; there is no daemon or
+  periodic retry. Run `supervisor reap` or the next `start`/`resume` to
+  reconcile it.
+- **Leader-dead groups need a human.** If the recorded leader exited but its
+  process group still has members, ownership cannot be proven; the reaper
+  reports `needs_human` and preserves the group and lease.
+- **No daemon-based cleanup.** Reconciliation is explicit or tied to
+  `start`/`resume`; nothing sweeps orphans while cliyard is idle.
 - **Finite services only.** Each acceptance attempt gets one runtime; all
   services are stopped at the end. There is no daemon, background service,
   queue, or cloud runtime.
@@ -384,12 +481,16 @@ cleanup itself fails, that failure is appended to the surfaced error.
 - **Fixed shutdown.** Only process-group `SIGTERM` → `SIGKILL` is supported; no
   per-service shutdown command.
 - **Windows differences.** Services are not spawned into a POSIX process group;
-  cleanup kills the direct child only, so grandchildren may survive.
+  cleanup kills the direct child only, so grandchildren may survive. Process
+  identity capture and group inspection are unsupported on Windows, so orphan
+  recovery cannot prove ownership and reports `needs_human` for candidates.
 - **Logs are append-only.** No rotation or size cap; the manifest normally
   stores paths and readiness probe history, while failure messages may embed a
   bounded log tail.
 - **PID reuse.** A lease owner is considered live while its pid exists; pid
-  reuse can delay reclamation of a dead owner's lease.
+  reuse can delay reclamation of a dead owner's lease. Orphan recovery compares
+  the exact persisted `pid`/`pgid`/OS start identity and reports `needs_human`
+  on a mismatch rather than signalling the reused PID.
 - **No automatic merge** to any branch and no automatic push.
 - The shell Verifier does not populate `artifactHash`; it is available only to
   direct `RuntimeManager` callers that pass one.
@@ -400,24 +501,29 @@ Measured on 2026-10-27 in this worktree:
 
 ```text
 npm run build   → pass
-npm test        → 119 tests, 119 pass
+npm test        → 156 tests, 156 pass
 ```
 
-Runtime-focused suites (33 tests):
+Runtime and recovery-focused suites (70 tests across 9 files):
 
 ```text
-tests/runtime-ports.test.ts      10
-tests/runtime-manager.test.ts     8
-tests/runtime-verifier.test.ts    5
-tests/contract-runtime.test.ts   10
+tests/runtime-ports.test.ts               10
+tests/runtime-manager.test.ts              8
+tests/runtime-verifier.test.ts             5
+tests/contract-runtime.test.ts            10
+tests/runtime-manager-identity.test.ts     5
+tests/runtime-process.test.ts              8
+tests/runtime-reaper-plan.test.ts          9
+tests/runtime-reaper.test.ts              10
+tests/supervisor-runtime-reaper.test.ts    5
 ```
 
-The measured suite size is **119**, not the earlier 105-test estimate. One
-initial full-suite run launched concurrently with `npm run build` reported
-118/119; two subsequent isolated full runs passed 119/119, and the runtime
-suites passed three consecutive repetitions.
+Process-level coverage includes a real detached RuntimeManager service whose
+owner is `SIGKILL`ed, `SIGTERM` → `SIGKILL` escalation, leader-dead groups,
+foreign port listeners, concurrent reaper serialization, and supervisor
+`reap`/`start`/`resume` run in separate child processes.
 
-Additional process-level drills on 2026-10-27:
+Earlier RuntimeManager v0 drills (2026-10-27, before the reaper iteration):
 
 - the checked-in example was accepted on leased port `21850`, produced
   `cleanup: "complete"`, and released the port;
@@ -432,6 +538,7 @@ Additional process-level drills on 2026-10-27:
 ## Related documents
 
 - Design: [design/runtime-manager-v0.md](../design/runtime-manager-v0.md)
+- Orphan recovery: [docs/RUNTIME_ORPHAN_RECOVERY.md](RUNTIME_ORPHAN_RECOVERY.md)
 - Supervisor integration: [docs/SUPERVISOR_V0.md](SUPERVISOR_V0.md)
 - Next iteration: [docs/NEXT_ITERATION.md](NEXT_ITERATION.md)
 - Example: [examples/runtime-verifier.contract.json](../examples/runtime-verifier.contract.json)
