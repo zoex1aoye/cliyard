@@ -14,12 +14,13 @@ North star: stop babysitting AI. **Master 壳 = DeepSeek Harness GUI**；**cliya
 **Harness boundaries and DSH replacement strategy:** [docs/HARNESS_BOUNDARIES.md](docs/HARNESS_BOUNDARIES.md).
 **Supervisor v0 operations:** [docs/SUPERVISOR_V0.md](docs/SUPERVISOR_V0.md) — durable foreground runs, recovery, limitations, safe self-hosting.
 **Foreground orchestration queue v0:** [docs/evidence/ORCHESTRATION_QUEUE.md](docs/evidence/ORCHESTRATION_QUEUE.md) — explicit-approval queue over frozen contracts, dependency-ordered sequential dispatch, blocked stop/continue, retry/resume, stale-running reconciliation and queue-lock evidence. No daemon; RunManifest remains task authority.
+**Plan-backed chained queue base v0:** [docs/evidence/PLAN_BACKED_CHAIN.md](docs/evidence/PLAN_BACKED_CHAIN.md) — `queue add-plan` snapshots an approved Plan, materializes queue-owned contracts at a pinned root HEAD or the completed upstream RunManifest `integrationHead`, and proves downstream worktree/integration ancestry in three real Claude Code + DeepSeek two-item chains. Fail-closed, idempotent, one linear dependency; no daemon.
 **RuntimeManager v0:** [docs/RUNTIME_MANAGER.md](docs/RUNTIME_MANAGER.md) — finite local services, leased ports, runtime manifest/evidence, cleanup, limitations.
 **Runtime orphan recovery:** [docs/RUNTIME_ORPHAN_RECOVERY.md](docs/RUNTIME_ORPHAN_RECOVERY.md) — exact-identity preflight, exact lease-owner PID, `runtimeId`-bearing recovery records, `supervisor reap`, start/resume reconciliation, evidence-preserving gaps.
 **Runtime failure drills:** [docs/evidence/RUNTIME_FAILURE_DRILLS.md](docs/evidence/RUNTIME_FAILURE_DRILLS.md) — three measured failure scenarios in independent child processes, report, leases, ports.
 **Attempt continuity, worker progress, abnormal drill recovery:** [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md) — measured rejected-attempt reuse, `--fresh-attempt`, live stream events, heartbeats, read-only status, and timed-out drill recovery.
 **Task Architect evidence:** [docs/evidence/TASK_ARCHITECT.md](docs/evidence/TASK_ARCHITECT.md) — measured read-only Plan production (fake-worker guards plus one real Claude Code + DeepSeek smoke), human review gate and limitations.
-**Next iteration:** [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md) — Task Architect v0 and the foreground orchestration queue are implemented; the next gap is a supervised foreground long-run controller/daemon decision after queue semantics are proven. Daemon, cross-host, browser evidence, SQLite, parallel admission and automatic main merge remain non-goals.
+**Next iteration:** [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md) — Task Architect v0, the foreground orchestration queue and the Plan-backed chained queue base are implemented; the next gap is a supervised foreground long-run controller/daemon decision after Plan-backed chain semantics are accepted. Daemon, cross-host, browser evidence, SQLite, parallel admission, multi-parent integration and automatic main merge remain non-goals.
 
 ## What we want (ideal)
 
@@ -41,21 +42,30 @@ Human: requirements + prototype in DeepSeek Harness
 - **Claude Code + DeepSeek worker:** `claude-ds` + `npm run claude-batch`
 - **Continuous waves:** accepted work enters an integration branch before dependent tasks start
 - **Supervisor v0 (durable foreground):** `supervisor start/status/resume/reap/stop`, atomic JSON RunManifest, integration-branch checkpoint, one-lock recovery; resume skips accepted tasks (no daemon, no SQLite)
-- **Foreground orchestration queue v0 (explicit approval):** `queue add/list/retry/cancel/run` over frozen contracts, with the contracts path and SHA-256 frozen at add. `run` dispatches ready items one at a time through the existing Supervisor, stops at the first blocked item by default, and with `--continue-on-blocked` keeps independent work moving while dependants become blocked. Blocked items retry explicitly (`start` when no run exists, otherwise `resume --retry-rejected`); a same-host stale queue lock is reclaimed and a `running` item with a recorded run id reconciles against its RunManifest. The queue never approves or rewrites contracts and never rewrites a RunManifest. Completed and cancelled items are monotonic. Sequential, same-host, foreground only.
+- **Foreground orchestration queue v0 (explicit approval):** `queue add/add-plan/list/retry/cancel/run` over frozen contracts or approved Plans. Contract-backed `add` freezes the contracts path and SHA-256 at add; `run` dispatches ready items one at a time through the existing Supervisor, stops at the first blocked item by default, and with `--continue-on-blocked` keeps independent work moving while dependants become blocked. Blocked items retry explicitly (`start` when no run exists, otherwise `resume --retry-rejected`); a same-host stale queue lock is reclaimed and a `running` item with a recorded run id reconciles against its RunManifest. The queue never approves or rewrites contracts and never rewrites a RunManifest. Completed and cancelled items are monotonic. Sequential, same-host, foreground only.
+- **Plan-backed chained queue base v0:** `queue add-plan <plan.json> --repo <path> --id <id> [--depends-on <id>]` snapshots an explicitly approved Plan (absolute path + SHA-256) and requires the Plan id to equal the queue id. A root item pins the repository HEAD captured at add; a dependent item waits for its one upstream to complete, then compiles the Plan deterministically at that RunManifest's `integrationHead` into a queue-owned artifact under `.cliyard/queue/materialized/` before any attempt increment or Supervisor start. Retry/resume re-verifies the recorded Plan hash, artifact bytes, base and upstream lineage; a changed Plan, artifact or upstream evidence blocks instead of being substituted. The downstream integration branch starts at the upstream head, so the upstream `integrationHead` is an ancestor of the downstream one. One linear dependency only; no automatic Plan generation/approval, no multi-parent integration/merge queue, no parallel dispatch or daemon.
 - **Attempt continuity + worker progress v0 (foreground):** a rejected task checkpoints its exact worktree, branch and base and keeps the dirty draft even without `--keep-worktrees`; default `resume --retry-rejected` reuses that draft, while `--fresh-attempt` deliberately starts a clean worktree. Claude `stream-json` events are appended to `.cliyard/worker-events/<runId>/<taskId>.jsonl` and shown read-only by `supervisor status`, with heartbeats during provider silence. Events are observational only; no conversation resume, daemon or SQLite
 - **RuntimeManager v0 (single host):** finite verification services started from the exact task worktree, leased `127.0.0.1` ports, HTTP readiness, URL env injection into `verifyCommands`, runtime manifest + service logs, process-group cleanup; no daemon, SQLite, or browser evidence
 - **Runtime orphan recovery v0 (single host):** persisted owner/pid/pgid/OS start identity, exact lease-owner PID correlation, read-only preflight, `supervisor reap`, automatic `start`/`resume` reconciliation, exact lease release after group exit, `runtimeId`-bearing recovery records; `needs_human` instead of heuristic kills. No daemon or cross-host kill
 - **Runtime failure drills v0:** `npm run runtime-drill` runs readiness-timeout, verify-failure and cleanup-failure in three independent child processes, writes a versioned JSON report plus per-scenario manifests/logs/leases, and verifies the service/port is clean afterward. A timed-out/abnormal child is terminated (SIGTERM → bounded SIGKILL) and its proven orphan runtime is reconciled by the exact reaper; the recovery is persisted in the report, while the abnormal scenario itself still reports failure. Diagnostic only — no daemon
 - **Windows track:** `doctor` / `run` / `batch` via WSL (deferred for CodeBuddy E2E)
 
-Not yet: **a supervised foreground long-run controller/daemon decision** (the next gap after the explicit foreground queue), Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, Multica runtime, Supervisor daemon/background service, daemon-based or periodic orphan cleanup, cross-host runtime recovery, automatic reaping of leader-dead process groups, cross-repository port coordination, SQLite manifests, Playwright/axe/screenshot or a11y evidence, unlimited parallel runtimes, and a resumed provider conversation (attempt reuse is worktree continuity only). The queue is explicit-approval, sequential, same-host and foreground; it adds no daemon, background scheduler, parallel admission, cross-host coordination or automatic `main` merge. Task Architect produces a human-reviewable Plan only; it does **not** freeze contracts or dispatch automatically. The completed Task Architect, queue, attempt-continuity/progress and failure-drill slices add none of the other items.
+Not yet: **a supervised foreground long-run controller/daemon decision** (the next gap after Plan-backed chain semantics are accepted), Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, Multica runtime, Supervisor daemon/background service, daemon-based or periodic orphan cleanup, cross-host runtime recovery, automatic reaping of leader-dead process groups, cross-repository port coordination, SQLite manifests, Playwright/axe/screenshot or a11y evidence, unlimited parallel runtimes, multi-parent integration or a merge queue, and a resumed provider conversation (attempt reuse is worktree continuity only). The queue is explicit-approval, sequential, same-host and foreground; it adds no daemon, background scheduler, parallel admission, cross-host coordination or automatic `main` merge. Plan-backed items deterministically compile contracts from an already-approved Plan; they do not generate or approve Plans, and v0 supports only one linear queue dependency. Task Architect produces a human-reviewable Plan only; it does **not** freeze contracts or dispatch automatically. The completed Task Architect, queue, Plan-backed chain, attempt-continuity/progress and failure-drill slices add none of the other items.
 
-Measured suite (2026-10-27, HEAD `20b9a64`): `npm run build` passes; the focused
-orchestration queue file is **13/13** (1892.0 ms), and `npm test` is **205/205**
-in one run (11022.6 ms). The full run includes the prior attempt-continuity,
-runtime/recovery and Task Architect groups plus the new queue tests; those
-other groups were not separately re-run this round. These are local macOS
-results, not a long-term flake-rate or CI claim. Evidence:
+Measured suite (2026-10-27, HEAD `7cbd33d`): `npm run build` passes; the three
+focused Plan-backed files are **31/31** in separate runs — materializer
+**16/16** (1587.0 ms), queue core **10/10** (4196.9 ms), queue CLI **5/5**
+(728.5 ms) — and `npm test` is **236/236** in one run (12420.3 ms). The full
+run includes the prior attempt-continuity, runtime/recovery, Task Architect and
+queue groups plus the 31 new Plan-backed tests; those other groups were not
+separately re-run this round. Three real Claude Code + DeepSeek two-item chains
+completed 2/2 (17.2 s, 24.6 s and 21.4 s). Each captured the live downstream
+worktree at the upstream `integrationHead` containing `foundation.txt`, and
+`git merge-base --is-ancestor` proved the upstream head is an ancestor of the
+downstream head. The documented runs also re-verified the final branch
+contents and the byte-identical no-op rerun. These are single local macOS
+results, not a long-term flake-rate, cost or CI claim. Evidence:
+[docs/evidence/PLAN_BACKED_CHAIN.md](docs/evidence/PLAN_BACKED_CHAIN.md),
 [docs/evidence/ORCHESTRATION_QUEUE.md](docs/evidence/ORCHESTRATION_QUEUE.md),
 [docs/evidence/TASK_ARCHITECT.md](docs/evidence/TASK_ARCHITECT.md),
 [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md)
@@ -153,14 +163,21 @@ npm run dev -- supervisor reap --repo <scratch-repo> --json  # orphan runtime re
 # closed when a runtime needs human review.
 # After `npm run build`: node dist/cli.js supervisor …
 
-# Foreground orchestration queue v0 (explicit approval over frozen contracts)
+# Foreground orchestration queue v0 (explicit approval over frozen contracts
+# or approved Plans)
 npm run dev -- queue add <contracts.json> --repo <scratch-repo> --id <queue-id> \
   --worker claude [--depends-on <id>] [--max-attempts n] [--json]
+npm run dev -- queue add-plan <plan.json> --repo <scratch-repo> --id <queue-id> \
+  [--depends-on <queue-id>] [--worker claude] [--model id] \
+  [--max-attempts n] [--json]
 npm run dev -- queue list --repo <scratch-repo> [--json]
 npm run dev -- queue run --repo <scratch-repo> [--continue-on-blocked] \
   [--max-dispatches n] [--json]
 npm run dev -- queue retry <queue-id> --repo <scratch-repo> [--json]
 npm run dev -- queue cancel <queue-id> --repo <scratch-repo> [--json]
+# Plan items support at most one dependency. A root item pins the HEAD captured
+# at add-plan; a dependent item materializes at the upstream completed
+# RunManifest integrationHead. Changing the Plan blocks; it is never auto-approved.
 # Default run stops at the first blocked item; --continue-on-blocked runs
 # independent items and blocks dependants. No daemon, parallel dispatch or dry-run.
 # After `npm run build`: node dist/cli.js queue …
@@ -184,13 +201,21 @@ append-only at `<target>/.cliyard/worker-events/<runId>/<taskId>.jsonl`
 (gitignored, advisory only; never run authority).
 Supervisor details: [docs/SUPERVISOR_V0.md](docs/SUPERVISOR_V0.md) — foreground only, JSON manifest, manual review/merge, no daemon or SQLite; attempt reuse is worktree continuity, not provider-conversation resume.
 Queue state: `<target>/.cliyard/queue.json` + `<target>/.cliyard/queue.lock`
-(gitignored). Each item freezes its contracts path and SHA-256 at `queue add`;
-changed or missing bytes block instead of dispatching. The queue coordinates
-Supervisor runs only: it never writes a RunManifest, and dependency ordering
-does not chain integration branches (each run uses its own frozen
-`baseCommit`). Same-host stale locks are reclaimed; foreign-host locks fail
-closed. Details and measured crash windows:
-[docs/evidence/ORCHESTRATION_QUEUE.md](docs/evidence/ORCHESTRATION_QUEUE.md).
+(gitignored). Contract-backed items freeze their contracts path and SHA-256 at
+`queue add`; changed or missing bytes block instead of dispatching.
+Plan-backed items freeze the approved Plan path/SHA-256 at `queue add-plan`, a
+pinned root base (`planBaseCommit`) or the completed upstream RunManifest
+`integrationHead`, and a queue-owned contracts artifact at
+`<target>/.cliyard/queue/materialized/<queue-id>/<base>-<plan-hash>.contracts.json`
+(gitignored; hash verified on every retry/resume). The queue coordinates
+Supervisor runs only: it never writes a RunManifest. Contract-backed dependency
+ordering does not chain integration branches (each run uses its own frozen
+`baseCommit`); Plan-backed v0 chains exactly one linear base, so the upstream
+`integrationHead` is an ancestor of the downstream head. Multi-parent
+integration and a merge queue are not implemented. Same-host stale locks are
+reclaimed; foreign-host locks fail closed. Details and measured crash windows:
+[docs/evidence/ORCHESTRATION_QUEUE.md](docs/evidence/ORCHESTRATION_QUEUE.md)
+and [docs/evidence/PLAN_BACKED_CHAIN.md](docs/evidence/PLAN_BACKED_CHAIN.md).
 
 Runtime evidence: `<target>/.cliyard/runtime/<runtimeId>/runtime-manifest.json`
 plus `<service>.log` and `data/<service>/`; port leases live in

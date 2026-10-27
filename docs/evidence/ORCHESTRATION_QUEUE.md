@@ -19,14 +19,29 @@ time, and exits. The **RunManifest remains the task-level authority**; the
 queue only persists item state and reads the manifest to classify an outcome.
 It never approves contracts, creates contracts, or rewrites a RunManifest.
 The workflow requires each item to be an explicitly approved, already-frozen
-contracts file. `queue add` records its resolved path and exact SHA-256; it
-does not itself check the `frozen` flag, so a non-frozen contract is rejected
-by the Supervisor at dispatch and the item is blocked.
+contracts file or — for the later `queue add-plan` source kind — an explicitly
+approved Plan whose contracts are compiled deterministically before dispatch.
+`queue add` records its resolved path and exact SHA-256; it does not itself
+check the `frozen` flag, so a non-frozen contract is rejected by the
+Supervisor at dispatch and the item is blocked.
 
-This documentation task changed only `README.md`, `docs/NEXT_ITERATION.md`,
-`docs/SUPERVISOR_V0.md` and this file. No source, test or design-authority file
-was changed. Scratch repositories, fixtures and logs are outside the
-repository and are not committed.
+The original queue documentation pass changed only `README.md`,
+`docs/NEXT_ITERATION.md`, `docs/SUPERVISOR_V0.md` and this file; the later
+Plan-backed documentation pass also added
+[docs/evidence/PLAN_BACKED_CHAIN.md](PLAN_BACKED_CHAIN.md). No source, test or
+design-authority file was changed. Scratch repositories, fixtures and logs are
+outside the repository and are not committed.
+
+> **Superseded limitation (2026-10-27):** the measurements below are for
+> **contract-backed** queue items and remain accurate for that source kind.
+> The later Plan-backed chained queue base adds `queue add-plan`; a Plan-backed
+> dependent compiles at the completed upstream RunManifest `integrationHead`,
+> so its integration branch does retain the upstream head as an ancestor (one
+> linear dependency only). Three real Claude Code + DeepSeek Plan-backed chains
+> completed 2/2 (17.2 s, 24.6 s and 21.4 s). See
+> [PLAN_BACKED_CHAIN.md](PLAN_BACKED_CHAIN.md). The current full suite is
+> 236/236 with 31 new Plan-backed tests; the 13/13 and 205/205 counts below are
+> this document's historical HEAD `20b9a64` measurement.
 
 ## 1. Build and test counts
 
@@ -234,9 +249,12 @@ Observed dependency semantics:
   `add` requires dependencies to exist first, a queue created only through
   `add` is already in a valid topological insertion order; the runner's
   traversal still places dependencies before dependants.
-- A dependency gates **dispatch and failure propagation**, not the next run's
-  base. In scenario A, `build`'s integration branch does not contain
-  `setup`'s accepted commit:
+- For **contract-backed** items a dependency gates **dispatch and failure
+  propagation**, not the next run's base. (Plan-backed `queue add-plan` items
+  are different: a dependent's base is the upstream completed RunManifest
+  `integrationHead`; see [PLAN_BACKED_CHAIN.md](PLAN_BACKED_CHAIN.md).) In
+  scenario A, `build`'s integration branch does not contain `setup`'s accepted
+  commit:
 
   ```text
   setup integration: 69fea5f init -> b143074 setup-task -> 7d204b2 merge
@@ -244,11 +262,14 @@ Observed dependency semantics:
   is setup head an ancestor of build head? no
   ```
 
-  Every queue item dispatches the Supervisor with its own frozen
-  `contractsPath` and `baseCommit`. Chaining code changes across queue items
-  requires contracts pinned to a base that already contains the earlier work
-  (normally after human review/merge); the queue itself does not synthesize
-  that base.
+  Every **contract-backed** queue item dispatches the Supervisor with its own
+  frozen `contractsPath` and `baseCommit`. For contract-backed items, chaining
+  code changes across queue items requires contracts pinned to a base that
+  already contains the earlier work (normally after human review/merge); the
+  queue itself does not synthesize that base. Plan-backed items are the
+  exception: the queue compiles the dependent at the completed upstream
+  RunManifest `integrationHead` (see
+  [PLAN_BACKED_CHAIN.md](PLAN_BACKED_CHAIN.md)).
 - `nextAction` remains `resume` after completion in the stored item, but a
   completed item is never dispatched again.
 
@@ -697,19 +718,22 @@ Not measured / not claimed:
 - **Foreground only.** `queue run` is the process; closing the terminal or
   killing the host stops it. There is no daemon to restart it and no 24h
   claim.
-- **Explicit approval only.** Every item is an operator-added contracts file
-  that the workflow expects to be already frozen; the queue does not approve,
-  create, edit or freeze contracts, and `queue add` does not validate the
-  `frozen` flag. The Supervisor does at dispatch, and a non-frozen contract
-  becomes a blocked item. Changed or missing bytes block instead of being
-  re-read.
+- **Explicit approval only.** Every item is either an operator-added contracts
+  file that the workflow expects to be already frozen, or an explicitly
+  approved Plan added with `queue add-plan`; the queue does not approve,
+  create, edit or freeze contracts or Plans. `queue add` does not validate the
+  `frozen` flag; the Supervisor does at dispatch, and a non-frozen contract
+  becomes a blocked item. Changed or missing contract bytes block instead of
+  being re-read, and a changed Plan/materialization blocks the Plan item.
 - **One item at a time.** Dispatch is strictly sequential. There is no
   parallel admission or cross-run runtime scheduler.
-- **Dependencies gate dispatch, not code state.** Each Supervisor run uses its
-  own frozen contract base. A queue dependant does not automatically contain
-  its dependency's integration branch (measured in scenario A). The operator
-  must pin contracts to an appropriate base and review/merge integration work
-  manually.
+- **Contract-backed dependencies gate dispatch, not code state.** Each
+  contract-backed Supervisor run uses its own frozen contract base, so a
+  contract-backed dependant does not automatically contain its dependency's
+  integration branch (measured in scenario A). Plan-backed items are the
+  exception: `queue add-plan` compiles at the upstream completed RunManifest
+  `integrationHead` and supports one linear dependency. Multi-parent
+  integration, a merge queue and automatic main merge remain absent.
 - **Start crash window.** If the queue dies after persisting `running` but
   before recording the Supervisor run id, reconciliation is fail-closed:
   the item becomes `blocked` with `running item has no recorded run id`, the
@@ -718,7 +742,8 @@ Not measured / not claimed:
   with a recorded run id reconciles to `pending` and resumes the same run.
 - **No queue history / GC / update.** Completed and cancelled items remain in
   `queue.json`; queue ids cannot be reused; there is no command to replace a
-  frozen contracts file in place. Changed contracts require a new item.
+  frozen contracts file or an approved Plan in place. Changed contracts or
+  Plans require a new item.
 - **Same-host lock only.** A same-host dead-PID lock is reclaimed; a
   foreign-host lock fails closed, and liveness on another host cannot be
   proven. The lock coordinates cliyard processes, not external actors.
@@ -746,8 +771,9 @@ The queue does not change these non-goals: no daemon/background service, no
 no browser evidence, no parallel admission scheduling, and no automatic push
 or `main` merge.
 
-Queue semantics are now measured in the foreground. The **next step is a
+Queue semantics are now measured in the foreground, and the later Plan-backed
+chained queue base measures one linear code dependency. The **next step is a
 decision about a supervised foreground long-run controller/daemon**, only
-after these queue semantics are accepted. No such controller or daemon is
-implemented or claimed by this evidence; any future background execution
+after Plan-backed chain semantics are accepted. No such controller or daemon
+is implemented or claimed by this evidence; any future background execution
 model requires its own design and acceptance.
