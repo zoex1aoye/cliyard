@@ -27,7 +27,9 @@ Run from the repository root on the measurement date:
 | `npm test` (full suite) | 177/177 pass | 10887.8 ms |
 
 These are single local runs. The manual CLI and drill measurements below were
-executed separately from those test commands.
+executed separately from those test commands. The focused and full-suite counts
+were re-measured at checkout `98ccf2d` for the active-provider heartbeat fix
+(§4.2, §6).
 
 ## Measurement fixtures
 
@@ -377,8 +379,9 @@ and resumed attempts. The fresh run's log contained `37 heartbeat` records.
 `status` showed only the latest valid event per task.
 
 **Observed behavior:** stream records become visible while the worker is still
-running; provider silence produces heartbeat records; `status` reads and
-renders the latest event without changing run state. Events are observational
+running; provider silence produces waiting heartbeat records (and, after the
+§4.2 fix, unmapped provider traffic produces active heartbeat records);
+`status` reads and renders the latest event without changing run state. Events are observational
 only: acceptance still came from the worker result plus verifier, and stale or
 malformed event files cannot change status (covered by the focused tests).
 
@@ -463,6 +466,73 @@ Final evidence:
 This is a short real-provider smoke, not a long-duration or flake-rate claim. It
 does establish that the real Claude Code JSONL stream is parsed into live
 events and that default rejected-attempt reuse works with DeepSeek.
+
+### 4.2 Active-provider heartbeat fix for unmapped thinking-token traffic
+
+A later real Claude Code + DeepSeek Task Architect run exposed a false-stale
+gap. The provider streamed frequent `system` / `thinking_tokens` JSONL records
+for longer than the 60-second `WORKER_PROGRESS_STALE_MS` display threshold.
+The adapter treated those records as provider activity, but they map to no
+visible progress event. The pre-fix heartbeat timer only fired after
+`heartbeatMs` of **silence**, so continuous token records kept the idle
+condition false and suppressed every heartbeat. Observed symptom: the worker
+was still generating, yet the latest visible event aged past the stale
+threshold and read-only `supervisor status` reported `stale: true`.
+
+The fix keeps heartbeats advisory, bounded, and separate from acceptance:
+
+- while the child is alive, one heartbeat is emitted per configured
+  `heartbeatMs` (default 15000 ms), whether or not mapped events were emitted;
+- if at least one provider JSON record — including unmapped
+  `system/thinking_tokens` — arrived since the previous heartbeat, the event is
+  `type: "heartbeat"`, phase `thinking`, message `provider active`, with a
+  bounded detail naming the record count and last record type/subtype;
+- otherwise it is phase `waiting`, message `waiting for provider output`, with
+  an idle duration;
+- no heartbeat is emitted after the final `result` record, even while the child
+  process lingers, so `result` remains the latest status event;
+- the timer is cleared when the child exits.
+
+No event is emitted per token, and result/acceptance/verifier authority is
+unchanged. With the default 15000 ms interval the latest heartbeat stays well
+inside the 60000 ms stale threshold even when every record is unmapped.
+
+#### Measured fixture
+
+A finite fixture emitted 40 `system` / `thinking_tokens` records at 50 ms
+intervals (2000 ms) with `heartbeatMs=200`, then 600 ms of silence, a `result`,
+and a 600 ms post-result linger. The run exited 0 and its only event types were
+`session.start`, `heartbeat`, and `result` — no token-level event stream. One
+measured run:
+
+```text
+elapsed 3592 ms
+heartbeats: 14 total, 14 before result, 0 after result
+  11 thinking / "provider active"
+  3 waiting / "waiting for provider output"
+first heartbeat: 203 ms
+gaps between heartbeats: 201-203 ms
+active detail: "3 records since last heartbeat; last system/thinking_tokens"
+waiting detail: "idle 1s"
+last event after collect: result / ending / worker completed
+```
+
+One waiting heartbeat occurred during provider startup before a complete record
+was parsed; two followed the token loop. Representative adjacent events:
+
+```json
+{"version":1,"at":"2026-10-27T12:03:26.776Z","source":"claude","taskId":"heartbeat-measure","sessionId":"d0270d85-0b93-4a94-be0d-12f71e06378b","type":"heartbeat","phase":"waiting","message":"waiting for provider output","detail":"idle 1s"}
+{"version":1,"at":"2026-10-27T12:03:26.978Z","source":"claude","taskId":"heartbeat-measure","sessionId":"d0270d85-0b93-4a94-be0d-12f71e06378b","type":"heartbeat","phase":"thinking","message":"provider active","detail":"3 records since last heartbeat; last system/thinking_tokens"}
+```
+
+The focused test
+`tests/claude-progress.test.ts` → “unmapped thinking-token records produce
+bounded active heartbeats until the result” emits 30 thinking-token records
+over 600 ms at `heartbeatMs=50`, keeps the child alive 250 ms after the
+result, and asserts at least three active heartbeats before the result, at
+most 20 active heartbeats before the result (interval-bounded, not
+per-record), the bounded last-record detail, zero heartbeats after the result,
+and a stable count after exit.
 
 ## 5. Timed-out drill child recovery
 
@@ -636,6 +706,23 @@ npm test → 177/177 pass (10887.8 ms)
 `npm run build` passed before these runs. These are single local runs; they
 are not a repeated-run flake rate, CI result, or cross-host claim.
 
+### Counts after the active-provider heartbeat fix
+
+Re-measured at checkout `98ccf2d` after adding the focused thinking-token test:
+
+```text
+npx tsx --test tests/supervisor-attempt-reuse.test.ts tests/claude-progress.test.ts tests/supervisor-worker-progress.test.ts tests/runtime-failure-drills.test.ts
+  → 14/14 pass (9681.3 ms)
+
+npm test → 192/192 pass (11196.1 ms)
+```
+
+Per-file focused counts: `supervisor-attempt-reuse` 4, `claude-progress` 4,
+`supervisor-worker-progress` 3, `runtime-failure-drills` 3. `npm run build`
+passed. The table and counts above were measured earlier at checkout
+`3093508` and remain as that run's record; the runtime/recovery 81/81 group was
+not re-run for this change.
+
 The earlier [RUNTIME_FAILURE_DRILLS.md](RUNTIME_FAILURE_DRILLS.md) records the
 suite counts for its own run (2 drill tests, 166 total) and remains the
 per-scenario evidence for that run. Those counts are historical; the current
@@ -659,8 +746,10 @@ counts are the ones above.
 - **Events are advisory.** Worker progress is not run authority, is not
   checkpointed with the manifest, has no retention/rotation policy, and only
   the latest valid event per task is shown. `stale` is display-only.
-- **Heartbeat is a silence observation.** It shows the adapter is still
-  waiting for provider output; it does not prove provider health, progress
+- **Heartbeat is an advisory liveness observation.** It reports either
+  `provider active` (at least one provider JSON record since the previous
+  interval, possibly only unmapped `system/thinking_tokens`) or `waiting for
+  provider output` (no record). It does not prove provider health, progress
   quality, or eventual success.
 - **Provider evidence is a short smoke.** Most continuity/progress measurements
   use a local stream-json fixture. The additional real Claude Code + DeepSeek
@@ -699,4 +788,5 @@ a later, separately designed gap. Neither is implemented by this slice.
 - [RuntimeManager v0](../RUNTIME_MANAGER.md)
 - [Next iteration](../NEXT_ITERATION.md)
 - Design: [attempt continuity and worker progress v0](../../design/attempt-continuity-progress-v0.md)
+- Design: [heartbeat liveness v0](../../design/heartbeat-liveness-v0.md)
 - Prior drill evidence: [runtime failure drills](RUNTIME_FAILURE_DRILLS.md)
