@@ -188,6 +188,15 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     // Providers can be silent for a while; heartbeat proves liveness without
     // claiming success.
     await waitFor(() => events.some((event) => event.type === "heartbeat"));
+    // Silence remains distinct from the active-provider heartbeat.
+    await waitFor(() =>
+      events.some(
+        (event) =>
+          event.type === "heartbeat" &&
+          event.phase === "waiting" &&
+          event.message === "waiting for provider output",
+      ),
+    );
     assert.ok(
       events.every(
         (event) =>
@@ -218,6 +227,118 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     assert.doesNotMatch(serialized, /export const value = 1/);
 
     // The heartbeat timer is cleared with the child.
+    const heartbeats = events.filter(
+      (event) => event.type === "heartbeat",
+    ).length;
+    await delay(150);
+    assert.equal(
+      events.filter((event) => event.type === "heartbeat").length,
+      heartbeats,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("unmapped thinking-token records produce bounded active heartbeats until the result", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cliyard-claude-thinking-bin-"));
+  const repo = initRepo();
+  try {
+    const binary = join(root, "fake-thinking-claude");
+    const thinkingRecords = 30;
+    writeBinary(
+      binary,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+(async () => {
+  console.log(JSON.stringify({
+    type: "system",
+    subtype: "init",
+    session_id: "provider-session",
+    model: "fixture-model"
+  }));
+  // Only records the adapter maps to no progress event.
+  for (let i = 0; i < ${thinkingRecords}; i += 1) {
+    await delay(20);
+    console.log(JSON.stringify({
+      type: "system",
+      subtype: "thinking_tokens",
+      thinking_tokens: { text: "sk-live-THINKINGSECRET123456789" + i }
+    }));
+  }
+  fs.appendFileSync(
+    path.join(process.cwd(), "allowed.ts"),
+    "\\nexport const viaThinking = true;\\n"
+  );
+  console.log(JSON.stringify({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: "thinking-only fixture done"
+  }));
+  // Stay alive after the result so a post-result heartbeat would be visible.
+  await delay(250);
+})();
+`,
+    );
+
+    const task = contract(repo, "claude-thinking-heartbeat");
+    const worker = createClaudeAdapter({
+      binary,
+      cwd: repo,
+      model: "fixture-model",
+      heartbeatMs: 50,
+    });
+    const events: WorkerProgressEvent[] = [];
+    const { sessionId } = await worker.start({
+      contract: task,
+      attempt: 0,
+      onProgress: (event) => events.push(event),
+    });
+    const result = await worker.collect(sessionId);
+    assert.equal(result.exitCode, 0);
+    assert.deepEqual(result.touchedPaths, ["allowed.ts"]);
+
+    const resultIndex = events.findIndex((event) => event.type === "result");
+    assert.ok(resultIndex >= 0, "result event missing");
+    const beforeResult = events.slice(0, resultIndex);
+    const afterResult = events.slice(resultIndex + 1);
+    const activeBefore = beforeResult.filter(
+      (event) =>
+        event.type === "heartbeat" &&
+        event.phase === "thinking" &&
+        event.message === "provider active",
+    );
+
+    // 600ms of thinking-token records spans several 50ms heartbeat intervals.
+    // Multiple active heartbeats must be visible before the final result.
+    assert.ok(
+      activeBefore.length >= 3,
+      `expected multiple active heartbeats, got ${activeBefore.length}`,
+    );
+    // One event per interval, never one event per thinking-token record.
+    assert.ok(
+      activeBefore.length <= 20,
+      `active heartbeats are not bounded: ${activeBefore.length}`,
+    );
+    assert.ok(
+      activeBefore.some((event) =>
+        /last system\/thinking_tokens/.test(event.detail ?? ""),
+      ),
+      "active heartbeat should name the last bounded record",
+    );
+    assert.equal(
+      afterResult.filter((event) => event.type === "heartbeat").length,
+      0,
+      "heartbeats must stop once the result is emitted",
+    );
+    // Record content and credentials never reach heartbeat details.
+    assert.doesNotMatch(JSON.stringify(events), /THINKINGSECRET/);
+
+    // The timer is cleared with the child; the count is stable afterwards.
     const heartbeats = events.filter(
       (event) => event.type === "heartbeat",
     ).length;
