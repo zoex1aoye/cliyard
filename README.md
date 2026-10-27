@@ -45,7 +45,9 @@ Not yet: Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, Multica runtime,
 Measured suite (2026-10-27): `npm run build` passes; `npm test` reports
 **164/164 in each of five consecutive runs** (78 runtime/recovery-focused).
 No flakes were observed in those runs; that is local macOS evidence, not a
-long-term flake-rate claim.
+long-term flake-rate claim. Per-run durations and the hardening acceptance
+matrix are in
+[docs/RUNTIME_ORPHAN_RECOVERY.md](docs/RUNTIME_ORPHAN_RECOVERY.md#verification).
 
 Hardening measured in this iteration: a lease must be owned by the exact runtime
 owner PID (live or dead mismatch → `needs_human`); every new recovery record
