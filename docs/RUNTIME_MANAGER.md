@@ -102,7 +102,9 @@ Artifact layout:
 ```text
 <out>/
   runtime-failure-drills.json          version-1 report: verdicts, child pids,
-                                       manifests, ports, leases and checks
+                                       manifests, ports, leases and checks;
+                                       abnormalRecovery when the parent had to
+                                       terminate/reconcile a child
   <scenario>/
     child.log
     child-result.json                  child-observed evidence and self-checks
@@ -117,12 +119,56 @@ The parent independently checks each child exit status, the persisted manifest,
 service logs, process and process-group state, port bindability, and the lease
 store. The command exits `0` only when all three scenarios match their expected
 failure and retain evidence; an expected task rejection is never reinterpreted
-as acceptance.
+as acceptance. An abnormal child always leaves its scenario failing (see
+below), so even a successful recovery does not turn the report into a pass.
 
-Measured on 2026-10-27: 3/3 scenarios passed, every service was gone and every
-leased port was free afterward, and `cleanup-failure` retained exactly one
-lease as failed-cleanup evidence while its service was gone and its port free.
-Full details: [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md).
+Measured on 2026-10-27 for the normal path: 3/3 scenarios passed, every service
+was gone and every leased port was free afterward, and `cleanup-failure`
+retained exactly one lease as failed-cleanup evidence while its service was
+gone and its port free. Full details:
+[docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md).
+
+### Abnormal child recovery
+
+If a drill child times out, is signalled, fails to spawn, or exits non-zero,
+the parent takes a separate recovery path:
+
+1. It terminates only the drill **child PID** — `SIGTERM`, a 1 s grace, then
+   `SIGKILL`, with a bounded wait after the kill. It never signals a service
+   process group itself.
+2. Recovery starts only after the child is gone. A live child leaves
+   `executed: false` and an error, which fails the drill.
+3. The existing exact orphan executor runs against that scenario's scratch
+   control root. It re-proves owner death, exact pid/pgid/start identity and
+   exact lease ownership before terminating anything.
+4. The recovery report is persisted under `abnormalRecovery` in
+   `runtime-failure-drills.json` (trigger, termination evidence, executor
+   report or error).
+5. The normal manifest/log/process/port/lease checks are re-run against the
+   recovered state. Any `needs_human` record or failed cleanup fails the
+   scenario.
+6. An abnormal child still fails the drill's `child-exit` check by design, so
+   it is never reinterpreted as accepted or as a passing scenario.
+
+The public CLI does not expose a child timeout. The abnormal path is exercised
+through the test-only environment hook
+`CLIYARD_RUNTIME_DRILL_TEST_HANG_AFTER_READY`, which makes the selected child
+hang after readiness and ignore `SIGTERM`; tests pair it with a short
+`childTimeoutMs` in `runRuntimeDrill`.
+
+Measured on 2026-10-27 with `portBase: 24800`, `childTimeoutMs: 5000`, and the
+hook selecting `cleanup-failure`: the report was `fail` with
+`{ total: 3, passed: 2, failed: 1 }` (the timeout scenario cannot pass its
+child-exit check). The abnormal child timed out at 5000 ms, ignored the 1000 ms
+SIGTERM grace, and was recorded as signal `SIGKILL` with duration 6009 ms; the
+executor reported `scanned=1, reaped=1, needs_human=0, skipped=0` for
+`drill-cleanup-failure-attempt-1`; the manifest ended with
+`cleanup: "complete"` and a `reaped` recovery record; leases were `0`; the
+service process/group was gone and port `24860` was free. The service manifest's
+`signal`/`exitedAt` stayed `null` because the reaper terminated the group
+externally after the child died; the recovery record is the termination
+evidence. Exact commands, output and the child-log hook lines:
+[docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md).
 
 The drill is a foreground diagnostic and regression tool. It is not a daemon,
 cross-host runner, browser-evidence producer, or production port coordinator,
@@ -570,28 +616,33 @@ and remaining gaps are documented in
 
 ## Verification
 
-Measured on 2026-10-27 in this worktree (macOS). The current suite includes the
-failure-drill tests:
+Measured on 2026-10-27 in this worktree (macOS, HEAD `3093508`). The current
+suite includes the attempt-continuity/progress tests and the failure-drill
+tests:
 
 ```text
-npm run build                                    → pass
-npx tsx --test tests/runtime-failure-drills.test.ts → 2/2 pass (1981.8 ms)
-runtime/recovery-focused group (13 files)        → 80/80 pass (3150.8 ms)
-npm test                                         → 166/166 pass (8194.6 ms)
+npm run build                                     → pass
+focused attempt/progress/drill group (4 files)    → 13/13 pass (9769.2 ms)
+runtime/recovery-focused group (13 files)         → 81/81 pass (9968.0 ms)
+npm test (full suite)                             → 177/177 pass (10887.8 ms)
 ```
 
 These are single local runs. They are not a repeated-run flake rate or CI
 claim. The measured drill evidence and per-scenario results are in
-[docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md).
+[docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md);
+that document records the suite counts for its own earlier run (2 drill tests,
+166 total), which are historical. The current counts are the ones above. The
+abnormal-child recovery measurement is in
+[docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md).
 
-Pre-drill hardening baseline (same day, before the drill tests were added):
+Historical pre-drill baseline (same day, before the drill tests were added):
 `npm test` reported 164/164 in five consecutive runs, each a separate `npm test`
 process run sequentially in this worktree. Test-runner durations were 8.39 s,
 8.16 s, 8.04 s, 8.14 s, and 8.25 s; no flakes were observed. This is local
 evidence, not a long-term flake rate or CI claim.
 
-Runtime and recovery-focused suites (80 tests across 13 files; 78 of them
-predate the drill test):
+Runtime and recovery-focused suites (81 tests across 13 files; 78 of them
+predate the drill tests):
 
 ```text
 tests/contract-runtime.test.ts                     10
@@ -606,11 +657,11 @@ tests/runtime-reaper-plan.test.ts                   9
 tests/runtime-reaper.test.ts                       10
 tests/supervisor-runtime-reaper.test.ts             5
 tests/supervisor-runtime-recovery-record.test.ts    2
-tests/runtime-failure-drills.test.ts                2
+tests/runtime-failure-drills.test.ts                3
 ```
 
-Each of those files also passed when run alone once during the earlier
-measurement (and the drill file passed alone in this run).
+The 13-file group was run once this iteration; earlier standalone runs are
+historical.
 
 The seven runtime test files that start real processes or bind real ports take
 static, disjoint port pools from `tests/test-port-ranges.ts` (22000–22699; 100
@@ -633,11 +684,20 @@ without an id.
 
 The failure-drill suite additionally runs `readiness-timeout`,
 `verify-failure`, and `cleanup-failure` in three independent child processes.
-The checked run passed 3/3: two scenarios finished with `cleanup: "complete"`
-and empty lease stores; the cleanup-failure scenario finished with
-`cleanup: "failed"`, one retained lease, and a failed release; all three
-services were gone and all three ports were free afterward. See
+The normal-path checked run passed 3/3: two scenarios finished with
+`cleanup: "complete"` and empty lease stores; the cleanup-failure scenario
+finished with `cleanup: "failed"`, one retained lease, and a failed release;
+all three services were gone and all three ports were free afterward. See
 [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md).
+
+The same file also exercises the timed-out abnormal path through the test-only
+hang hook. In the measured abnormal run the report was `fail` with
+`{ total: 3, passed: 2, failed: 1 }` — the abnormal child cannot pass its
+child-exit check — while the parent's recovery checks passed: the child was
+SIGKILLed after SIGTERM was ignored, the exact executor reaped the proven
+service group and exact lease, the manifest became `cleanup: "complete"` with
+a `reaped` recovery record, and the port was free. Exact commands and output:
+[docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md).
 
 Earlier acceptance drills (2026-10-27, before the reaper iteration):
 
@@ -659,7 +719,9 @@ NUL delimiter.
 
 - Design: [design/runtime-manager-v0.md](../design/runtime-manager-v0.md)
 - Failure drill evidence: [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md)
+- Attempt/progress/abnormal recovery evidence: [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md)
 - Orphan recovery: [docs/RUNTIME_ORPHAN_RECOVERY.md](RUNTIME_ORPHAN_RECOVERY.md)
 - Supervisor integration: [docs/SUPERVISOR_V0.md](SUPERVISOR_V0.md)
-- Next iteration: [docs/NEXT_ITERATION.md](NEXT_ITERATION.md)
+- Next iteration: [docs/NEXT_ITERATION.md](NEXT_ITERATION.md) — Task Architect
+  is the next capability; durable continuous orchestration follows
 - Example: [examples/runtime-verifier.contract.json](../examples/runtime-verifier.contract.json)
