@@ -16,6 +16,19 @@
  * manifest, service logs, process state, port state and lease store, and writes
  * the versioned `runtime-failure-drills.json` report.
  *
+ * Two child outcomes stay distinct:
+ *
+ *   normal   child exited 0; its own cleanup plus the parent's post-checks are
+ *            the evidence. `abnormalRecovery` is null.
+ *   abnormal child timed out, was signalled, failed to spawn, or exited
+ *            non-zero. The parent first ensures the child is gone (SIGTERM,
+ *            bounded SIGKILL escalation), then runs the existing exact orphan
+ *            executor against that scenario's scratch control root, records
+ *            `abnormalRecovery`, and re-runs the normal manifest/log/process/
+ *            port checks against the recovered state. The parent never signals
+ *            a service group itself; only the executor, after proving
+ *            ownership, may do that.
+ *
  * The drill is a foreground diagnostic. It is not a daemon, scanner, browser
  * runner or production port coordinator.
  */
@@ -39,7 +52,12 @@ import {
   resolve,
 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { RUNTIME_MANIFEST_FILE } from "./manager.js";
 import { probePort } from "./ports.js";
+import {
+  reapOrphanedRuntimes,
+  type RuntimeReapReport,
+} from "./reaper-execute.js";
 import type { RuntimeCleanupState, RuntimeManifest } from "./types.js";
 
 export const RUNTIME_FAILURE_DRILL_REPORT_VERSION = 1 as const;
@@ -56,6 +74,25 @@ export type DrillScenarioName = (typeof DRILL_SCENARIOS)[number];
 export const DRILL_PORTS_PER_SCENARIO = 30;
 export const DRILL_DEFAULT_PORT_BASE = 22800;
 export const DRILL_CHILD_TIMEOUT_MS = 90_000;
+
+/**
+ * Bounded termination for an unresponsive drill child (abnormal path only):
+ * SIGTERM first, then SIGKILL after the term grace, and stop waiting for the
+ * child after the kill grace. This term/kill pair applies to the drill child
+ * PID, never to its process group.
+ */
+export const DRILL_CHILD_TERM_GRACE_MS = 1_000;
+export const DRILL_CHILD_KILL_GRACE_MS = 2_000;
+
+/**
+ * Test-only hook. When set to a scenario name (or `"1"`/`"all"`), that child
+ * hangs after readiness while its service is still running, and ignores
+ * SIGTERM so the parent's bounded SIGKILL escalation is exercised. Tests pair
+ * it with a short `childTimeoutMs`. It is intentionally not a production CLI
+ * option.
+ */
+export const DRILL_HANG_AFTER_READY_ENV =
+  "CLIYARD_RUNTIME_DRILL_TEST_HANG_AFTER_READY";
 
 /** The allocator release fault injected by the cleanup-failure scenario. */
 export const DRILL_CLEANUP_RELEASE_FAULT =
@@ -159,6 +196,45 @@ export interface DrillChildResult {
 }
 
 // ---------------------------------------------------------------------------
+// Abnormal child recovery
+// ---------------------------------------------------------------------------
+
+/** Why a child took the abnormal path instead of the normal exit-0 path. */
+export type DrillAbnormalTrigger =
+  | "timeout"
+  | "spawn-error"
+  | "signal"
+  | "nonzero-exit";
+
+/** Parent-side termination evidence; signals target the child PID only. */
+export interface DrillChildTerminationEvidence {
+  sigtermSent: boolean;
+  sigkillSent: boolean;
+  termGraceMs: number;
+  killGraceMs: number;
+  /** True only when the child PID was gone (or never existed) before recovery. */
+  exited: boolean;
+  detail: string | null;
+}
+
+/**
+ * Abnormal-path evidence persisted in `runtime-failure-drills.json`.
+ *
+ * `executed` means the exact orphan executor ran against the scenario's
+ * control root. Recovery only starts after the child is gone; a live child
+ * leaves `executed: false` and an error, which fails the drill.
+ */
+export interface DrillAbnormalRecovery {
+  trigger: DrillAbnormalTrigger;
+  childTermination: DrillChildTerminationEvidence;
+  executed: boolean;
+  controlDir: string;
+  /** Executor report; null when execution was refused or threw. */
+  report: RuntimeReapReport | null;
+  error: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
 
@@ -220,6 +296,12 @@ export interface RuntimeFailureDrillScenarioReport {
   checks: DrillCheck[];
   runtime: RuntimeFailureDrillRuntimeReport | null;
   verify: RuntimeFailureDrillVerifyReport | null;
+  /**
+   * Abnormal-path evidence. Null on the normal path (child exit 0, own
+   * cleanup); populated only when the parent had to terminate or reconcile an
+   * abnormal child.
+   */
+  abnormalRecovery: DrillAbnormalRecovery | null;
   artifacts: {
     scenarioDir: string;
     controlDir: string;
@@ -337,15 +419,39 @@ export async function runRuntimeDrill(
       range,
       timeoutMs,
     });
+
+    // Normal and abnormal paths stay separate. Only an abnormal child is
+    // reconciled by the parent; a child that exits 0 owns its cleanup.
+    const trigger = abnormalChildTrigger(child);
+    let abnormalRecovery: DrillAbnormalRecovery | null = null;
+    if (trigger !== null) {
+      abnormalRecovery = await recoverAbnormalChild(
+        trigger,
+        controlDir,
+        child,
+        log,
+      );
+    }
+
     let report: RuntimeFailureDrillScenarioReport;
     try {
-      report = await evaluateScenario(
-        name,
-        scenarioDir,
-        controlDir,
-        worktreeDir,
-        child,
-      );
+      report =
+        abnormalRecovery === null
+          ? await evaluateScenario(
+              name,
+              scenarioDir,
+              controlDir,
+              worktreeDir,
+              child,
+            )
+          : await evaluateAbnormalScenario(
+              name,
+              scenarioDir,
+              controlDir,
+              worktreeDir,
+              child,
+              abnormalRecovery,
+            );
     } catch (error) {
       report = errorScenarioReport(
         name,
@@ -354,12 +460,16 @@ export async function runRuntimeDrill(
         worktreeDir,
         child,
         errorMessage(error),
+        abnormalRecovery,
       );
     }
     scenarios.push(report);
     log(
       `[runtime-drill] ${name}: ${report.status.toUpperCase()} ` +
-        `(child exit ${child.exitCode ?? "none"}, ${child.durationMs}ms)`,
+        `(child exit ${child.exitCode ?? "none"}, ${child.durationMs}ms)` +
+        (report.abnormalRecovery === null
+          ? ""
+          : ` recovery=${describeAbnormalRecovery(report.abnormalRecovery)}`),
     );
   }
 
@@ -477,10 +587,14 @@ function printHumanReport(
       `leases=${runtime?.leaseCount ?? "none"}`,
       `port-free=${runtime?.portFree === true ? "yes" : "no"}`,
     ].join(" ");
+    const recovery =
+      scenario.abnormalRecovery === null
+        ? ""
+        : ` recovery=${describeAbnormalRecovery(scenario.abnormalRecovery)}`;
     log(
       `  ${scenario.status.toUpperCase().padEnd(4)} ${scenario.name.padEnd(17)} ` +
         `(${scenario.child.durationMs}ms, child exit ` +
-        `${scenario.child.exitCode ?? "none"}) ${details}`,
+        `${scenario.child.exitCode ?? "none"}) ${details}${recovery}`,
     );
   }
   log(`report: ${join(report.outDir, RUNTIME_FAILURE_DRILL_FILE)}`);
@@ -523,6 +637,8 @@ interface ChildRun {
   durationMs: number;
   timedOut: boolean;
   timeoutMs: number;
+  /** Parent-side termination evidence, recorded for both paths. */
+  termination: DrillChildTerminationEvidence;
   spawnError?: string;
 }
 
@@ -629,6 +745,14 @@ function runChild(
         durationMs: Date.now() - startedAt,
         timedOut: false,
         timeoutMs: params.timeoutMs,
+        termination: {
+          sigtermSent: false,
+          sigkillSent: false,
+          termGraceMs: DRILL_CHILD_TERM_GRACE_MS,
+          killGraceMs: DRILL_CHILD_KILL_GRACE_MS,
+          exited: true,
+          detail: "spawn failed before a child process existed",
+        },
         spawnError: errorMessage(error),
       });
       return;
@@ -637,7 +761,13 @@ function runChild(
 
     let settled = false;
     let timedOut = false;
-    let timer: NodeJS.Timeout | undefined;
+    let closed = false;
+    let sigtermSent = false;
+    let sigkillSent = false;
+    let timeoutTimer: NodeJS.Timeout | undefined;
+    let termTimer: NodeJS.Timeout | undefined;
+    let killTimer: NodeJS.Timeout | undefined;
+
     const finish = (
       exitCode: number | null,
       signal: NodeJS.Signals | null,
@@ -645,30 +775,158 @@ function runChild(
     ): void => {
       if (settled) return;
       settled = true;
-      if (timer !== undefined) clearTimeout(timer);
+      for (const timer of [timeoutTimer, termTimer, killTimer]) {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+      const pid = child.pid ?? null;
+      const exited =
+        spawnError !== undefined ||
+        closed ||
+        pid === null ||
+        !isProcessAlive(pid);
+
+      let detail: string | null = null;
+      if (timedOut) {
+        const parts = [`child exceeded ${params.timeoutMs}ms`];
+        if (sigtermSent) parts.push("SIGTERM sent to child pid");
+        if (sigkillSent) {
+          parts.push(
+            `SIGKILL sent to child pid after ${DRILL_CHILD_TERM_GRACE_MS}ms`,
+          );
+        }
+        parts.push(
+          exited
+            ? "child exited"
+            : `child still alive ${DRILL_CHILD_KILL_GRACE_MS}ms after SIGKILL`,
+        );
+        detail = parts.join("; ");
+      } else if (spawnError !== undefined) {
+        detail = spawnError;
+      }
+
       resolveRun({
-        pid: child.pid ?? null,
+        pid,
         exitCode,
         signal,
         durationMs: Date.now() - startedAt,
         timedOut,
         timeoutMs: params.timeoutMs,
+        termination: {
+          sigtermSent,
+          sigkillSent,
+          termGraceMs: DRILL_CHILD_TERM_GRACE_MS,
+          killGraceMs: DRILL_CHILD_KILL_GRACE_MS,
+          exited,
+          detail,
+        },
         ...(spawnError !== undefined ? { spawnError } : {}),
       });
     };
 
-    timer = setTimeout(() => {
+    timeoutTimer = setTimeout(() => {
       timedOut = true;
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        /* already exited */
-      }
+      // Terminate only the drill child PID. The child is not detached, so it
+      // shares the drill parent's process group; signalling that group (or the
+      // child's services) here would bypass orphan ownership proof. Service
+      // groups are signalled later, only by the exact orphan executor.
+      sigtermSent = sendChildSignal(child, "SIGTERM");
+      termTimer = setTimeout(() => {
+        if (settled) return;
+        sigkillSent = sendChildSignal(child, "SIGKILL");
+        // SIGKILL cannot be handled, but a pathological process can still be
+        // unobservable. Bound the wait so the drill always produces a report.
+        killTimer = setTimeout(() => finish(null, null), DRILL_CHILD_KILL_GRACE_MS);
+      }, DRILL_CHILD_TERM_GRACE_MS);
     }, params.timeoutMs);
 
     child.once("error", (error) => finish(null, null, errorMessage(error)));
-    child.once("close", (code, signal) => finish(code, signal));
+    child.once("close", (code, signal) => {
+      closed = true;
+      finish(code, signal);
+    });
   });
+}
+
+function sendChildSignal(
+  child: ChildProcess,
+  signal: NodeJS.Signals,
+): boolean {
+  try {
+    return child.kill(signal);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The normal path is exactly `exit 0` with no signal and no spawn error. Any
+ * other outcome means the child did not complete its own cleanup contract.
+ */
+function abnormalChildTrigger(run: ChildRun): DrillAbnormalTrigger | null {
+  if (run.spawnError !== undefined) return "spawn-error";
+  if (run.timedOut) return "timeout";
+  if (run.signal !== null) return "signal";
+  if (run.exitCode !== 0) return "nonzero-exit";
+  return null;
+}
+
+/**
+ * Reconcile an abnormal child's scratch control root with the existing exact
+ * orphan executor. The parent never signals service groups itself: it first
+ * proves the child is gone, then lets the executor re-prove owner death, exact
+ * pid/pgid/start identity and exact lease ownership before acting.
+ */
+async function recoverAbnormalChild(
+  trigger: DrillAbnormalTrigger,
+  controlDir: string,
+  run: ChildRun,
+  log: (line: string) => void,
+): Promise<DrillAbnormalRecovery> {
+  const recovery: DrillAbnormalRecovery = {
+    trigger,
+    childTermination: run.termination,
+    executed: false,
+    controlDir,
+    report: null,
+    error: null,
+  };
+
+  // Recovery starts only after the child is gone. A live child could still
+  // mutate its manifest or leases, and the executor would correctly skip a
+  // live owner, so acting earlier would produce misleading evidence.
+  if (!run.termination.exited) {
+    return {
+      ...recovery,
+      error:
+        `child pid ${String(run.pid)} did not exit within the bounded ` +
+        "termination window; orphan recovery was not started",
+    };
+  }
+
+  try {
+    const report = await reapOrphanedRuntimes(controlDir);
+    log(
+      `[runtime-drill] ${trigger}: orphan executor scanned ` +
+        `${report.scanned}, reaped ${report.reaped.length}, ` +
+        `needs_human ${report.needsHuman.length}, ` +
+        `skipped ${report.skipped.length}`,
+    );
+    return { ...recovery, executed: true, report };
+  } catch (error) {
+    return {
+      ...recovery,
+      error: `orphan executor failed: ${errorMessage(error)}`,
+    };
+  }
+}
+
+function describeAbnormalRecovery(recovery: DrillAbnormalRecovery): string {
+  if (recovery.error !== null) return "error";
+  if (!recovery.executed) return "not-run";
+  const report = recovery.report;
+  if (report === null) return "no-report";
+  if (report.needsHuman.length > 0) return "needs_human";
+  return `reaped=${report.reaped.length}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -781,44 +1039,10 @@ async function evaluateScenario(
         }
       }
 
-      const serviceReports: RuntimeFailureDrillServiceReport[] = [];
-      for (const service of manifest?.services ?? []) {
-        const pid = typeof service.pid === "number" ? service.pid : null;
-        const pgid = typeof service.pgid === "number" ? service.pgid : null;
-        const port =
-          typeof service.port === "number" && Number.isInteger(service.port)
-            ? service.port
-            : 0;
-        const logPath =
-          typeof service.logPath === "string" ? service.logPath : "";
-        const logContained =
-          logPath !== "" && isInside(controlDir, logPath);
-        const logExists = logContained && existsSync(logPath);
-        const attempts = Array.isArray(service.readinessAttempts)
-          ? service.readinessAttempts
-          : [];
-        const statuses = attempts.map((attempt) =>
-          typeof attempt.status === "number" ? attempt.status : null,
-        );
-        const portFree = port > 0 ? await probePort(port) : false;
-        const processGone = pid !== null ? !isProcessAlive(pid) : false;
-        const groupGone = processGroupGone(pgid);
-
-        serviceReports.push({
-          name: service.name,
-          pid,
-          pgid,
-          port,
-          logPath,
-          logExists,
-          processGone,
-          processGroupGone: groupGone,
-          portFree,
-          readinessAttempts: attempts.length,
-          readinessOk: attempts.some((attempt) => attempt.ok === true),
-          readinessStatuses: statuses,
-        });
-      }
+      const serviceReports =
+        manifest === undefined
+          ? []
+          : await buildServiceReports(controlDir, manifest);
 
       check(
         "services-started",
@@ -1066,6 +1290,233 @@ async function evaluateScenario(
     checks,
     runtime: runtimeReport,
     verify: verifyReport,
+    abnormalRecovery: null,
+    artifacts: {
+      scenarioDir,
+      controlDir,
+      worktreeDir,
+      manifestPath: runtimeReport?.manifestPath ?? null,
+      serviceLogPaths:
+        runtimeReport?.services.map((service) => service.logPath) ?? [],
+      leaseStorePath: runtimeReport?.leaseStorePath ?? null,
+    },
+    failureReason,
+  };
+}
+
+/**
+ * Abnormal path: the child did not complete its own contract. The parent has
+ * already ensured it is gone and run the exact orphan executor. This evaluator
+ * re-runs the normal manifest/log/process/port checks against the recovered
+ * state on disk, and adds recovery-specific checks. It never reinterprets an
+ * abnormal child as accepted.
+ */
+async function evaluateAbnormalScenario(
+  name: DrillScenarioName,
+  scenarioDir: string,
+  controlDir: string,
+  worktreeDir: string,
+  run: ChildRun,
+  recovery: DrillAbnormalRecovery,
+): Promise<RuntimeFailureDrillScenarioReport> {
+  const checks: DrillCheck[] = [];
+  const check = (id: string, ok: boolean, detail?: string): void => {
+    checks.push(detail === undefined ? { id, ok } : { id, ok, detail });
+  };
+
+  const resultPath = join(scenarioDir, "child-result.json");
+  const childLogPath = join(scenarioDir, "child.log");
+
+  // A result file is retained as evidence if the child wrote one before it
+  // died, but it can never turn an abnormal child into an accepted one.
+  let childResult: DrillChildResult | undefined;
+  if (existsSync(resultPath)) {
+    try {
+      childResult = parseChildResult(resultPath, name);
+    } catch {
+      childResult = undefined;
+    }
+  }
+  const accepted = childResult?.observed.accepted === true;
+  const rejectionObserved = childResult?.observed.rejectionObserved === true;
+  const rejectionName = childResult?.observed.rejectionName ?? null;
+  const verifyReport = childResult?.observed.verify ?? null;
+
+  // Mirrors the normal path's child-exit check; an abnormal trigger makes it
+  // false by construction, so an abnormal scenario always fails the drill.
+  check(
+    "child-exit",
+    run.spawnError === undefined &&
+      !run.timedOut &&
+      run.exitCode === 0 &&
+      run.signal === null,
+    run.spawnError ??
+      (run.timedOut
+        ? `child timed out after ${run.timeoutMs}ms`
+        : `exit=${String(run.exitCode)} signal=${String(run.signal)}`),
+  );
+  check("child-log-present", existsSync(childLogPath), childLogPath);
+  check(
+    "child-terminated",
+    run.termination.exited,
+    run.termination.detail ??
+      "child exited on its own; no parent signal was needed",
+  );
+  check(
+    "child-process-gone",
+    run.pid === null
+      ? run.spawnError !== undefined
+      : !isProcessAlive(run.pid),
+    `pid=${String(run.pid)}`,
+  );
+
+  check(
+    "abnormal-recovery-executed",
+    recovery.executed,
+    recovery.error ?? recovery.trigger,
+  );
+  check(
+    "abnormal-recovery-error",
+    recovery.error === null,
+    recovery.error ?? "none",
+  );
+  const executor = recovery.report;
+  check("abnormal-recovery-report", executor !== null);
+  check(
+    "abnormal-recovery-no-needs-human",
+    executor !== null && executor.needsHuman.length === 0,
+    executor === null
+      ? "no executor report"
+      : executor.needsHuman.length === 0
+        ? "0 needs_human record(s)"
+        : executor.needsHuman
+            .map((record) => `${record.runtimeId ?? "unknown"}: ${record.reason}`)
+            .join("; "),
+  );
+  check(
+    "abnormal-recovery-complete",
+    executor !== null &&
+      executor.needsHuman.length === 0 &&
+      executor.reaped.length + executor.skipped.length === executor.scanned,
+    executor === null
+      ? "no executor report"
+      : `scanned=${executor.scanned} reaped=${executor.reaped.length} ` +
+        `skipped=${executor.skipped.length} needs_human=${executor.needsHuman.length}`,
+  );
+  check("not-accepted", accepted === false);
+
+  // Re-run the normal evidence checks against the recovered scratch control
+  // root. The child result is unnecessary: the persisted manifest is the
+  // durable evidence.
+  const manifestScan = readRuntimeManifests(controlDir);
+  let runtimeReport: RuntimeFailureDrillRuntimeReport | null = null;
+  let failureReason: string | null = null;
+  check(
+    "runtime-manifest-present",
+    manifestScan.entries.length === 1 && manifestScan.errors.length === 0,
+    [
+      `${manifestScan.entries.length} runtime manifest(s)`,
+      ...manifestScan.errors,
+    ].join("; "),
+  );
+
+  const manifestEntry =
+    manifestScan.entries.length === 1 ? manifestScan.entries[0] : undefined;
+  if (manifestEntry !== undefined) {
+    const manifest = manifestEntry.manifest;
+    const serviceReports = await buildServiceReports(controlDir, manifest);
+
+    let leaseCount = -1;
+    let leaseStorePath = "";
+    try {
+      const leaseStore = readLeaseStore(controlDir);
+      leaseCount = leaseStore.count;
+      leaseStorePath = leaseStore.path;
+      check("lease-store-readable", true, leaseStorePath);
+    } catch (error) {
+      check("lease-store-readable", false, errorMessage(error));
+    }
+
+    runtimeReport = {
+      runtimeId: manifest.runtimeId,
+      manifestPath: manifestEntry.manifestPath,
+      manifestExists: true,
+      cleanup: manifest.cleanup,
+      failureReason: manifest.failureReason ?? null,
+      leaseCount,
+      leaseStorePath,
+      services: serviceReports,
+      processGone:
+        serviceReports.length > 0 &&
+        serviceReports.every((entry) => entry.processGone),
+      portFree:
+        serviceReports.length > 0 &&
+        serviceReports.every((entry) => entry.portFree),
+    };
+    failureReason = runtimeReport.failureReason;
+
+    check(
+      "manifest-cleanup",
+      manifest.cleanup === "complete",
+      manifest.cleanup,
+    );
+    check(
+      "manifest-recovery-reaped",
+      manifest.recovery?.state === "reaped",
+      manifest.recovery?.state ?? "no recovery record",
+    );
+    check(
+      "services-process-gone",
+      serviceReports.length > 0 &&
+        serviceReports.every((entry) => entry.processGone),
+    );
+    check(
+      "services-process-group-gone",
+      serviceReports.length > 0 &&
+        serviceReports.every((entry) => entry.processGroupGone),
+    );
+    check(
+      "services-port-free",
+      serviceReports.length > 0 &&
+        serviceReports.every((entry) => entry.portFree),
+    );
+    check(
+      "services-log-present",
+      serviceReports.length > 0 &&
+        serviceReports.every((entry) => entry.logExists),
+    );
+    check(
+      "lease-count",
+      leaseCount === 0,
+      `leases=${leaseCount} expected=0`,
+    );
+  }
+
+  check("artifacts-scenario-present", existsSync(scenarioDir), scenarioDir);
+  check("artifacts-control-present", existsSync(controlDir), controlDir);
+  check("artifacts-worktree-present", existsSync(worktreeDir), worktreeDir);
+
+  const status = checks.every((entry) => entry.ok) ? "pass" : "fail";
+  return {
+    name,
+    expectedFailure: DRILL_EXPECTED_FAILURES[name],
+    status,
+    accepted,
+    rejectionObserved,
+    rejectionName,
+    child: {
+      pid: run.pid,
+      exitCode: run.exitCode,
+      signal: run.signal,
+      durationMs: run.durationMs,
+      timedOut: run.timedOut,
+      logPath: childLogPath,
+      resultPath,
+    },
+    checks,
+    runtime: runtimeReport,
+    verify: verifyReport,
+    abnormalRecovery: recovery,
     artifacts: {
       scenarioDir,
       controlDir,
@@ -1086,6 +1537,7 @@ function errorScenarioReport(
   worktreeDir: string,
   run: ChildRun,
   error: string,
+  abnormalRecovery: DrillAbnormalRecovery | null = null,
 ): RuntimeFailureDrillScenarioReport {
   return {
     name,
@@ -1106,6 +1558,7 @@ function errorScenarioReport(
     checks: [{ id: "evaluation-error", ok: false, detail: error }],
     runtime: null,
     verify: null,
+    abnormalRecovery,
     artifacts: {
       scenarioDir,
       controlDir,
@@ -1167,6 +1620,92 @@ function readManifest(path: string): RuntimeManifest {
     throw new Error(`invalid runtime manifest: ${path}`);
   }
   return raw as unknown as RuntimeManifest;
+}
+
+/**
+ * Build the per-service evidence used by both the normal and abnormal paths.
+ * Log containment keeps a corrupted manifest from making the drill read
+ * arbitrary files.
+ */
+async function buildServiceReports(
+  controlDir: string,
+  manifest: RuntimeManifest,
+): Promise<RuntimeFailureDrillServiceReport[]> {
+  const serviceReports: RuntimeFailureDrillServiceReport[] = [];
+  for (const service of manifest.services) {
+    const pid = typeof service.pid === "number" ? service.pid : null;
+    const pgid = typeof service.pgid === "number" ? service.pgid : null;
+    const port =
+      typeof service.port === "number" && Number.isInteger(service.port)
+        ? service.port
+        : 0;
+    const logPath = typeof service.logPath === "string" ? service.logPath : "";
+    const logContained = logPath !== "" && isInside(controlDir, logPath);
+    const logExists = logContained && existsSync(logPath);
+    const attempts = Array.isArray(service.readinessAttempts)
+      ? service.readinessAttempts
+      : [];
+    const statuses = attempts.map((attempt) =>
+      typeof attempt.status === "number" ? attempt.status : null,
+    );
+    const portFree = port > 0 ? await probePort(port) : false;
+    const processGone = pid !== null ? !isProcessAlive(pid) : false;
+    const groupGone = processGroupGone(pgid);
+
+    serviceReports.push({
+      name: service.name,
+      pid,
+      pgid,
+      port,
+      logPath,
+      logExists,
+      processGone,
+      processGroupGone: groupGone,
+      portFree,
+      readinessAttempts: attempts.length,
+      readinessOk: attempts.some((attempt) => attempt.ok === true),
+      readinessStatuses: statuses,
+    });
+  }
+  return serviceReports;
+}
+
+interface RuntimeManifestEntry {
+  manifestPath: string;
+  manifest: RuntimeManifest;
+}
+
+interface RuntimeManifestScan {
+  entries: RuntimeManifestEntry[];
+  errors: string[];
+}
+
+/** Read every manifest under the scratch control root, sorted by directory. */
+function readRuntimeManifests(controlDir: string): RuntimeManifestScan {
+  const runtimeDir = join(controlDir, ".cliyard", "runtime");
+  if (!existsSync(runtimeDir)) return { entries: [], errors: [] };
+
+  let names: string[];
+  try {
+    names = readdirSync(runtimeDir).sort();
+  } catch (error) {
+    return {
+      entries: [],
+      errors: [`cannot scan ${runtimeDir}: ${errorMessage(error)}`],
+    };
+  }
+
+  const scan: RuntimeManifestScan = { entries: [], errors: [] };
+  for (const name of names) {
+    const manifestPath = join(runtimeDir, name, RUNTIME_MANIFEST_FILE);
+    if (!existsSync(manifestPath)) continue;
+    try {
+      scan.entries.push({ manifestPath, manifest: readManifest(manifestPath) });
+    } catch (error) {
+      scan.errors.push(errorMessage(error));
+    }
+  }
+  return scan;
 }
 
 function readLeaseStore(controlDir: string): {
