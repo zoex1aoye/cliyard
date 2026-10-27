@@ -1,0 +1,72 @@
+{
+  "planId": "failure-cost-hardening-v0",
+  "tasks": [
+    {
+      "taskId": "failure-cost-hardening-core",
+      "goal": "Close the two post-review gaps without changing the failure taxonomy or policy. Preserve Claude result subtype as a bounded non-secret field and use a known error_max_budget_usd subtype to classify budget_exhausted/provider with code error_max_budget_usd, while explicit wall-clock timeout still outranks it. Preserve another bounded unknown subtype as a failure code without inventing a category. Tighten CostTruth parsers so provider-reported observations require currency, and an authoritative provider total requires provider source, non-null amount/currency, no amount/currency missing reasons, and observations that are empty or all provider-reported. Keep valid cli-estimated records with unknown currency non-authoritative. Add focused positive and negative tests for subtype precedence/codes and provider authority. Do not change retry, acceptance, routing, admission, queue semantics or design documents.",
+      "nonGoals": [
+        "Do not modify design/failure-cost-truth-v0.md or design/failure-cost-hardening-v0.md.",
+        "Do not add automatic retry, routing, admission or parallel dispatch.",
+        "Do not make CLI estimates authoritative or claim DeepSeek billing/balance.",
+        "Do not alter RunManifest authority or queue/run acceptance.",
+        "Do not retain raw result subtypes longer than the bounded code or raw provider payloads."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/failure-cost-truth-v0.md",
+        "src/failures.ts",
+        "src/agents/claude.ts",
+        "tests/failure-taxonomy.test.ts",
+        "tests/claude-failure-cost.test.ts",
+        "tests/supervisor-failure-cost.test.ts",
+        "package.json",
+        "tsconfig.json"
+      ],
+      "writePaths": [
+        "src/failures.ts",
+        "src/agents/claude.ts",
+        "tests/failure-taxonomy.test.ts",
+        "tests/claude-failure-cost.test.ts"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/failure-taxonomy.test.ts",
+        "npx tsx --test tests/claude-failure-cost.test.ts",
+        "npm test"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "failure-cost-hardening-docs",
+      "goal": "Update docs/evidence/FAILURE_COST_TRUTH.md with the exact post-review findings, subtype-to-budget behavior, stricter provider authority rules, and measured commands/test counts from the hardening task. Preserve the existing evidence structure and state clearly that these tests/fixtures verify behavior; do not claim the real provider was billed or that a real self-host transcript was parsed by the new adapter. Update only observed results and retain no raw payloads.",
+      "nonGoals": [
+        "Do not modify source, tests, README, NEXT_ITERATION, NEXT_STEP_CONTROLLER, SUPERVISOR_V0, CLAUDE_DEEPSEEK_WORKER, TASK_ESTIMATION or design files.",
+        "Do not claim new provider billing, balance, authorization, routing or automatic retry behavior.",
+        "Do not invent measurements or overwrite historical evidence."
+      ],
+      "dependsOn": [
+        "failure-cost-hardening-core"
+      ],
+      "readPaths": [
+        "design/failure-cost-truth-v0.md",
+        "src/failures.ts",
+        "src/agents/claude.ts",
+        "tests/failure-taxonomy.test.ts",
+        "tests/claude-failure-cost.test.ts",
+        "docs/evidence/FAILURE_COST_TRUTH.md",
+        "package.json"
+      ],
+      "writePaths": [
+        "docs/evidence/FAILURE_COST_TRUTH.md"
+      ],
+      "verifyCommands": [
+        "rg -q 'error_max_budget_usd' docs/evidence/FAILURE_COST_TRUTH.md",
+        "rg -qi 'provider-reported.*currency|currency.*provider-reported' docs/evidence/FAILURE_COST_TRUTH.md",
+        "rg -qi 'authoritative' docs/evidence/FAILURE_COST_TRUTH.md",
+        "git diff --check",
+        "npm test"
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
