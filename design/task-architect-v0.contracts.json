@@ -1,0 +1,91 @@
+{
+  "planId": "task-architect-v0",
+  "contracts": [
+    {
+      "taskId": "architect-read-only-runner",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Implement the Task Architect v0 read-only Plan producer. Add src/architect/runner.ts and src/architect/cli.ts plus top-level cliyard CLI and package script wiring. The runner resolves a target git repository and exact HEAD, requires a clean worktree, requires a tracked repo-relative design document, reads bounded design text, and invokes an injected or real Claude worker with permission mode plan and only Read, Grep and Glob tools. Construct a synthetic read-only AgentStartInput briefing that demands one Plan JSON matching the existing Plan schema and includes the requested planId/design text. Extend AgentResult with an optional finalText and populate it in the Claude adapter from the final stream result so the complete Plan can be parsed beyond the bounded logTail. Parse plain or fenced Plan JSON, run the existing compilePlan against the resolved base commit, require zero worker touched paths and an unchanged clean git status, then atomically write only <target>/.cliyard/plans/<planId>.json (or explicit --out). Never write contracts, create worktrees, dispatch, merge or push. Return a JSON/human summary. Add focused tests with injected workers covering a valid Plan artifact, dirty-repo rejection before worker start, touched-path rejection with no artifact, invalid JSON/schema/cycle rejected, and CLI/help behavior. Do not change planner schema semantics or Supervisor scheduling."
+      ],
+      "nonGoals": [
+        "No automatic contract freeze",
+        "No automatic dispatch",
+        "No design document editing",
+        "No daemon or long-lived architect",
+        "No new Plan schema"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "design/task-architect-v0.md",
+        "src/agents/types.ts",
+        "src/agents/claude.ts",
+        "src/planner/plan.ts",
+        "src/planner/bridge.ts",
+        "src/cli.ts",
+        "tests/plan.test.ts"
+      ],
+      "writePaths": [
+        "src/architect/runner.ts",
+        "src/architect/cli.ts",
+        "src/agents/types.ts",
+        "src/agents/claude.ts",
+        "src/cli.ts",
+        "package.json",
+        "tests/architect.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "57d85ff976bbbd31504ff181e87d685ed9e22453",
+      "verifyCommands": [
+        "npx tsx --test tests/architect.test.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "architect-docs",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Run the implemented Task Architect against measured fake-worker paths and, if practical, one real Claude Code + DeepSeek smoke on a scratch committed design. Inspect the generated Plan and all read-only/dirty/touched-path guards. Update README, NEXT_ITERATION and SUPERVISOR_V0; add docs/evidence/TASK_ARCHITECT.md with exact commands, plan output, read-only evidence, validation failures, measured test counts, real-provider behavior if actually run, and remaining limitations. State clearly that Task Architect only produces a human-reviewable Plan and never freezes contracts/dispatches automatically. Name durable continuous orchestration as the next gap while preserving daemon, cross-host, SQLite, browser evidence and admission scheduling as non-goals."
+      ],
+      "nonGoals": [
+        "No source or test behavior changes",
+        "No invented real-provider evidence",
+        "No automatic dispatch claim",
+        "No daemon claim",
+        "No automatic push or main merge"
+      ],
+      "dependsOn": [
+        "architect-read-only-runner"
+      ],
+      "readPaths": [
+        "README.md",
+        "docs/NEXT_ITERATION.md",
+        "docs/SUPERVISOR_V0.md",
+        "design/task-architect-v0.md",
+        "src/architect/runner.ts",
+        "src/architect/cli.ts",
+        "tests/architect.test.ts"
+      ],
+      "writePaths": [
+        "README.md",
+        "docs/NEXT_ITERATION.md",
+        "docs/SUPERVISOR_V0.md",
+        "docs/evidence/TASK_ARCHITECT.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "57d85ff976bbbd31504ff181e87d685ed9e22453",
+      "verifyCommands": [
+        "npm test",
+        "npm run build",
+        "test -s docs/evidence/TASK_ARCHITECT.md",
+        "rg -q '^## Task Architect' docs/SUPERVISOR_V0.md",
+        "rg -q 'read-only' docs/evidence/TASK_ARCHITECT.md"
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
