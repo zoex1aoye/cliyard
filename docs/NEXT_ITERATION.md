@@ -1,24 +1,20 @@
-# 下一迭代：RuntimeManager v0、孤儿回收与 hardening 收口
+# 下一迭代：Task Architect 与持久化持续编排
 
 > 日期：2026-10-27（更新）
 >
-> 结论：RuntimeManager v0、Runtime Orphan Reaper v0 与 orphan hardening 均已
-> 实现。端口租约、RuntimeSpec、HTTP readiness、manifest/evidence、进程组清理、
-> 精确进程身份、精确租约 owner、只读 preflight、`supervisor reap`、
-> start/resume 自动对账和 `runtimeId` recovery record 均有测试覆盖。
-> 实测完整套件 **164/164 通过（连续 5 次）**，runtime/恢复相关 **78 项通过**。
+> 结论：RuntimeManager v0、Runtime Orphan Reaper v0、orphan hardening 与
+> **runtime failure drills v0** 均已实现。failure drill 实测 **3/3 通过**
+> （三个独立子进程），完整套件 **166/166**，runtime/恢复相关 **80/80**
+> （13 个文件），`npm run build` 通过。`cleanup-failure` 按设计保留 1 条
+> lease 和 `cleanup: "failed"` 证据，同时确认服务进程和端口已清理。
 >
-> 本轮 hardening 的四项修复：租约 owner PID 必须精确等于 manifest owner；新
-> recovery record 自带 `runtimeId`，Supervisor 不再按 reason 反推；Supervisor
-> 源码无 NUL；runtime 测试文件使用互不重叠的静态端口池。5 次独立全量运行均
-> 164/164，本轮未观察到 flake。
+> 下一具体缺口：**Task Architect 与持久化持续编排（durable continuous
+> orchestration）**。这两项尚未实现，需要各自的设计与验收；本轮文档不把
+> 它们写成已完成能力。
 >
-> 剩余缺口明确保留：不做跨主机回收；leader 已退出但组内仍有成员时只能
-> `needs_human`；Windows 无法采集进程身份；没有 daemon 或周期扫描；测试端口
-> 池只解决本仓库测试文件之间的冲突，不是生产或跨仓库端口协调。下一迭代只补
-> 进程级失败演练和事故证据流程，不扩大能力声明。
->
-> 本迭代不扩 daemon、SQLite、Playwright/axe/截图/无障碍证据、Docker 或无限并发。
+> 已完成的 failure-drill 切片明确不引入 daemon、跨主机回收、浏览器证据、
+> SQLite 或 CPU/内存/浏览器准入调度。failure drill 只是前台诊断，不改变
+> reaper 的 `needs_human` 规则。
 
 ## 0. 当前状态
 
@@ -64,10 +60,29 @@
     `status` 依次回退到 manifest `runtimeId` 和目录名；
   - `src/supervisor/cli.ts` 不再做第二次 preflight、不按 state/reason 反推 id，
     源码不含 NUL 分隔符。
+- **Runtime Failure Drills v0**
+  - `cliyard runtime-drill [--out <dir>] [--port-base <start>] [--json]`；
+    默认输出 `.cliyard/runtime-drills/<UTC timestamp>-<pid>/`，默认端口基址
+    `22800`；
+  - 三个场景分别在独立 OS 子进程中运行，各占互不重叠的 30 端口子区间
+    （`base..base+29`、`+30..+59`、`+60..+89`）；端口范围在启动任何子进程
+    前整体校验；
+  - `readiness-timeout`：服务 503、readiness 超时、verifyCommands 跳过；
+  - `verify-failure`：readiness 成功、verifyCommand exit 7；
+  - `cleanup-failure`：readiness 成功、注入 lease release 故障，
+    `RuntimeCleanupError`，manifest `cleanup: "failed"`；
+  - 父进程独立复核子进程退出码、manifest、服务日志、进程/进程组、端口可绑定
+    性和 lease store；
+  - 输出 `runtime-failure-drills.json`（version 1）及每个场景的
+    `child.log`、`child-result.json`、`control/` 和 `worktree/`；
+  - 实测 3/3 通过；三个服务均退出、三个端口均可重新绑定；前两个场景 lease
+    store 为空，cleanup-failure 保留 1 条证据 lease。详见
+    [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md)。
 - **测试端口隔离（`test port` pools）**
-  - 六个会启动真实进程或绑定真实端口的 runtime 测试文件使用
-    `tests/test-port-ranges.ts` 的静态、互不重叠端口池（22000–22599，每个文件
-    100 个）；shell verifier 保留 21400–21499 与 21500–21599；
+  - 七个会启动真实进程或绑定真实端口的 runtime 测试文件使用
+    `tests/test-port-ranges.ts` 的静态、互不重叠端口池（22000–22699；六个文件
+    各 100 个，failure drill 为 90 端口窗口）；shell verifier 保留 21400–21499
+    与 21500–21599；
   - 池在 import 时断言反转/重叠，取范围时对池耗尽抛错；每次分配仍走真实
     `PortAllocator` 探测与重试；
   - 仅限本仓库测试进程隔离，不是生产、跨 run 或跨仓库端口协调。
@@ -85,6 +100,9 @@
 
 明确未落地：
 
+- **Task Architect**（结构化任务架构 / 契约生成）；
+- **durable continuous orchestration**（持久化持续编排）；这两项是下一具体
+  缺口，需要独立设计与验收；
 - 跨主机 runtime 回收或远程 kill；外来 host 的 runtime 只会 `skip`，主机名变化
   也会使旧 manifest 看起来属于外来 host；
 - 第三方 dead owner 租约的自动回收（按 hardening 规则只能 `needs_human` 并保留
@@ -102,11 +120,13 @@
 - 自动合入 main、自动 push；
 - HTTPS、TCP-only readiness、自定义优雅关闭命令或日志轮转；
 - 生产级、跨 run 或跨仓库端口协调（测试端口池不是该能力）；
-- CI 或跨主机上的长期 flake 率结论（本轮只有本机连续 5 次全量运行）。
+- CI 或跨主机上的长期 flake 率结论（当前只有本机单次与历史连续 5 次运行）。
 
 正常清理、崩溃后的证据字段、分类规则、事故清单和限制详见
 [docs/RUNTIME_ORPHAN_RECOVERY.md](RUNTIME_ORPHAN_RECOVERY.md)；RuntimeManager
-的正常生命周期见 [docs/RUNTIME_MANAGER.md](RUNTIME_MANAGER.md)。
+的正常生命周期与 failure drill 用法见
+[docs/RUNTIME_MANAGER.md](RUNTIME_MANAGER.md)；failure drill 的实测结果见
+[docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md)。
 
 ## 1. 孤儿回收验收对照
 
@@ -129,19 +149,43 @@
 | 13 | 租约 owner PID 必须等于 manifest owner；dead/live 不符均 `needs_human` | 已实现 | `runtime-owner-lease-safety`：相同 dead owner 可回收；dead/live 第三方 owner 均保留组、租约和字节级不变的 manifest |
 | 14 | recovery record 与 manifest 自带 `runtimeId`；legacy 记录可读 | 已实现 | `runtime-recovery-record`：reaped/skipped/needs_human；持久化记录与报告一致；无 id legacy 记录可读 |
 | 15 | Supervisor 不按 state/reason 反推 id，输出无 NUL | 已实现 | `supervisor-runtime-recovery-record`：相同 reason 的多个 runtime 标签仍正确；`status` 优先记录 id 并支持 legacy 回退 |
-| 16 | runtime 测试文件端口池互不重叠 | 已实现 | `test-port-ranges`：import 时断言；12 个 runtime/恢复文件单独运行全部通过 |
+| 16 | runtime 测试文件端口池互不重叠 | 已实现 | `test-port-ranges`：import 时断言；12 个 runtime/恢复文件（drill 前）单独运行全部通过 |
+
+failure drill 的设计验收对照
+（[design/runtime-failure-drills-v0.md](../design/runtime-failure-drills-v0.md)）：
+
+| # | 设计要求 | 状态 | 实测覆盖 |
+|---|----------|------|----------|
+| 1 | 三个场景在三个独立子进程中运行 | 已实现 | 子进程 PID 54804 / 54836 / 54869，均 exit 0、无信号、无超时 |
+| 2 | readiness timeout 跳过 verifyCommands、拒绝并保留证据 | 已实现 | 12 次 readiness 尝试（ECONNREFUSED + 11×503）；命令 skipped；marker 不存在；`cleanup: "complete"` |
+| 3 | verify exit 7 拒绝并保留 complete cleanup | 已实现 | verifier 与命令均 exit 7；marker 存在；`cleanup: "complete"`；lease 0 |
+| 4 | cleanup release 失败拒绝、`cleanup: "failed"`、绝不 accepted | 已实现 | `RuntimeCleanupError`；failureReason 含注入故障；`cleanup: "failed"` |
+| 5 | 每个场景服务端口事后可绑定 | 已实现 | 22800 / 22830 / 22860 均 `portFree=true`；事后 `lsof` 无监听 |
+| 6 | 机器可读报告 + 每场景证据 | 已实现 | `runtime-failure-drills.json`、`child.log`、`child-result.json`、manifest/log/lease |
+| 7 | focused drill、full suite 与 build 通过 | 已实现 | 2/2、166/166、build pass |
+| 8 | 文档只记录实测结果、不扩大能力 | 已实现 | [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md) 与本次文档更新 |
 
 未覆盖的能力不会被写成“已实现”：跨主机回收、leader-dead 自动 kill、daemon
-周期回收、Windows 进程身份、生产或跨仓库端口协调。
+周期回收、Windows 进程身份、生产或跨仓库端口协调、Task Architect、durable
+continuous orchestration。
 
 ## 2. 验证（2026-10-27，本工作树，macOS）
 
+当前套件（包含 failure drill 测试）：
+
 ```text
-npm run build   → 通过
-npm test        → 164/164 通过，连续 5 次
+npm run build                                      → 通过
+npx tsx --test tests/runtime-failure-drills.test.ts → 2/2 通过（1981.8 ms）
+runtime/恢复 focused group（13 个文件）            → 80/80 通过（3150.8 ms）
+npm test（完整套件）                               → 166/166 通过（8194.6 ms）
 ```
 
-5 次全量运行均为独立的 `npm test` 进程，在本工作树顺序执行：
+以上均为本机单次运行；这是本机 macOS 证据，不是长期 flake 率、CI 或跨主机
+结论。failure drill 实测细节（子进程、场景、端口、lease）见
+[docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md)。
+
+Drill 前的 hardening 基线（同日，drill 测试加入前）：5 次独立的 `npm test`
+进程顺序执行，均为 164/164：
 
 | 次数 | 结果 | test-runner duration |
 |------|------|----------------------|
@@ -151,9 +195,9 @@ npm test        → 164/164 通过，连续 5 次
 | 4 | 164/164 通过 | 8.14 s |
 | 5 | 164/164 通过 | 8.25 s |
 
-本轮未观察到 flake；这是本机 macOS 证据，不是长期 flake 率或 CI 结论。
+当时未观察到 flake；这不是长期 flake 率或 CI 结论。
 
-Runtime/恢复相关 78 项（12 个文件）：
+Runtime/恢复相关 80 项（13 个文件；其中 78 项为 drill 前已有）：
 
 ```text
 tests/contract-runtime.test.ts                     10
@@ -168,66 +212,70 @@ tests/runtime-reaper-plan.test.ts                   9
 tests/runtime-reaper.test.ts                       10
 tests/supervisor-runtime-reaper.test.ts             5
 tests/supervisor-runtime-recovery-record.test.ts    2
+tests/runtime-failure-drills.test.ts                2
 ```
 
-上述 12 个文件另在本轮各单独运行一次，全部通过。
+其余 12 个文件在 drill 前已各单独运行一次；drill 文件本轮单独运行 2/2。
 
-端口隔离：六个会启动真实进程或绑定真实端口的 runtime 测试文件从
-`tests/test-port-ranges.ts` 取静态、互不重叠的端口池（22000–22599，每个文件
-100 个）；shell verifier 保留 21400–21499 与 21500–21599。helper 在 import 时
-断言反转/重叠，取范围时对池耗尽抛错；每次分配仍走真实 `PortAllocator`
-探测/重试。该机制只防止本仓库测试文件互相重叠，不是生产端口注册表、跨 run
-协调器或跨仓库能力。
+端口隔离：七个会启动真实进程或绑定真实端口的 runtime 测试文件从
+`tests/test-port-ranges.ts` 取静态、互不重叠的端口池（22000–22699；六个文件
+各 100 个，failure drill 取 22600–22699 的 90 端口窗口）；shell verifier 保留
+21400–21499 与 21500–21599。helper 在 import 时断言反转/重叠，取范围时对池
+耗尽抛错；每次分配仍走真实 `PortAllocator` 探测/重试。该机制只防止本仓库
+测试文件互相重叠，不是生产端口注册表、跨 run 协调器或跨仓库能力。
 
 进程级覆盖包括：真实 detached RuntimeManager 服务 + owner SIGKILL、SIGTERM 不退出
 时的 SIGKILL 升级、leader 已死但组内仍有成员、外部进程占用端口、并发 reaper
 串行化，`reap`/`start`/`resume` 作为独立子进程运行，精确租约 owner 关联
 （相同 dead owner 可回收；dead/live 第三方 owner 均为 `needs_human` 且证据原样
-保留），以及 reaped/skipped/needs_human 三类的 `runtimeId` recovery record
-（包含无 id 的 legacy 记录仍可读）。`src/` 字节扫描未发现 NUL；Supervisor 输出
-测试也断言无 NUL 分隔符。没有跨主机或 daemon 清理演练，也没有相应能力声明。
+保留），reaped/skipped/needs_human 三类的 `runtimeId` recovery record
+（包含无 id 的 legacy 记录仍可读），以及三个 independent failure-drill 子进程
+（readiness 超时、verify exit 7、注入 cleanup release 故障）。`src/` 字节扫描
+未发现 NUL；Supervisor 输出测试也断言无 NUL 分隔符。没有跨主机或 daemon
+清理演练，也没有相应能力声明；failure drill 不是 reaper 演练，不改变
+`needs_human` 规则。
 
-此前 RuntimeManager v0（reaper 之前）的运行证据仍然有效：checked-in example
+此前 RuntimeManager v0（reaper 之前）的验收证据仍然有效：checked-in example
 在租约端口上 accepted 且 `cleanup=complete`；两个重叠验收使用不同端口并各自
 留下独立 manifest；真实 Claude + DeepSeek scratch run 只修改
 `runtime-smoke.txt`，服务以 `SIGTERM` 结束，租约表为空。本轮没有重跑这些外部
-Worker 演练，因此不把它们当作 reaper 或跨主机证据。
+Worker 验收演练，因此不把它们当作 drill、reaper 或跨主机证据。
 
 ## 3. 下一迭代范围
 
-本轮 hardening 已完成，不在下一迭代重复。下一迭代只做两件事：
+已完成的 RuntimeManager v0、Orphan Reaper v0、hardening 与 failure drills v0
+不在下一迭代重复。下一具体缺口只有两项：
 
-1. **进程级失败演练**
-   - 在独立进程中分别观察 readiness 超时、verifyCommand 失败和 cleanup 失败；
-   - 确认失败路径不静默 accepted，原日志、端口、pid/pgid 与裁决理由都保留；
-   - 对 `needs_human` 路径做一次 scratch repo 事故演练，按
-     [RUNTIME_ORPHAN_RECOVERY.md](RUNTIME_ORPHAN_RECOVERY.md) 的证据清单操作。
+1. **Task Architect**
+   - 把需求/计划转成结构化任务架构与可冻结契约（在现有 plan bridge 之上补齐
+     设计缺口）；
+   - 需要独立设计与验收，本文档不预写实现细节。
+2. **持久化持续编排（durable continuous orchestration）**
+   - 跨 wave 的持久状态与连续推进；
+   - 需要独立设计与验收；本轮不把它写成已完成能力。
 
-2. **证据与文档复核**
-   - 只按实测结果更新 README / NEXT_ITERATION / RUNTIME_MANAGER /
-     RUNTIME_ORPHAN_RECOVERY；
-   - 记录旧 runtimeId、owner、pid/pgid、租约、动作、端口和最终测试输出；
-   - 复核 hardening 证据（精确 lease owner、record runtimeId、NUL 扫描、
-     连续 5 次运行），不把 5 次本机结果写成 CI 或长期 flake 结论；
-   - 若文档与实现不一致，先修文档，不扩大能力声明；
-   - 保持“无 daemon、无 SQLite、无跨主机、无浏览器证据”的边界。
+对本轮已完成的 failure-drill 切片，以下仍是明确非目标，不得用 drill 结果
+反推为已实现：
 
-不在本迭代范围：
-
-- 生产、跨 run 或跨仓库端口协调（测试端口池只服务本仓库测试文件）；
+- daemon、周期扫描或后台常驻；
 - 跨主机回收、远程 kill 或共享租约存储；
-- leader-dead 进程组的启发式回收；
-- daemon / 周期扫描 / 后台常驻；
-- SQLite 或其他状态存储迁移；
 - Playwright、axe、截图或无障碍证据；
+- SQLite 或其他状态存储迁移；
+- CPU/内存/浏览器并发准入调度或无限并行 runtime；
+- 生产级、跨 run 或跨仓库端口协调（测试端口池只服务本仓库测试文件）；
+- leader-dead 进程组的启发式回收；
 - Docker / 远程沙箱 / 多租户 / 云执行；
-- 无限并行 runtime 或 CPU/内存/浏览器准入调度；
 - 自动合入 main 或自动 push；
 - HTTPS / 认证 / TCP-only readiness；
 - Windows POSIX 进程组等价清理；
 - 自定义优雅关闭命令或日志轮转。
 
+“持久化持续编排”是下一缺口，不是本轮 daemon 声明；若未来设计需要后台执行
+模型，必须单独设计和验收，不能从本切片的单机前台 drill 证据推导出来。
+
 ## 4. 完成标准
+
+RuntimeManager / reaper / hardening（已完成）：
 
 1. [已完成] RuntimeManager v0 的端口、readiness、manifest、cleanup 和 shell
    Verifier 集成测试通过。
@@ -235,37 +283,55 @@ Worker 演练，因此不把它们当作 reaper 或跨主机证据。
 3. [已完成] 两个重叠验收使用不同端口，manifest 路径互不冲突。
 4. [已完成] Supervisor SIGKILL 后，可证明归属的孤儿 runtime 与 stale lease 被
    安全回收；无法证明时报告 `needs_human`，不盲目 kill。跨主机仍不在范围内。
-5. [部分完成] readiness 失败与 verify 失败已有可审计结果与测试；cleanup 失败
-   的独立进程演练，以及三者的分别进程级演练，仍属于下一迭代。
-6. [已完成] `npm run build` 与 `npm test` 通过，完整套件连续 5 次实测
-   164/164，runtime/恢复相关 78/78。
-7. [已完成] 文档不宣称 daemon、SQLite、Playwright/axe、截图/无障碍证据、
-   无限并发、跨主机回收或 leader-dead 自动回收。
-8. [已完成] 租约 owner PID 必须精确等于 manifest owner；dead/live 不符均
+5. [已完成] 租约 owner PID 必须精确等于 manifest owner；dead/live 不符均
    `needs_human`，进程组、租约和 manifest 保留。
-9. [已完成] 新 recovery record 携带 `runtimeId` 并持久化；Supervisor 直接使用
+6. [已完成] 新 recovery record 携带 `runtimeId` 并持久化；Supervisor 直接使用
    记录 id，不按 reason 反推；legacy 记录仍可读；源码无 NUL。
-10. [已完成] 六个 runtime 测试文件使用不重叠静态端口池；5 次连续全量运行
-    未观察到 flake；不宣称生产或跨仓库端口协调。
+7. [已完成] runtime 测试文件使用不重叠静态端口池；不宣称生产或跨仓库端口
+   协调。
+
+Failure drills v0（已完成）：
+
+8. [已完成] 三个场景在三个独立子进程中运行；child PID、exit code、signal、
+   duration 均记录在报告中。
+9. [已完成] readiness timeout 跳过 `verifyCommands`，拒绝，保留 readiness、
+   log、pid/pgid 证据，并最终 `cleanup: "complete"`。
+10. [已完成] verify-command exit 7 拒绝并保留 `cleanup: "complete"`。
+11. [已完成] cleanup release 失败以 `RuntimeCleanupError` 拒绝，
+    `cleanup: "failed"`，绝不 accepted；服务进程和端口仍已清理。
+12. [已完成] 每个场景确认服务进程/进程组消失且租约端口可绑定；cleanup-failure
+    保留 1 条 lease 作为证据。
+13. [已完成] 机器可读报告与 per-scenario 证据保留；父进程独立复核。
+14. [已完成] focused drill 2/2、full suite 166/166、`npm run build` 通过。
+15. [已完成] 文档只记录实测结果；daemon、跨主机、浏览器证据、SQLite 与
+    准入调度仍为非目标。
+
+下一缺口（未完成）：
+
+16. [未完成] Task Architect：独立设计与验收。
+17. [未完成] 持久化持续编排：独立设计与验收。
 
 ## 5. 下一步顺序
 
 ```text
 1. [已完成] RuntimeManager v0 实现
 2. [已完成] Runtime Orphan Reaper v0：preflight + executor + supervisor 集成
-3. [已完成] 完整套件连续 5 次 164/164；runtime/恢复 78/78
-4. [已完成] 真实 owner SIGKILL、SIGTERM 升级、leader-dead、外占端口、
-            并发 reaper、start/resume fail-closed，以及本轮 hardening
-            （精确 lease owner、record runtimeId、Supervisor 无 NUL、测试端口池）
-5. 下一迭代：独立进程中的 readiness / verify / cleanup 失败演练
-6. 下一迭代：按事故清单做 scratch repo 证据演练并记录实测输出
-7. 复核文档，不新增跨主机、daemon、生产/跨仓库端口协调或 leader-dead
-   自动回收声明
+3. [已完成] hardening：精确 lease owner、record runtimeId、Supervisor 无 NUL、
+            测试端口池；完整套件连续 5 次 164/164
+4. [已完成] Runtime failure drills v0：三个独立子进程、报告、证据、端口/lease
+            验证；focused 2/2、full 166/166、build 通过
+5. [已完成] 文档按实测结果更新：README / NEXT_ITERATION / RUNTIME_MANAGER /
+            RUNTIME_ORPHAN_RECOVERY / docs/evidence/RUNTIME_FAILURE_DRILLS.md
+6. 下一迭代：Task Architect（独立设计与验收）
+7. 下一迭代：durable continuous orchestration（独立设计与验收）
+8. 不重复已完成切片；不新增 daemon、跨主机、浏览器证据、SQLite、准入调度
+   或生产/跨仓库端口协调声明
 ```
 
 ## 6. 上一迭代状态
 
 Supervisor v0（前台、原子 JSON RunManifest、进程级 SIGKILL 恢复）已完成，
 其操作语义与自举手册见 [docs/SUPERVISOR_V0.md](SUPERVISOR_V0.md)。当前完整套件
-包含 supervisor 测试（164/164 通过）。本轮没有引入 daemon 或 SQLite，也没有
-把 supervisor 的后台化列入计划。
+包含 supervisor 测试（166/166 通过）。本轮没有引入 daemon 或 SQLite，也没有
+把 supervisor 的后台化列入计划。RuntimeManager、Orphan Reaper、hardening 与
+failure drills 均已收口；下一缺口是 Task Architect 与持久化持续编排。

@@ -75,6 +75,59 @@ The same contract can be used with `claude-batch`/`codex-batch` against a real
 repository. In that path the service starts from the task worktree and
 `verifyCommands` run there too.
 
+## Runtime failure drills
+
+`cliyard runtime-drill` drives the three known RuntimeManager failure paths in
+three independent OS child processes:
+
+| Scenario | Expected result |
+|----------|-----------------|
+| `readiness-timeout` | The service listens but never reaches the expected status; `verifyCommands` are skipped and the runtime is stopped. |
+| `verify-failure` | Readiness succeeds, then a `verifyCommand` exits with code 7. |
+| `cleanup-failure` | Readiness succeeds, then an injected lease-release failure rejects the runtime API with `RuntimeCleanupError`. |
+
+```bash
+npm run runtime-drill -- --out <directory> --port-base 22800 --json
+npm run dev -- runtime-drill --out <directory> --port-base 22800
+node dist/cli.js runtime-drill --out <directory> --port-base 22800 --json
+```
+
+Defaults: `--out .cliyard/runtime-drills/<UTC timestamp>-<pid>/`, port base
+`22800`. Each scenario owns a disjoint 30-port subrange (`base..base+29`,
+`base+30..base+59`, `base+60..base+89`); the whole range is validated before
+any child starts. The output directory must be missing or empty.
+
+Artifact layout:
+
+```text
+<out>/
+  runtime-failure-drills.json          version-1 report: verdicts, child pids,
+                                       manifests, ports, leases and checks
+  <scenario>/
+    child.log
+    child-result.json                  child-observed evidence and self-checks
+    control/.cliyard/runtime/<runtimeId>/
+      runtime-manifest.json
+      web.log
+      data/web/
+    worktree/                          fixture service and verify scripts
+```
+
+The parent independently checks each child exit status, the persisted manifest,
+service logs, process and process-group state, port bindability, and the lease
+store. The command exits `0` only when all three scenarios match their expected
+failure and retain evidence; an expected task rejection is never reinterpreted
+as acceptance.
+
+Measured on 2026-10-27: 3/3 scenarios passed, every service was gone and every
+leased port was free afterward, and `cleanup-failure` retained exactly one
+lease as failed-cleanup evidence while its service was gone and its port free.
+Full details: [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md).
+
+The drill is a foreground diagnostic and regression tool. It is not a daemon,
+cross-host runner, browser-evidence producer, or production port coordinator,
+and it does not change the orphan reaper's ownership or `needs_human` rules.
+
 ## RuntimeSpec contract
 
 `TaskContract.runtime` is optional. When absent, verification keeps the
@@ -517,19 +570,28 @@ and remaining gaps are documented in
 
 ## Verification
 
-Measured on 2026-10-27 in this worktree (macOS):
+Measured on 2026-10-27 in this worktree (macOS). The current suite includes the
+failure-drill tests:
 
 ```text
-npm run build   → pass
-npm test        → 164/164 pass, five consecutive runs
+npm run build                                    → pass
+npx tsx --test tests/runtime-failure-drills.test.ts → 2/2 pass (1981.8 ms)
+runtime/recovery-focused group (13 files)        → 80/80 pass (3150.8 ms)
+npm test                                         → 166/166 pass (8194.6 ms)
 ```
 
-Each of the five runs was a separate `npm test` process, run sequentially in
-this worktree. Test-runner durations were 8.39 s, 8.16 s, 8.04 s, 8.14 s, and
-8.25 s; no flakes were observed. This is local evidence, not a long-term flake
-rate or CI claim.
+These are single local runs. They are not a repeated-run flake rate or CI
+claim. The measured drill evidence and per-scenario results are in
+[docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md).
 
-Runtime and recovery-focused suites (78 tests across 12 files):
+Pre-drill hardening baseline (same day, before the drill tests were added):
+`npm test` reported 164/164 in five consecutive runs, each a separate `npm test`
+process run sequentially in this worktree. Test-runner durations were 8.39 s,
+8.16 s, 8.04 s, 8.14 s, and 8.25 s; no flakes were observed. This is local
+evidence, not a long-term flake rate or CI claim.
+
+Runtime and recovery-focused suites (80 tests across 13 files; 78 of them
+predate the drill test):
 
 ```text
 tests/contract-runtime.test.ts                     10
@@ -544,13 +606,16 @@ tests/runtime-reaper-plan.test.ts                   9
 tests/runtime-reaper.test.ts                       10
 tests/supervisor-runtime-reaper.test.ts             5
 tests/supervisor-runtime-recovery-record.test.ts    2
+tests/runtime-failure-drills.test.ts                2
 ```
 
-Each of those files also passed when run alone once during this measurement.
+Each of those files also passed when run alone once during the earlier
+measurement (and the drill file passed alone in this run).
 
-The six runtime test files that start real processes or bind real ports take
-static, disjoint port pools from `tests/test-port-ranges.ts` (22000–22599, 100
-ports per file); the shell-verifier tests keep 21400–21499 and 21500–21599. The
+The seven runtime test files that start real processes or bind real ports take
+static, disjoint port pools from `tests/test-port-ranges.ts` (22000–22699; 100
+ports per file, except the 90-port drill window); the shell-verifier tests keep
+21400–21499 and 21500–21599. The
 helper asserts overlap/inversion at import time and throws on pool exhaustion
 when a range is taken; every allocation still goes through the real
 `PortAllocator` probe/retry path inside the assigned pool.
@@ -566,7 +631,15 @@ correlation (equal dead owner safe; live or dead third-party owner
 records for reaped, skipped, and needs_human buckets, including legacy records
 without an id.
 
-Earlier RuntimeManager v0 drills (2026-10-27, before the reaper iteration):
+The failure-drill suite additionally runs `readiness-timeout`,
+`verify-failure`, and `cleanup-failure` in three independent child processes.
+The checked run passed 3/3: two scenarios finished with `cleanup: "complete"`
+and empty lease stores; the cleanup-failure scenario finished with
+`cleanup: "failed"`, one retained lease, and a failed release; all three
+services were gone and all three ports were free afterward. See
+[docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md).
+
+Earlier acceptance drills (2026-10-27, before the reaper iteration):
 
 - the checked-in example was accepted on leased port `21850`, produced
   `cleanup: "complete"`, and released the port;
@@ -585,6 +658,7 @@ NUL delimiter.
 ## Related documents
 
 - Design: [design/runtime-manager-v0.md](../design/runtime-manager-v0.md)
+- Failure drill evidence: [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md)
 - Orphan recovery: [docs/RUNTIME_ORPHAN_RECOVERY.md](RUNTIME_ORPHAN_RECOVERY.md)
 - Supervisor integration: [docs/SUPERVISOR_V0.md](SUPERVISOR_V0.md)
 - Next iteration: [docs/NEXT_ITERATION.md](NEXT_ITERATION.md)

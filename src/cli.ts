@@ -12,6 +12,7 @@ import {
 } from "./scheduler/codex-batch.js";
 import { runPlanDispatchCli } from "./planner/cli.js";
 import { runEstimatePlanCli } from "./planner/estimate-cli.js";
+import { runRuntimeDrillCli } from "./runtime/failure-drills.js";
 import { runSupervisorCli } from "./supervisor/cli.js";
 import type { PermissionIntent, WorkerId } from "./types.js";
 
@@ -35,6 +36,7 @@ Usage:
                        [--worker claude|codex|mock] [--model id] [--out path]
                        [--ledger path] [--dry-run] [--cleanup]
   cliyard estimate-plan <plan.json|->
+  cliyard runtime-drill [--out <directory>] [--port-base <start>] [--json]
   cliyard supervisor start <contracts.json> --repo <path> [--worker claude|codex]
                            [--model id] [--plan-id id] [--dry-run]
   cliyard supervisor status --repo <path> [--run <id>] [--json]
@@ -142,6 +144,12 @@ async function main(): Promise<void> {
 
   if (cmd === "estimate-plan") {
     runEstimatePlanCli(argv.slice(1));
+    return;
+  }
+
+  if (cmd === "runtime-drill") {
+    // Let Node exit naturally so stdout is flushed before the process ends.
+    process.exitCode = await runRuntimeDrillCli(argv.slice(1));
     return;
   }
 

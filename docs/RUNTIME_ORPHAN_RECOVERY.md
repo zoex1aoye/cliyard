@@ -556,6 +556,39 @@ changed lease can turn a previously safe runtime into `needs_human`.
 - [ ] After `reaped`, verify `cleanup: "complete"`, the recovery record, the
       empty leases, and port bindability before resuming.
 
+### Failure drills and incident evidence
+
+`cliyard runtime-drill` (measured results:
+[docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md))
+exercises three `RuntimeManager` failure paths in scratch repositories:
+
+| Scenario | Final state |
+|----------|-------------|
+| `readiness-timeout` | Rejected, `cleanup: "complete"`, empty lease store. |
+| `verify-failure` | Rejected with command exit 7, `cleanup: "complete"`, empty lease store. |
+| `cleanup-failure` | Rejected with `RuntimeCleanupError`, `cleanup: "failed"`, one lease intentionally retained. |
+
+The drill is a manager-failure regression tool, not a reaper or supervisor
+recovery drill. Its scenarios use deliberate faults (503 readiness, exit 7, an
+injected allocator release failure), and its manifests contain the same
+owner/PID/PGID/identity/lease fields as a real runtime. Still:
+
+- The retained `cleanup-failure` lease is evidence. It has the scenario child's
+  PID as both lease owner and manifest owner, while the service process and
+  port are already clean. Do not delete that lease or edit the manifest to make
+  the drill look tidier.
+- A real repository showing `cleanup: "failed"` and a retained lease is an
+  incident, not a drill result. Follow sections 1–4 above: preserve the bundle
+  first, then run `supervisor reap --json` and act only on `reaped`,
+  `needs_human`, or `skipped`.
+- The drill does not relax any safety rule. Exact lease ownership
+  (`lease.pid === manifest.owner.pid`), exact process identity, competing
+  manifests, leader-dead groups, and every other `needs_human` condition apply
+  unchanged. A drill pass is not evidence that an orphan can be killed.
+- Drill evidence is single-host scratch evidence. It is not a cross-host,
+  daemon, browser, SQLite, or admission-scheduling claim, and it does not
+  replace an incident bundle.
+
 ## Crash-window matrix
 
 | Situation | Runtime evidence | Reaper classification |
@@ -634,20 +667,32 @@ changed lease can turn a previously safe runtime into `needs_human`.
 - **Not a supervisor recovery mechanism.** The reaper reconciles runtime
   services and leases. The supervisor's own RunManifest/lock recovery remains
   the `status`/`resume`/`stop` workflow in [SUPERVISOR_V0.md](SUPERVISOR_V0.md).
+- **Failure drills are not recovery drills.** `runtime-drill` exercises
+  RuntimeManager rejection and cleanup reporting in scratch repositories. Its
+  `cleanup-failure` lease is intentional evidence; the drill does not create,
+  classify, or reap a real orphan, and a passing drill does not lower any
+  `needs_human` threshold.
 - **Signal/exit-path caveat.** RuntimeManager cleanup runs in the verifier's
   `finally`; a hard kill or a `process.exit` path that bypasses that `finally`
   can leave an orphan. That is exactly why the reaper exists.
 
 ## Verification
 
-Measured on 2026-10-27 in this worktree (macOS):
+Measured on 2026-10-27 in this worktree (macOS). The current suite includes the
+failure-drill tests:
 
 ```text
-npm run build   → pass
-npm test        → 164/164 pass, five consecutive runs
+npm run build                                      → pass
+npx tsx --test tests/runtime-failure-drills.test.ts → 2/2 pass (1981.8 ms)
+runtime/recovery-focused group (13 files)          → 80/80 pass (3150.8 ms)
+npm test                                           → 166/166 pass (8194.6 ms)
 ```
 
-Five consecutive full-suite runs, each a separate `npm test` process run
+These are single local runs, not a repeated-run flake rate or CI claim. Drill
+results: [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md).
+
+Pre-drill hardening baseline (same day, before the drill tests were added):
+five consecutive full-suite runs, each a separate `npm test` process run
 sequentially in this worktree:
 
 | Run | Result | Test-runner duration |
@@ -658,10 +703,11 @@ sequentially in this worktree:
 | 4 | 164/164 pass | 8.14 s |
 | 5 | 164/164 pass | 8.25 s |
 
-No flakes were observed in these five runs. This is local macOS evidence, not a
+No flakes were observed in those five runs. This is local macOS evidence, not a
 long-term flake rate or CI claim.
 
-Runtime and recovery-focused suites (78 tests across 12 files):
+Runtime and recovery-focused suites (80 tests across 13 files; 78 of them
+predate the drill test):
 
 ```text
 tests/contract-runtime.test.ts                     10
@@ -676,13 +722,16 @@ tests/runtime-reaper-plan.test.ts                   9
 tests/runtime-reaper.test.ts                       10
 tests/supervisor-runtime-reaper.test.ts             5
 tests/supervisor-runtime-recovery-record.test.ts    2
+tests/runtime-failure-drills.test.ts                2
 ```
 
-Each of those files also passed when run alone once during this measurement.
+Each of those files also passed when run alone once during the earlier
+measurement (and the drill file passed alone in this run).
 
-The six runtime test files that start real processes or bind real ports take
-static, disjoint port pools from `tests/test-port-ranges.ts` (22000–22599, 100
-ports per file); the shell-verifier tests keep 21400–21499 and 21500–21599. The
+The seven runtime test files that start real processes or bind real ports take
+static, disjoint port pools from `tests/test-port-ranges.ts` (22000–22699; 100
+ports per file, except the 90-port drill window); the shell-verifier tests keep
+21400–21499 and 21500–21599. The
 helper asserts overlap/inversion at import time and throws on pool exhaustion
 when a range is taken; every allocation still goes through the real
 `PortAllocator` probe/retry path inside the assigned pool.
@@ -696,6 +745,13 @@ foreign listener, concurrent reaper serialization, supervisor `reap`, `start`,
 and `resume` run as separate child processes, exact lease-owner correlation,
 and `runtimeId`-bearing recovery records for reaped, skipped, and needs_human
 buckets.
+
+The separate `runtime-drill` suite runs `readiness-timeout`, `verify-failure`,
+and `cleanup-failure` in three independent child processes. In the measured
+run, all three passed; the first two ended `cleanup: "complete"` with empty
+lease stores, and `cleanup-failure` ended `cleanup: "failed"` with exactly one
+retained lease while its service was gone and its port was free. Those are
+manager-failure results, not reaper results; no orphan was reaped by the drill.
 
 Design test intent coverage:
 
@@ -722,8 +778,8 @@ Hardening acceptance
 | Executor recovery records and manifests contain `runtimeId` | `runtime-recovery-record` (3/3): reaped, skipped, and needs_human records; the persisted record matches the report; legacy records remain readable |
 | Supervisor output does not infer ids from reasons | `supervisor-runtime-recovery-record` (2/2): colliding reasons stay distinctly labelled; `status` prefers the record id and falls back for legacy records |
 | Supervisor source is text-clean (no embedded NUL) | byte scan of `src/` found no NUL bytes; the report test asserts no NUL delimiter in output |
-| `npm test` passes five consecutive isolated runs | 5 × 164/164 on 2026-10-27, no flakes observed |
-| RuntimeManager, reaper, and Supervisor suites remain green | full suite 164/164; 78 runtime/recovery-focused tests across 12 files |
+| `npm test` passes five consecutive isolated runs (pre-drill baseline) | 5 × 164/164 on 2026-10-27, no flakes observed |
+| RuntimeManager, reaper, and Supervisor suites remain green | current full suite 166/166; 80 runtime/recovery-focused tests across 13 files (78 pre-drill + 2 drill) |
 
 No cross-host recovery or daemon-based cleanup is claimed or tested.
 
@@ -731,6 +787,7 @@ No cross-host recovery or daemon-based cleanup is claimed or tested.
 
 - Design: [design/runtime-orphan-reaper-v0.md](../design/runtime-orphan-reaper-v0.md)
 - Hardening: [design/runtime-orphan-hardening.md](../design/runtime-orphan-hardening.md)
+- Failure drill evidence: [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md)
 - Normal runtime lifecycle: [docs/RUNTIME_MANAGER.md](RUNTIME_MANAGER.md)
 - Supervisor run recovery: [docs/SUPERVISOR_V0.md](SUPERVISOR_V0.md)
 - Next iteration: [docs/NEXT_ITERATION.md](NEXT_ITERATION.md)

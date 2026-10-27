@@ -12,6 +12,9 @@
  *
  *   21400-21499  tests/runtime-verifier.test.ts (shell verifier)
  *   21500-21599  tests/runtime-verifier.test.ts (codex-batch)
+ *
+ * The failure-drill pool needs 90 ports because the drill assigns three
+ * disjoint 30-port subranges to three independent child processes.
  */
 
 export const TEST_PORT_POOLS = {
@@ -21,6 +24,7 @@ export const TEST_PORT_POOLS = {
   "runtime-reaper-plan": { start: 22300, end: 22399 },
   "runtime-reaper": { start: 22400, end: 22499 },
   "supervisor-runtime-reaper": { start: 22500, end: 22599 },
+  "runtime-failure-drills": { start: 22600, end: 22699 },
 } as const;
 
 /** Ranges owned by tests/runtime-verifier.test.ts; never overlap them. */
