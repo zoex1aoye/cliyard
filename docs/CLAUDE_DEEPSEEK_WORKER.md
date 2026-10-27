@@ -94,7 +94,8 @@ npm run claude-batch -- \
 - 在隔离 worktree 创建 `worker-smoke.txt`。
 - Git diff 只包含契约允许路径。
 - shell verifier 通过后进入 accepted。
-- 单次短任务实测约 `$0.15`；Claude Code 的 system/tool prompt 占主要输入成本。
+- 单次短任务曾观察到约 `$0.15` 的 Claude Code CLI 估算值；这是
+  non-authoritative 的 `cli-estimated`，不是 DeepSeek 账单或余额。
 
 计划任务 `maxBudgetUsd` 默认 5 美元，可用
 `CLIYARD_CLAUDE_MAX_BUDGET_USD` 覆盖。生产 Worker 应使用更低单次预算，
@@ -110,6 +111,36 @@ npm run claude-batch -- \
 429、`Retry-After` 和实测成功窗口学习安全在途数。余额、价格和额度无法
 读取时记录 `unknown`，不能当成无限或免费。连接重置、超时和 5xx 由
 adapter 做有限指数退避重试，不能直接证明并发过高。
+
+## 4.1 失败分类与成本真相（v0）
+
+失败记录使用共享的十类枚举：`budget_exhausted`、`timeout`、
+`provider_transient`、`provider_auth`、`provider_protocol`、
+`worker_process_exit`、`verifier_rejected`、`policy_blocked`、
+`resource_exhausted`、`unknown`。优先级为 timeout > budget > auth >
+resource > transient > protocol > worker process exit > verifier > policy >
+unknown；worker 进程失败绝不会因为 verifier 随后也失败而被改写成
+`verifier_rejected`。记录只保留有限、脱敏的最终 provider 文本
+（message ≤400 字符），不保留原始 payload、prompt、文件内容或认证头。
+`retryableHint` 只是提示，不能触发重试。
+
+Claude Code 的 `total_cost_usd` 记为 `state: "cli-estimated"`、
+`authoritative: false`，不是 DeepSeek 账单、余额或额度。四种成本状态为
+`provider-reported`、`cli-estimated`、`usage-only`、`unavailable`；token
+usage 独立保留，CLI 显式输出的 0 保留为 0 但仍非权威；缺失或畸形成本为
+`unavailable`/`null`，绝不写成 0。配置的 `maxBudgetUsd` 记为
+`guardBudgetUsd`（保护上限），不是实际花费。重试和 repair 的每个 provider
+session 都会进入 observation，已知金额只在同币种内合并为非权威 subtotal，
+未知项保留在 `missing`。
+
+adapter 原有的有限 transient retry 保持不变（默认 2 次，指数退避，仅针对
+连接重置、超时和 429/5xx）；taxonomy 不增加也不移除重试，重试耗尽后返回
+最终结构化失败。控制面没有自动 retry、路由或并行派发；queue 需要显式
+`queue retry`，Supervisor 需要显式 `resume --retry-rejected`。dispatched run
+的 failure/cost 以 RunManifest task 为权威；queue 只为没有 RunManifest 的
+确定性 pre-dispatch block 保存 item-level failure。实测：focused
+failure/cost 50/50、full suite 290/290、build exit 0；详见
+[docs/evidence/FAILURE_COST_TRUTH.md](evidence/FAILURE_COST_TRUTH.md)。
 
 ## 5. Plan / DSH
 
