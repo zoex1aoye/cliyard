@@ -1,0 +1,171 @@
+{
+  "planId": "runtime-manager-v0",
+  "tasks": [
+    {
+      "taskId": "rt-port-lease",
+      "goal": "Implement RuntimeSpec/RuntimeManifest/PortLease types and a durable single-host PortAllocator for verification services. Persist leases under .cliyard/runtime/port-leases.json, mutate them under a cross-process lock, support CLIYARD_PORT_RANGE, probe 127.0.0.1 bind availability, reuse a live runId+service lease, reclaim same-host dead-owner leases, and release idempotently. Add focused tests that use separate Node processes to prove no duplicate lease and that occupied ports are skipped. Do not change scheduler or verifier behavior yet.",
+      "nonGoals": [
+        "No RuntimeManager service spawning",
+        "No scheduler changes",
+        "No CLI changes",
+        "No SQLite"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "design/runtime-manager-v0.md",
+        "docs/MASTER_OPERATING_MODEL.md",
+        "src/persistence/ledger.ts",
+        "src/supervisor/store.ts"
+      ],
+      "writePaths": [
+        "src/runtime/types.ts",
+        "src/runtime/ports.ts",
+        "tests/runtime-ports.test.ts"
+      ],
+      "verifyCommands": [
+        "test -f src/runtime/ports.ts",
+        "test -f tests/runtime-ports.test.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "rt-runtime-manager",
+      "goal": "Implement RuntimeManager on top of the accepted RuntimeSpec, RuntimeManifest, and PortAllocator types. Start argv-based services from the task worktree with leased ports, redirect logs to the control repository's .cliyard/runtime/<runtimeId>, probe readiness with path/status/timeout, persist a runtime manifest, inject data directories, and clean up the complete service process group and leases in finally semantics. Retry once on immediate child EADDRINUSE evidence. Add tests with fixture HTTP servers covering two services, readiness failure logs, URL env data, and no listener after stop.",
+      "nonGoals": [
+        "No contract schema changes",
+        "No verifier integration",
+        "No Playwright or axe",
+        "No daemon"
+      ],
+      "dependsOn": [
+        "rt-port-lease"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "design/runtime-manager-v0.md",
+        "src/runtime/types.ts",
+        "src/runtime/ports.ts",
+        "src/workspace/worktree.ts"
+      ],
+      "writePaths": [
+        "src/runtime/manager.ts",
+        "tests/runtime-manager.test.ts"
+      ],
+      "verifyCommands": [
+        "test -f src/runtime/manager.ts",
+        "test -f tests/runtime-manager.test.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "rt-contract-runtime",
+      "goal": "Add an optional validated runtime field to TaskContract and preserve it through Plan compilation. Runtime services require non-empty safe names, argv commands, repo-relative cwd, safe environment variable names, unique names, positive readiness values, and no shell-string command. Malformed runtime specs must fail compilePlan before dispatch. Add tests for valid propagation and malformed names, commands, cwd, environment names, timeouts, and duplicate services. Existing contracts without runtime must remain unchanged.",
+      "nonGoals": [
+        "No service spawning",
+        "No verifier changes",
+        "No scheduler changes"
+      ],
+      "dependsOn": [
+        "rt-port-lease"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "design/runtime-manager-v0.md",
+        "src/runtime/types.ts",
+        "src/contracts/schema.ts",
+        "src/planner/plan.ts",
+        "tests/plan.test.ts"
+      ],
+      "writePaths": [
+        "src/contracts/schema.ts",
+        "src/planner/plan.ts",
+        "tests/contract-runtime.test.ts"
+      ],
+      "verifyCommands": [
+        "grep -q 'runtime' src/contracts/schema.ts",
+        "test -f tests/contract-runtime.test.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "rt-verifier-runtime",
+      "goal": "Integrate RuntimeManager into the real shell verifier without changing mock/dry-run behavior. Accept runtime context from the scheduler, start services from the exact task worktree after implement/path-gate success, expose CLIYARD_<SERVICE>_URL and configured urlEnv variables to every verifyCommand, persist the RuntimeManifest under the control repository, and always clean services and leases. Preserve current non-runtime verification. Add an integration test where a fixture contract starts a temporary HTTP server, curl or Node asserts WEB_URL, and the port is released afterward; add a readiness-failure test proving verifyCommands do not run.",
+      "nonGoals": [
+        "No Playwright screenshots",
+        "No axe",
+        "No browser profile",
+        "No daemon",
+        "No automatic runtime for mock verification"
+      ],
+      "dependsOn": [
+        "rt-runtime-manager",
+        "rt-contract-runtime"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "design/runtime-manager-v0.md",
+        "src/runtime/types.ts",
+        "src/runtime/manager.ts",
+        "src/runtime/ports.ts",
+        "src/contracts/schema.ts",
+        "src/verification/verifier.ts",
+        "src/scheduler/codex-batch.ts",
+        "tests/verifier-shell.test.ts"
+      ],
+      "writePaths": [
+        "src/verification/verifier.ts",
+        "src/scheduler/codex-batch.ts",
+        "tests/runtime-verifier.test.ts"
+      ],
+      "verifyCommands": [
+        "grep -q 'RuntimeManager' src/verification/verifier.ts",
+        "test -f tests/runtime-verifier.test.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "rt-docs",
+      "goal": "Document the implemented RuntimeManager, port lease range and environment variables, RuntimeSpec contract, runtime manifest/evidence paths, readiness and cleanup behavior, and the current limitations. Add a runnable checked-in example runtime contract whose verifyCommand checks the leased URL. Update README and NEXT_ITERATION with the actual 105-test target only if the implementation tests confirm it; otherwise state the measured count. Do not claim Playwright, axe, daemon, SQLite, or unlimited parallel runtimes.",
+      "nonGoals": [
+        "No source code changes",
+        "No claims of screenshot or a11y evidence",
+        "No daemon readiness claim"
+      ],
+      "dependsOn": [
+        "rt-verifier-runtime"
+      ],
+      "readPaths": [
+        "README.md",
+        "docs/NEXT_ITERATION.md",
+        "design/runtime-manager-v0.md",
+        "src/runtime/types.ts",
+        "src/runtime/ports.ts",
+        "src/runtime/manager.ts",
+        "src/verification/verifier.ts",
+        "examples/claude-smoke.contract.json"
+      ],
+      "writePaths": [
+        "docs/RUNTIME_MANAGER.md",
+        "docs/NEXT_ITERATION.md",
+        "README.md",
+        "examples/runtime-verifier.contract.json"
+      ],
+      "verifyCommands": [
+        "test -f docs/RUNTIME_MANAGER.md",
+        "test -f examples/runtime-verifier.contract.json",
+        "grep -q 'RuntimeManager' docs/RUNTIME_MANAGER.md",
+        "npm run build"
+      ],
+      "maxRepairs": 0
+    }
+  ]
+}
