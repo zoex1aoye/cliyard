@@ -494,7 +494,6 @@ export async function runCodexBatch(
     loadContractsInput(contractsPath),
   );
   validateDispatchGraph(contracts);
-  await validateReadContexts(repoRoot, contracts);
   const sharedBase = contracts[0]?.baseCommit;
   if (
     !sharedBase ||
@@ -504,6 +503,9 @@ export async function runCodexBatch(
       "worker-batch requires one shared base commit for all tasks",
     );
   }
+  // Read context is proven against the exact commit every worker worktree is
+  // created from, never against the control checkout or its HEAD.
+  await validateReadContexts(repoRoot, contracts, sharedBase);
   if (requestedManifest) {
     validateManifestTasks(requestedManifest, contracts, sharedBase);
   }
@@ -1129,32 +1131,60 @@ async function linkDependencies(
 async function validateReadContexts(
   repoRoot: string,
   contracts: ReturnType<typeof loadContractsInput>,
+  baseCommit: string,
 ): Promise<void> {
   const producedPaths = contracts.flatMap((contract) => contract.writePaths);
   const readPaths = [...new Set(contracts.flatMap((contract) => contract.readPaths))];
 
   for (const readPath of readPaths) {
+    // The repository root exists in every worktree without a lookup.
     if (readPath === ".") continue;
-    const absolute = join(repoRoot, readPath);
-    if (!existsSync(absolute)) {
-      if (readPath === "AGENTS.md") continue;
-      if (producedPaths.some((writePath) => pathsOverlap(readPath, writePath))) {
-        continue;
-      }
-      throw new Error(`worker-batch: readPath not found: ${readPath}`);
+    // A task in this contracts document creates the path in its own wave; it
+    // may legitimately be referenced before it exists at the shared base.
+    if (producedPaths.some((writePath) => pathsOverlap(readPath, writePath))) {
+      continue;
     }
+    // The worker worktree is created at this exact commit, so the tree of the
+    // pinned base - not the control checkout or its HEAD - decides whether the
+    // path is readable by the worker.
+    if (await pathExistsAtCommit(repoRoot, baseCommit, readPath)) continue;
 
-    const tracked = await git(repoRoot, ["ls-files", "--", readPath]);
-    if (
-      !tracked.stdout.trim() &&
-      !producedPaths.some((writePath) => pathsOverlap(readPath, writePath))
-    ) {
-      throw new Error(
-        `worker-batch: readPath "${readPath}" is untracked and will be absent ` +
-          "from worker worktrees; commit it or produce it as a task artifact",
-      );
+    // A path visible only in the control working tree is never copied into a
+    // worktree; keep the existing untracked-context error.
+    const visibleInCheckout = existsSync(join(repoRoot, readPath));
+    if (visibleInCheckout) {
+      const tracked = await git(repoRoot, ["ls-files", "--", readPath]);
+      if (!tracked.stdout.trim()) {
+        throw new Error(
+          `worker-batch: readPath "${readPath}" is untracked and will be absent ` +
+            "from worker worktrees; commit it or produce it as a task artifact",
+        );
+      }
     }
+    // The default AGENTS.md is optional only when it is genuinely missing.
+    // A file that is tracked in the current checkout but absent at the pinned
+    // base would still be absent from the worker worktree.
+    if (readPath === "AGENTS.md" && !visibleInCheckout) continue;
+    throw new Error(
+      `worker-batch: readPath "${readPath}" is absent from contracts base ` +
+        `${baseCommit} and will be absent from worker worktrees; pin the base ` +
+        "to a commit that contains it or produce it as a task artifact",
+    );
   }
+}
+
+/** True when `path` exists in the exact tree of `commit` (blob or tree). */
+async function pathExistsAtCommit(
+  repoRoot: string,
+  commit: string,
+  path: string,
+): Promise<boolean> {
+  const result = await gitRaw(repoRoot, [
+    "cat-file",
+    "-e",
+    `${commit}:${path}`,
+  ]);
+  return result.exitCode === 0;
 }
 
 async function snapshotTask(

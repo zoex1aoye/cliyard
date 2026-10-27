@@ -5,16 +5,20 @@
 > 结论：RuntimeManager v0、Runtime Orphan Reaper v0、orphan hardening、
 > **runtime failure drills v0**、**attempt continuity / worker progress /
 > drill abnormal recovery v0**、**Task Architect v0（只读 Plan 生产者）**、
-> **Foreground Orchestration Queue v0（显式批准、前台队列）**，以及
-> **Plan-backed Chained Queue Base v0（单条线性依赖）** 均已实现。
-> 最终文档复核实测：`npm run build` 通过；Plan-backed focused 三个文件分别
-> **16/16**（1587.0 ms）、**10/10**（4196.9 ms）、**5/5**（728.5 ms），
-> 合计 31/31；完整套件 **236/236**（12420.3 ms）。同一 HEAD 新跑第三次真实
-> Claude Code + DeepSeek 两 item chain（21.4 s）；连同此前两次共三次均完成
-> 2/2（17.2 s、24.6 s、21.4 s），三次都在上游 `integrationHead` 上实时捕获
-> 了下游 worktree 并含 `foundation.txt`，下游 integration head 以
-> `git merge-base --is-ancestor` 证明包含上游 head（exit 0）；各次还复核了
-> 最终 branch 内容和 byte-identical no-op rerun。Task Architect 只产出
+> **Foreground Orchestration Queue v0（显式批准、前台队列）**、
+> **Plan-backed Chained Queue Base v0（单条线性依赖）**，以及
+> **Chained Read Context v0（readPaths 对齐 pinned base）** 均已实现。
+> 最终实测（2026-10-27，HEAD `390d61e`）：`npm run build` exit `0`；
+> read-context focused **5/5**（1174.5 ms）、Plan-backed queue core **10/10**
+> （2824.9 ms）、materializer **16/16**（1613.6 ms）、queue CLI **5/5**
+> （718.2 ms）；完整套件 **240/240**（12730.5 ms）。同一 HEAD 新跑一次真实
+> Claude Code + DeepSeek 两 item chain，downstream
+> `readPaths: ["foundation.txt"]`，**13.953 s 完成 2/2**；在 foundation
+> `integrationHead` 上实时捕获 downstream worktree：`foundation.txt` 存在、
+> `upper.txt` 尚不存在；worker 随后从该 worktree 读取 `foundation.txt` 再写
+> `upper.txt`；最终 branch 含两文件，ancestry exit 0，no-op rerun
+> `dispatched=0` 且 queue 文件 SHA-256 不变。此前三次未显式 readPaths 的
+> chain（17.2 s、24.6 s、21.4 s）保留为历史实测。Task Architect 只产出
 > 供人类审查的 Plan；Plan-backed queue 只对**已批准** Plan 做确定性编译，
 > **不会自动生成或批准 Plan**。
 >
@@ -145,10 +149,32 @@
   - dependent 的 Supervisor `baseCommit` 等于上游 `integrationHead`，因此
     上游 head 是下游 integration head 的祖先；只支持 one linear dependency，
     不做多父 integration/merge queue；
-  - 实测（focused 31/31、full 236/236、三次真实 Claude Code + DeepSeek
-    2-item chain 17.2 s / 24.6 s / 21.4 s、实时下游 worktree、ancestry、
-    artifact hash、fail-closed matrix、readPaths caveat）见
-    [docs/evidence/PLAN_BACKED_CHAIN.md](evidence/PLAN_BACKED_CHAIN.md)。
+  - 实测（focused 31/31、当时 full 236/236、三次真实 Claude Code +
+    DeepSeek 2-item chain 17.2 s / 24.6 s / 21.4 s、实时下游 worktree、
+    ancestry、artifact hash、fail-closed matrix）见
+    [docs/evidence/PLAN_BACKED_CHAIN.md](evidence/PLAN_BACKED_CHAIN.md)；
+    该文档记录的 readPaths caveat 已由下一条修复。
+- **Chained Read Context v0（pinned base）**
+  - `validateReadContexts` 现在接收 contracts 的精确 shared `baseCommit`，
+    对每个非豁免显式 `readPath` 执行 `git cat-file -e <base>:<path>`；
+    control checkout/HEAD/index 不再决定 worker 能否读取。worker worktree
+    本就创建在同一 pinned base 上，因此 preflight 与工作树一致。
+  - `.`、缺失的可选 `AGENTS.md`、同一 contracts 文档内 task-produced 路径
+    保留原豁免；仅存在于 control worktree 的 untracked 文件仍按原
+    untracked-context 错误拒绝；tracked 于当前 HEAD 但不在 pinned base 的
+    文件同样拒绝；不从 control checkout 复制任何文件。
+  - 实测：read-context focused 5/5、Plan-backed queue core 10/10（含
+    downstream 显式 readPaths 的本地 Supervisor chain）、materializer 16/16、
+    queue CLI 5/5、full 240/240、build exit 0；一次真实 Claude Code +
+    DeepSeek 2-item chain（downstream `readPaths: ["foundation.txt"]`）
+    13.953 s 完成 2/2，实时捕获的 downstream worktree HEAD 为 upstream
+    `integrationHead`，含 `foundation.txt`、无 `upper.txt`；worker 先在
+    13:48:17.176Z Read 该文件，再在 13:48:18.352Z Write `upper.txt`；最终
+    branch 含两文件，ancestry exit 0；no-op rerun `dispatched=0` 且 queue
+    文件 SHA-256 不变。
+  - 单次本机运行，不是 CI/flake/成本结论；不新增 daemon、并行、多父、
+    跨主机或 SQLite。证据见
+    [docs/evidence/CHAINED_READ_CONTEXT.md](evidence/CHAINED_READ_CONTEXT.md)。
 - **PortAllocator**
   - 默认端口范围 `19000-19999`，可用 `CLIYARD_PORT_RANGE="start-end"` 覆盖；
   - `.cliyard/runtime/port-leases.json` + `.cliyard/runtime/port-leases.lock`；
@@ -257,8 +283,10 @@
   依赖只决定派发/失败传播，不串联 integration branch/base；**Plan-backed
   依赖**则编译在上游 `integrationHead` 上，且只支持单条线性链（多父/merge
   queue 未实现），changed Plan/artifact 需新 item，
-  materialized artifact 无 GC，显式 upstream `readPaths` 可能触发 Supervisor
-  对 control checkout 的 readPath preflight；没有 queue 级 `--dry-run`、
+  materialized artifact 无 GC；显式 `readPaths` 现在按 pinned contracts base
+  验证（原 control-checkout caveat 已修复，见
+  [docs/evidence/CHAINED_READ_CONTEXT.md](evidence/CHAINED_READ_CONTEXT.md)）；
+  没有 queue 级 `--dry-run`、
   活动 run 的 stop 命令、history/compaction/GC 或 contract 原地更新；
   start 阶段若在记录 run id 前崩溃，stale item 会 fail closed 为 blocked；
   同主机锁可回收，外来主机锁 fail closed；状态是 JSON，不是 SQLite；
@@ -341,7 +369,7 @@ failure drill 的设计验收对照
 | 4 | cleanup release 失败拒绝、`cleanup: "failed"`、绝不 accepted | 已实现 | `RuntimeCleanupError`；failureReason 含注入故障；`cleanup: "failed"` |
 | 5 | 每个场景服务端口事后可绑定 | 已实现 | 22800 / 22830 / 22860 均 `portFree=true`；事后 `lsof` 无监听 |
 | 6 | 机器可读报告 + 每场景证据 | 已实现 | `runtime-failure-drills.json`、`child.log`、`child-result.json`、manifest/log/lease |
-| 7 | focused drill、full suite 与 build 通过 | 已实现 | drill 文件 3/3、当时 full suite 177/177、build pass；当前（含 Plan-backed）完整套件 236/236 |
+| 7 | focused drill、full suite 与 build 通过 | 已实现 | drill 文件 3/3、当时 full suite 177/177、build pass；本轮完整套件 240/240 |
 | 8 | 文档只记录实测结果、不扩大能力 | 已实现 | [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md) 与本轮文档更新 |
 
 本轮 attempt continuity / worker progress / drill abnormal recovery 的设计验收
@@ -359,7 +387,7 @@ failure drill 的设计验收对照
 | 8 | `status` 读取 progress 而不改变 run state | 已实现 | live status 前后 manifest sha256 相同；focused test 断言 manifest/event 字节不变 |
 | 9 | 超时 drill child 的已证明 service 在 child 退出后被回收 | 已实现 | child SIGKILL(6009 ms)；executor scanned 1 / reaped 1 / needs_human 0 |
 | 10 | drill report 保留异常回收并证明端口 free | 已实现 | `abnormalRecovery` 持久化；manifest `cleanup=complete`+`reaped`；lease 0；24860 free |
-| 11 | focused tests、full suite、TypeScript build 通过 | 已实现 | 该切片 13/13；当时完整套件 177/177、build pass；新增 Task Architect 后当时 191/191，当前（含 Plan-backed）236/236 |
+| 11 | focused tests、full suite、TypeScript build 通过 | 已实现 | 该切片 13/13；当时完整套件 177/177、build pass；新增 Task Architect 后当时 191/191；本轮 240/240 |
 | 12 | 文档只记录实测行为并保留全部非目标 | 已实现 | [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md) 与四份文档更新 |
 
 本轮 Task Architect v0 的设计验收对照
@@ -373,7 +401,7 @@ failure drill 的设计验收对照
 | 4 | invalid JSON/schema/cycles/overlapping writes rejected | 已实现 | 四种错误均 exit 1、stage `validation`、无 artifact；错误文本见 evidence |
 | 5 | never creates contracts/worktrees/runs/integration branches | 已实现 | 最终只有 3 个 plan artifact；HEAD、refs、worktree list 不变；contracts/runs/worktrees/runtime/ledger 均 absent |
 | 6 | JSON summary and human-readable help/output | 已实现 | `--json`、human 输出、`--help` 均实测；另有 focused CLI tests |
-| 7 | existing plan/Supervisor/progress tests remain green | 已实现 | 当时完整套件 191/191；当前（含 Plan-backed）236/236；`npm run build` 通过 |
+| 7 | existing plan/Supervisor/progress tests remain green | 已实现 | 当时完整套件 191/191；本轮 240/240；`npm run build` 通过 |
 | 8 | documentation records measured real-worker behavior and limitations | 已实现 | [docs/evidence/TASK_ARCHITECT.md](evidence/TASK_ARCHITECT.md) 与 README/NEXT_ITERATION/SUPERVISOR_V0 更新 |
 | 9 | additional fail-closed guards | 已实现 | 未跟踪/越界 design、非法 plan id、非 git target、planId mismatch、worker 非零退出、design overwrite；preflight 失败均 0 次 worker 调用 |
 | 10 | real Claude Code + DeepSeek smoke | 已实现（单次） | 16 s、exit 0、两任务 Plan、`touchedPaths=[]`；HEAD/status/design hash 不变；cost 未由 CLI 报告，仅记录 $1 budget cap |
@@ -396,7 +424,7 @@ contracts，不自动批准、冻结或改写 contracts，也不写 RunManifest�
 | 7 | stale running item 按 RunManifest 对账 | 已实现（含 fail-closed 窗口） | 真实 SIGKILL：有 run id 时 running→pending→同 run resume→completed；无 run id 时 running→blocked（见限制） |
 | 8 | changed contracts fail closed | 已实现 | 修改/删除后 0 次派发、attempts=0、无 worker log、无 runs 目录 |
 | 9 | queue lock 串行化并回收同主机 stale lock | 已实现 | live lock 下第二次 run 等待 5072 ms 后 exit 1；SIGKILL 后 stale lock 被下一次 run 回收；foreign/invalid 由 focused test 覆盖 |
-| 10 | 既有 Supervisor/continuity/progress/Task Architect/drill 测试保持绿色 | 已实现 | 当时完整套件 205/205；加入 Plan-backed 后当前 236/236；`npm run build` 通过 |
+| 10 | 既有 Supervisor/continuity/progress/Task Architect/drill 测试保持绿色 | 已实现 | 当时完整套件 205/205；加入 Plan-backed 后当时 236/236；本轮 240/240；`npm run build` 通过 |
 
 本轮 Plan-backed chained queue base v0 的设计验收对照
 （[design/plan-backed-chain-v0.md](../design/plan-backed-chain-v0.md)）：
@@ -411,8 +439,22 @@ contracts，不自动批准、冻结或改写 contracts，也不写 RunManifest�
 | 6 | blocked/cancelled/missing/interrupted/ambiguous 上游不合成 base、不派发 | 已实现 | focused 覆盖 blocked/cancelled/missing 队列项与非 completed/ambiguous manifest；无真实 interrupted 上游演练 |
 | 7 | changed approved Plan 在 Supervisor start 前 fail closed | 已实现 | CLI：`dispatched=0`、`attempts=0`、无 runs/materialized/worker events |
 | 8 | 已记录 materialization 在 retry 中 byte-identical；changed Plan 不可替换 | 已实现 | focused retry：bytes/inode 不变、same-run resume；不是真实 provider retry |
-| 9 | 既有 contract-backed 行为与全部旧测试保持绿色 | 已实现 | legacy parsing test + full suite 236/236；`npm run build` 通过 |
+| 9 | 既有 contract-backed 行为与全部旧测试保持绿色 | 已实现 | legacy parsing test + 当时 full suite 236/236；本轮 240/240；`npm run build` 通过 |
 | 10 | 真实 Claude Code + DeepSeek chain 证明 downstream worktree 与 ancestry | 已实现 | 三次真实 2/2（17.2 s、24.6 s、21.4 s）；第三次 live worktree `51e50a09…` 含 `foundation.txt`，ancestry exit 0 |
+
+本轮 Chained Read Context v0 的设计验收对照
+（[design/chained-read-context-v0.md](../design/chained-read-context-v0.md)）：
+
+| # | 设计要求 | 状态 | 实测覆盖 |
+|---|----------|------|----------|
+| 1 | pinned 旧 base 仍含文件时通过，即使当前 checkout 已移除 | 已实现 | focused test：worktree 在 pinned base 读取 `design/upstream.md` |
+| 2 | worker worktree 在 pinned base 创建并可读 | 已实现 | focused test + 真实 downstream worktree HEAD = foundation head 且含 `foundation.txt` |
+| 3 | 仅 untracked 的当前 checkout 文件仍失败 | 已实现 | focused test，保留原 untracked-context 错误 |
+| 4 | 当前 HEAD 有、pinned base 无的文件失败 | 已实现 | focused test，`absent from contracts base` |
+| 5 | `.` 与缺失可选 `AGENTS.md` 行为不变 | 已实现 | focused test |
+| 6 | 同一 contracts 文档内 task-produced read path 继续通过 | 已实现 | focused test |
+| 7 | Plan-backed 2-item chain 可在 downstream 显式声明 upstream 文件并通过真实 Supervisor + Claude Code + DeepSeek | 已实现 | 真实 chain 2/2、13.953 s、`readPaths: ["foundation.txt"]`、实时 worktree + worker Read event |
+| 8 | 既有 contract-backed 行为与全部旧测试保持绿色 | 已实现 | full 240/240、Plan-backed focused 31/31、`npm run build` exit 0 |
 
 未覆盖的能力不会被写成“已实现”：跨主机回收、leader-dead 自动 kill、
 daemon 周期回收、Windows 进程身份、生产或跨仓库端口协调、自动契约冻结/自动
@@ -421,37 +463,54 @@ daemon 周期回收、Windows 进程身份、生产或跨仓库端口协调、�
 
 ## 2. 验证（2026-10-27，本工作树，macOS）
 
-当前套件（包含 Plan-backed chain、queue、Task Architect、attempt continuity /
-worker progress 与 failure drill 测试）：
+当前套件（包含 chained read context、Plan-backed chain、queue、Task Architect、
+attempt continuity / worker progress 与 failure drill 测试）：
 
 ```text
-npm run build                                          → 通过
-focused materializer                                   → 16/16 通过（1587.0 ms）
-focused plan-backed queue core                         → 10/10 通过（4196.9 ms）
-focused plan-backed queue CLI                          → 5/5 通过（728.5 ms）
-npm test（完整套件）                                   → 236/236 通过（12420.3 ms）
+npm run build                                          → exit 0
+focused read-context                                   → 5/5 通过（1174.5 ms）
+focused plan-backed materializer                       → 16/16 通过（1613.6 ms）
+focused plan-backed queue core                         → 10/10 通过（2824.9 ms）
+focused plan-backed queue CLI                          → 5/5 通过（718.2 ms）
+npm test（完整套件）                                   → 240/240 通过（12730.5 ms）
 ```
 
-真实 Claude Code + DeepSeek 三次 two-item chain 均完成 2/2（17.2 s、24.6 s、
-21.4 s）。第二次 foundation `integrationHead 8e2e8b99…` 被 upper 的
-materialization/Supervisor `baseCommit` 精确采用；运行时捕获的 downstream
-worktree HEAD 为 `8e2e8b99…` 且含 `foundation.txt`（`foundation-ok`）；
-upper integration head `464c8cc1…` 含两个文件，上游 head 是下游 head 的祖先
-（ancestry exit 0）。第三次（最终文档复核）在
-`/tmp/cliyard-pbc-verify.ECxtih/repo` 用同一对 Plan 重跑：21.4 s、H0
-`f110f528…`、foundation head `51e50a09…`、upper head `6bafdc0a…`；
-`13:31:44Z` 捕获的 live downstream worktree HEAD 为上游 head 且含
-`foundation.txt`，ancestry exit 0；随后再次 `queue run` 为 no-op（queue sha
-`6c4613c5…`），completed retry exit 1。exact commands、artifact hash、
-fail-closed matrix 与 readPaths caveat 见
-[docs/evidence/PLAN_BACKED_CHAIN.md](evidence/PLAN_BACKED_CHAIN.md)。
+本轮 Chained Read Context v0 的真实 chain（HEAD `390d61e`）：scratch repo
+`/tmp/cliyard-crc-evidence.j5O3Hs/repo`，foundation plan base `a2b1e74…`，
+upper downstream `readPaths: ["foundation.txt"]`；13.953 s 完成 2/2。
+foundation `integrationHead e5a7af69…` 被 upper materialization/Supervisor
+`baseCommit` 精确采用；`13:48:15Z` 捕获的 live downstream worktree HEAD 为
+`e5a7af69…`，含 `foundation.txt`（`foundation-ok`）、无 `upper.txt`，status
+clean；upper worker 在 `13:48:17.176Z` Read 该文件、在 `13:48:18.352Z`
+Write `upper.txt`。最终 upper branch 含 `README.md`、`foundation.txt`、
+`plans/`、`upper.txt`（`upper-ok`），ancestry exit 0；no-op rerun
+`dispatched=0`，queue 文件 SHA-256 前后均为 `972b26f0…`。exact commands、
+IDs、hash 与限制见
+[docs/evidence/CHAINED_READ_CONTEXT.md](evidence/CHAINED_READ_CONTEXT.md)。
+
+此前真实 Claude Code + DeepSeek 三次 two-item chain（均未显式 readPaths）
+完成 2/2（17.2 s、24.6 s、21.4 s），保留为历史记录。第二次 foundation
+`integrationHead 8e2e8b99…` 被 upper 的 materialization/Supervisor
+`baseCommit` 精确采用；运行时捕获的 downstream worktree HEAD 为
+`8e2e8b99…` 且含 `foundation.txt`（`foundation-ok`）；upper integration
+head `464c8cc1…` 含两个文件，上游 head 是下游 head 的祖先（ancestry exit
+0）。第三次（最终文档复核）在 `/tmp/cliyard-pbc-verify.ECxtih/repo` 用同一
+对 Plan 重跑：21.4 s、H0 `f110f528…`、foundation head `51e50a09…`、upper
+head `6bafdc0a…`；`13:31:44Z` 捕获的 live downstream worktree HEAD 为上游
+head 且含 `foundation.txt`，ancestry exit 0；随后再次 `queue run` 为 no-op
+（queue sha `6c4613c5…`），completed retry exit 1。exact commands、artifact
+hash、fail-closed matrix 见
+[docs/evidence/PLAN_BACKED_CHAIN.md](evidence/PLAN_BACKED_CHAIN.md)；其中记录的
+readPaths caveat 已被修复并单独实测，见
+[docs/evidence/CHAINED_READ_CONTEXT.md](evidence/CHAINED_READ_CONTEXT.md)。
 
 以上均为本机单次运行；这是本机 macOS 证据，不是长期 flake 率、CI 或跨主机
 结论。完整套件包含此前的 attempt/progress/drill 组、runtime/恢复组、Task
-Architect 组、queue 组和本轮 31 项 Plan-backed 测试；这些组本轮未单独重跑，
-全部 236 项在完整运行中通过。更早 HEAD `3bc56e4` 的记录是 architect focused
-14/14（2193.3 ms）与 full suite 191/191（11236.8 ms）；本轮没有重跑 architect
-focused。failure drill 实测细节（子进程、场景、端口、lease）见
+Architect 组、queue 组和 Plan-backed 组；本轮单独重跑了 read-context 与三个
+Plan-backed focused 文件，其他组未单独重跑，全部 240 项在完整运行中通过。
+更早 HEAD `3bc56e4` 的记录是 architect focused 14/14（2193.3 ms）与 full
+suite 191/191（11236.8 ms）；本轮没有重跑 architect focused。failure drill
+实测细节（子进程、场景、端口、lease）见
 [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md)；
 attempt continuity、worker progress 与异常 drill 回收的实测细节见
 [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md)；
@@ -570,14 +629,16 @@ Worker 验收演练，因此不把它们当作 drill、reaper 或跨主机证据
 
 已完成的 RuntimeManager v0、Orphan Reaper v0、hardening、failure drills v0、
 attempt continuity / worker progress / drill abnormal recovery v0、Task
-Architect v0、**Foreground Orchestration Queue v0**，以及
-**Plan-backed Chained Queue Base v0** 不在下一迭代重复。
+Architect v0、**Foreground Orchestration Queue v0**、
+**Plan-backed Chained Queue Base v0**，以及 **Chained Read Context v0**
+不在下一迭代重复。
 下一具体步骤是在 **Plan-backed chain 语义被实测证明并接受后**，对
 **受监督的前台长时运行控制器/daemon 做出决策**：
 
 1. **受监督的前台长时控制器/daemon（下一步决策，未实现）**
    - queue v0 已证明前台、显式批准、顺序、可恢复的队列语义，Plan-backed
-     v0 已证明单条线性 base 串联语义；
+     v0 已证明单条线性 base 串联语义；Chained Read Context v0 已证明
+     downstream 显式 `readPaths` 按同一 pinned base 验证；
    - 下一步先做独立的设计与验收决策：是否需要、以及如何做一个受监督的
      前台长时控制器/daemon；
    - 本轮不把它写成已完成能力，也不声称 24 小时无人值守。
@@ -745,12 +806,40 @@ Plan-backed Chained Queue Base v0（已完成）：
     （17.2 s、24.6 s、21.4 s）；第三次（最终文档复核）实时 downstream
     worktree、branch 内容和 ancestry 均实测，completed 后第二次 run 为
     byte-identical no-op，completed retry exit 1。
-47. [已完成] focused 31/31、完整套件 236/236、`npm run build` 通过；文档
-    保留 readPaths caveat、非目标和真实 provider 的限制。
+47. [已完成] 当时 focused 31/31、完整套件 236/236、`npm run build` 通过；
+    文档记录 readPaths caveat、非目标和真实 provider 的限制。该 caveat
+    后由 Chained Read Context v0 修复。
+
+Chained Read Context v0（已完成）：
+
+48. [已完成] `validateReadContexts` 接收 contracts 的精确 shared
+    `baseCommit`，对非豁免显式 `readPath` 执行
+    `git cat-file -e <base>:<path>`；control checkout/HEAD/index 不再决定
+    worker 能否读取；不从 control checkout 复制文件。
+49. [已完成] `.`、缺失可选 `AGENTS.md`、同一 contracts 文档内 task-produced
+    路径保留原豁免；仅 untracked 的 control-checkout 文件仍按原
+    untracked-context 错误拒绝；tracked 于当前 HEAD 但不在 pinned base 的
+    文件拒绝。
+50. [已完成] focused 覆盖：pinned 旧 base 在当前 HEAD 移除后仍通过并在
+    worktree 读取；base 之后新增、当前 HEAD 存在的文件失败；untracked-only
+    失败；`.`/AGENTS.md 与 task-produced 路径保持通过。
+51. [已完成] 真实 Claude Code + DeepSeek 2-item chain：downstream
+    `readPaths: ["foundation.txt"]`，foundation plan base `a2b1e74…`，
+    upper base/upstream head `e5a7af69…`；13.953 s 完成 2/2。
+52. [已完成] 在 `13:48:15Z` 实时捕获 downstream worktree：HEAD =
+    upstream `integrationHead`，`foundation.txt` 存在，`upper.txt` 不存在，
+    status clean。
+53. [已完成] worker 在 `13:48:17.176Z` Read `foundation.txt`、在
+    `13:48:18.352Z` Write `upper.txt`；最终 branch 含两文件，ancestry
+    exit 0；artifact/queue/manifest hash 一致；no-op rerun byte-identical。
+54. [已完成] read-context focused 5/5、Plan-backed focused 31/31、完整套件
+    240/240、`npm run build` exit 0。
+55. [已完成] 文档只记录实测行为；PLAN_BACKED_CHAIN 的 readPaths caveat
+    已替换为 measured fix 链接，非目标保持不变。
 
 下一缺口（未完成）：
 
-48. [未完成] 在 **Plan-backed chain 语义被接受后**，对受监督的前台长时运行
+56. [未完成] 在 **Plan-backed chain 语义被接受后**，对受监督的前台长时运行
     控制器/daemon 做出决策（独立设计与验收）。
 
 ## 5. 下一步顺序
@@ -786,12 +875,21 @@ Plan-backed Chained Queue Base v0（已完成）：
             deterministic materialization、retry/resume、fail-closed matrix；
             focused 31/31、full 236/236、build 通过；三次真实 Claude Code +
             DeepSeek two-item chain 2/2（17.2/24.6/21.4 s）
-13. [已完成] 本轮文档更新：README / NEXT_ITERATION / SUPERVISOR_V0 /
-            docs/evidence/ORCHESTRATION_QUEUE.md /
+13. [已完成] 该轮 Plan-backed 文档更新：README / NEXT_ITERATION /
+            SUPERVISOR_V0 / docs/evidence/ORCHESTRATION_QUEUE.md /
             docs/evidence/PLAN_BACKED_CHAIN.md
-14. 下一步：在 Plan-backed chain 语义被接受后，对受监督的前台长时运行
+14. [已完成] Chained Read Context v0：readPaths 按精确 shared base 验证、
+            untracked/optional-AGENTS/task-produced 规则不变；focused 5/5 +
+            Plan-backed 31/31、full 240/240、build exit 0；一次真实
+            Claude Code + DeepSeek chain 显式 downstream readPaths 2/2
+            （13.953 s），实时 worktree + Read event + ancestry
+15. [已完成] 本轮 read-context 文档更新：README / NEXT_ITERATION /
+            design/chained-read-context-v0.md /
+            docs/evidence/PLAN_BACKED_CHAIN.md /
+            docs/evidence/CHAINED_READ_CONTEXT.md
+16. 下一步：在 Plan-backed chain 语义被接受后，对受监督的前台长时运行
             控制器/daemon 做出决策（独立设计与验收）
-15. 不重复已完成切片；不新增 daemon、跨主机、浏览器证据、SQLite、准入调度、
+17. 不重复已完成切片；不新增 daemon、跨主机、浏览器证据、SQLite、准入调度、
     provider 会话续跑、自动 worktree GC、自动契约冻结/自动派发或 24 小时声明
 ```
 
@@ -799,13 +897,14 @@ Plan-backed Chained Queue Base v0（已完成）：
 
 Supervisor v0（前台、原子 JSON RunManifest、进程级 SIGKILL 恢复）已完成，
 其操作语义与自举手册见 [docs/SUPERVISOR_V0.md](SUPERVISOR_V0.md)。当前完整套件
-包含 Plan-backed chain、queue、Task Architect、supervisor、attempt
-continuity/progress 与 runtime/drill 测试（236/236 通过）。本轮没有引入
-daemon 或 SQLite，也没有把 supervisor 或 queue 的后台化列入计划。attempt
-reuse 是 worktree 连续性，worker progress 是观察信息；Task Architect 只产出
-Plan；queue 消费显式加入的 frozen contracts 或已批准 Plan，但不生成、批准或
-冻结它们；三者都不改变验收权威。RuntimeManager、Orphan Reaper、hardening、
-failure drills、attempt continuity/progress/异常 drill 回收、Task Architect、
-Foreground Orchestration Queue 与 Plan-backed Chained Queue Base 均已收口；
+包含 chained read context、Plan-backed chain、queue、Task Architect、
+supervisor、attempt continuity/progress 与 runtime/drill 测试（240/240
+通过）。本轮没有引入 daemon 或 SQLite，也没有把 supervisor 或 queue 的
+后台化列入计划。attempt reuse 是 worktree 连续性，worker progress 是观察
+信息；Task Architect 只产出 Plan；queue 消费显式加入的 frozen contracts 或
+已批准 Plan，但不生成、批准或冻结它们；三者都不改变验收权威。RuntimeManager、
+Orphan Reaper、hardening、failure drills、attempt continuity/progress/异常
+drill 回收、Task Architect、Foreground Orchestration Queue、
+Plan-backed Chained Queue Base 与 Chained Read Context 均已收口；
 下一步是在 **Plan-backed chain 语义被接受后**，对受监督的前台长时运行
 控制器/daemon 做出决策。

@@ -15,6 +15,11 @@
 > below were re-measured during the final documentation pass on the same HEAD.
 > These are single local runs, not a CI, flake-rate, cost, quality or
 > 24-hour/daemon claim.
+>
+> Update 2026-10-27 (later): the explicit upstream `readPaths` failure in §9
+> was fixed by pinned-base read-context validation and re-measured separately
+> in [CHAINED_READ_CONTEXT.md](CHAINED_READ_CONTEXT.md). All measurements below
+> remain the historical runs at HEAD `7cbd33d`.
 
 This document measures the implementation described by
 [design/plan-backed-chain-v0.md](../../design/plan-backed-chain-v0.md). No
@@ -396,7 +401,8 @@ node dist/cli.js queue run --repo "$R" --json
 
 The upper Plan task asked for `upper.txt` containing exactly `upper-ok` and its
 `verifyCommands` required `foundation.txt` with `foundation-ok` in the task
-worktree. No `readPaths` named the upstream file (see the caveat below).
+worktree. No `readPaths` named the upstream file; this run predates the
+pinned-base read-context fix (see §9.1).
 
 Result: exit `0`, wall time **17.2 s** (`13:21:08.622Z` → `13:21:25.861Z`),
 `dispatched=2`, `stopped=idle`, counts `completed=2`, `blocked=0`.
@@ -469,35 +475,31 @@ added only the upper snapshot commit and the integration merge. A second
 `6c4613c57fe474e878f5808968d9bdaf31a0aa6dbc6f07e47d9c3efde9102d39`;
 `queue retry foundation` exited `1` with `completed items never run again`.
 
-### Attempt 1 caveat — explicit upstream `readPaths`
+### 9.1 Read-context follow-up (fixed after this measurement)
 
-An earlier real-provider attempt on `repo-real` used the same foundation task
-but declared `readPaths: ["foundation.txt"]` on the upper task. Foundation
-completed (`integrationHead 639c24d1183ea7669939df5f08829bb0b7f1093f`), and the
-queue correctly materialized the upper contracts at that exact head
-(`contractsHash 385c3cc5ec9525dd502c2bb6d3d5e82af48f82c0ea6268bc5e7853ced3de0b43`).
-The upper Supervisor dispatch then failed **before creating its integration
-branch or worker worktree** with:
+An earlier attempt on `repo-real` declared `readPaths: ["foundation.txt"]` on
+the upper task and was blocked **before creating a worker worktree** with:
 
 ```text
 worker-batch: readPath not found: foundation.txt
 ```
 
-The queue recorded that exact reason, `upper` became `blocked` with
-`attempts=1` and `log`d run `c2d18fea-6e79-4aa0-a9c7-48590183b002`; the upper
-RunManifest was left `interrupted` with the task still `ready`, and no upper
-worker event existed. Source inspection shows the cause: the Supervisor's
-`validateReadContexts` resolves `readPaths` against the control repository
-working tree (`src/scheduler/codex-batch.ts:1129`), not the run's
-materialized base, and `foundation.txt` existed only on the foundation
-integration branch.
+Preflight then checked the control checkout; the file existed only on the
+foundation integration branch. The materialized base and upstream lineage were
+exact.
 
-This is a measured **operational caveat**, not a failure of base selection:
-the materialized base and upstream lineage were exact. For v0, do not declare
-an upstream-produced file in a downstream Plan task's `readPaths` unless it
-also exists in the control checkout; use `verifyCommands` (which run in the
-task worktree) or an agreed convention to prove upstream visibility. The
-successful attempt above used no explicit `readPaths`.
+That failure is fixed. Explicit read paths are now proved against the exact
+shared contracts `baseCommit`; the untracked, optional-`AGENTS.md`,
+task-produced and `.` rules are unchanged. A new real Claude Code + DeepSeek
+two-item chain with the same explicit read path completed 2/2 in 13.953 s,
+captured the live downstream worktree at the upstream `integrationHead` with
+`foundation.txt` present and `upper.txt` absent, observed the worker reading
+the file, and verified both final files with integration ancestry exit `0`.
+Exact IDs, hashes, commands and limits:
+[CHAINED_READ_CONTEXT.md](CHAINED_READ_CONTEXT.md).
+
+The three chains above used no explicit upstream `readPaths` and do not
+exercise this fix.
 
 ## 10. Completed monotonicity and rerun
 
@@ -528,7 +530,7 @@ These are measurements, not a human acceptance decision.
 | 7 | changed approved Plan fails closed before Supervisor start | Measured: CLI `dispatched=0`, `attempts=0`, no run directory |
 | 8 | recorded materialization stays byte-identical while retrying; changed Plan cannot be substituted | Measured in focused retry test (injected Supervisor result), bytes and inode unchanged |
 | 9 | existing contract-backed behavior and prior tests remain green | Measured: legacy parsing test + full suite 236/236 |
-| 10 | real chain through Claude Code + DeepSeek proves downstream worktree/ancestry | Measured: three successful two-item real runs (17.2 s, 24.6 s and 21.4 s), each with live downstream worktree and ancestry; attempt-1 readPaths caveat recorded above |
+| 10 | real chain through Claude Code + DeepSeek proves downstream worktree/ancestry | Measured: three successful two-item real runs (17.2 s, 24.6 s and 21.4 s), each with live downstream worktree and ancestry; the earlier readPaths dispatch failure is fixed and re-measured with explicit readPaths in [CHAINED_READ_CONTEXT.md](CHAINED_READ_CONTEXT.md) |
 
 ## 12. Measured and not measured
 
@@ -560,8 +562,9 @@ Not measured / not claimed:
   push or automatic merge to `main`;
 - provider-conversation continuation (attempt reuse is worktree continuity);
 - a real-provider retry/failure drill (retry/resume was measured with the
-  injected runner; the readPaths caveat is a separate failed dispatch, not a
-  retry measurement);
+  injected runner; the earlier readPaths dispatch failure was not a retry
+  measurement and is fixed and re-measured separately in
+  [CHAINED_READ_CONTEXT.md](CHAINED_READ_CONTEXT.md));
 - upstream source-kind combinations other than Plan→Plan in a real run;
 - a real interrupted-upstream materialization attempt;
 - artifact GC, retention, history or queue compaction;
@@ -586,8 +589,10 @@ Not measured / not claimed:
 - **Contract-backed items keep their own base.** The chained-base behavior
   applies only to Plan-backed items. Contract-backed queue items still do not
   chain integration branches.
-- **The readPaths caveat above.** Explicit upstream readPaths can fail the
-  Supervisor preflight against the control checkout before a worktree exists.
+- **Read context is pinned.** Explicit readPaths are validated against the
+  shared contracts base; the earlier control-checkout behavior is fixed and
+  measured separately in
+  [CHAINED_READ_CONTEXT.md](CHAINED_READ_CONTEXT.md).
 - **Foreground, sequential, same-host.** No daemon, parallel dispatch,
   cross-host coordination or SQLite. The RunManifest remains task authority;
   the queue never rewrites it.
