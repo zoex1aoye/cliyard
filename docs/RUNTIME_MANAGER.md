@@ -417,6 +417,18 @@ initial full-suite run launched concurrently with `npm run build` reported
 118/119; two subsequent isolated full runs passed 119/119, and the runtime
 suites passed three consecutive repetitions.
 
+Additional process-level drills on 2026-10-27:
+
+- the checked-in example was accepted on leased port `21850`, produced
+  `cleanup: "complete"`, and released the port;
+- two complete acceptance processes overlapped for about 1.5 seconds and used
+  ports `21900` and `21901`, with distinct runtime manifests and an empty lease
+  store after both stopped;
+- a real Claude Code + DeepSeek Worker accepted the runtime contract in a
+  scratch Git repository. Its verifier used leased port `19000`, the service
+  exited with `SIGTERM`, `cleanup` was `complete`, and the Worker changed only
+  `runtime-smoke.txt`.
+
 ## Related documents
 
 - Design: [design/runtime-manager-v0.md](../design/runtime-manager-v0.md)
