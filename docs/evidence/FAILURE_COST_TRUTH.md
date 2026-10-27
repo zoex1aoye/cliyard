@@ -3,13 +3,23 @@
 > Date: 2026-10-27
 >
 > Environment: macOS (Darwin 27.0.0), Node `v20.20.2`, npm `10.8.2`,
-> cliyard HEAD `69f62de`.
+> cliyard HEAD `fa2694b` (failure-cost-hardening-core merged; this
+> documentation change is uncommitted).
 >
 > Scope: the shared failure/cost shapes, the classifier and parsers, the
 > Claude/Codex adapter observations, closed-loop aggregation, durable
 > RunManifest checkpoints, queue pre-dispatch failures, status surfaces and the
-> bounded event journal. These are single local runs, not a CI result, a
+> bounded event journal. These are local measurements, not a CI result, a
 > flake-rate claim, a DeepSeek invoice, or a provider-balance measurement.
+>
+> Verification is fixture-based. The adapter tests spawn temporary fake CLI
+> executables that emit shaped result records; no real Claude/DeepSeek session
+> was started or billed, and no real self-host transcript was parsed by the new
+> subtype path. The tests prove classification, parsing and persistence
+> behavior; they do not prove provider billing, balance, authorization,
+> routing or production transcript compatibility. The prior v0 round was
+> measured at HEAD `69f62de` and is preserved as historical evidence in §2.1;
+> §2.2 measures the post-review hardening tree at `fa2694b`.
 
 Failure and cost are **observational**. They do not grant acceptance, authorize
 an automatic retry, change dispatch, or replace the RunManifest as the
@@ -73,6 +83,40 @@ Signals in order:
 - a deterministic pre-dispatch rejection produces `policy_blocked`;
 - anything unrecognized fails closed to `unknown`.
 
+Provider result subtypes (hardening round):
+
+- the Claude adapter retains only a normalized, bounded, credential-free
+  `subtype` from the result record; the raw provider value is not retained;
+- `error_max_budget_usd` is a direct budget signal and produces
+  `budget_exhausted` with stage `provider` and code `error_max_budget_usd`;
+- an explicit wall-clock timeout still outranks the subtype. The adapter
+  timeout flag or exit `124` produces `timeout` / `worker`; non-transient
+  timeout text produces `timeout` / `provider`. In both cases the code is
+  `timeout`, even when the result also carried `error_max_budget_usd`;
+- no other subtype changes the category. A bounded unknown subtype is retained
+  as the failure `code` (for example `error_max_turns`) when the category is
+  not `timeout` and no explicit code is supplied, while the category comes from
+  the ordinary signals. `success` is never used as a failure code;
+- an explicit `code` wins over a subtype for the record code, and a non-string
+  or empty subtype contributes no code;
+- subtype text is normalized into the bounded code space (whitespace runs
+  become `_`), secret-redacted (including tokens glued directly to an
+  identifier prefix) and capped at 64 characters.
+
+Exact subtype precedence covered by the focused tests:
+
+| Signals | Category | Stage | Code |
+|---------|----------|-------|------|
+| `error_max_budget_usd`, exit `1` | `budget_exhausted` | `provider` | `error_max_budget_usd` |
+| `error_max_budget_usd` + timeout flag or exit `124` | `timeout` | `worker` | `timeout` |
+| `error_max_budget_usd` + timeout text, exit `1` | `timeout` | `provider` | `timeout` |
+| another subtype, exit `1`, no stronger text | `worker_process_exit` (fixture) | `worker` | the subtype |
+| `success`, exit `1` | `worker_process_exit` | `worker` | `exit_1` |
+| explicit `code` + other subtype, exit `1` | `worker_process_exit` | `worker` | the explicit code |
+
+The subtype is an additional budget signal, not a priority change: it does not
+move `budget_exhausted` above `timeout` in the design order.
+
 Each `FailureRecord` is version `1` with `category`, `stage`, optional `code`,
 bounded `message`, `observedAt` and an advisory `retryableHint`:
 
@@ -101,7 +145,7 @@ and `resource_exhausted`; it is advisory and cannot trigger a retry.
 
 | State | Source | Amount | Usage | Authoritative |
 |-------|--------|--------|-------|---------------|
-| `provider-reported` | `provider` | non-null | optional | only when every amount observation is provider-reported and amount/currency are complete |
+| `provider-reported` | `provider` | non-null | optional | only when source is provider, amount and currency are non-null, no amount/currency missing reason exists, and observations are empty or all provider-reported |
 | `cli-estimated` | `cli` | non-null | optional | always `false` |
 | `usage-only` | `none` | `null` | non-null | always `false` |
 | `unavailable` | `none` | `null` | `null` | always `false` |
@@ -116,8 +160,24 @@ Rules enforced by construction and by the fail-closed parser:
 - a zero explicitly emitted by the CLI is preserved as zero but remains
   non-authoritative;
 - malformed amounts/usage become `null`, not zero or a guessed value;
-- provider-reported authority requires a complete amount/currency, not merely
-  a provider label;
+- a `provider-reported` observation requires a provider source, a non-null
+  amount and a non-null currency. A null or undefined currency is rejected even
+  when the aggregate carries a currency;
+- an authoritative `provider-reported` total requires a provider source,
+  non-null amount and currency, no `cost.amount` or `cost.currency` missing
+  reason, and `observations[]` that is empty or entirely `provider-reported`.
+  `cost.usage` may still be missing: authority is financial attribution, not
+  field completeness;
+- a non-authoritative provider total may omit currency (for example with
+  empty observations) but can never be marked authoritative. A `cli-estimated`
+  record with an unknown currency is likewise valid only as non-authoritative;
+- construction fails closed to the same rules: a provider-sourced amount with
+  no currency is not emitted as a provider observation. It becomes
+  `usage-only` when usage exists, otherwise `unavailable`, with `amount: null`
+  and `source: "none"`, so the constructor cannot produce a record its own
+  parser rejects;
+- `provider-reported` is type/parser support only. The current Claude and
+  Codex integrations emit no provider-reported cost;
 - a `usage-only` record keeps tokens even when cost is absent;
 - mixed currencies are never combined; the aggregate amount becomes `null` and
   `cost.amount` / `cost.currency` are recorded as missing;
@@ -154,6 +214,8 @@ Claude Code over the DeepSeek Anthropic-compatible endpoint:
 - the configured `maxBudgetUsd` is recorded as `guardBudgetUsd`, not spend;
 - a missing result record produces `unavailable` with a bounded note such as
   "worker exited with code N before a result record", never `$0`;
+- the normalized result subtype is retained on the internal result and passed
+  to failure classification; the raw subtype text is not retained;
 - a timeout is classified before provider text as `timeout/worker`; spawn,
   cwd and process failures produce bounded spawn/preflight/worker records.
 
@@ -235,10 +297,71 @@ This slice adds no automatic retry, routing, admission or parallel dispatch:
   exhaustion the adapter returns the final structured failure and aggregates
   every session's cost.
 
+### 1.7 Post-review hardening
+
+Review of the v0 slice identified two gaps. The hardening task closed both
+without changing any taxonomy value, stage, cost state, retry, acceptance,
+routing, admission or queue behavior.
+
+#### Finding 1 — the Claude result subtype was discarded
+
+Before: the adapter parsed `is_error`, `result`, usage and cost but dropped the
+provider result `subtype`, and the classifier had no subtype signal. A budget
+stop therefore depended on matching provider prose. No test proved that a
+wall-clock timeout outranks a provider subtype or that an unknown subtype is
+preserved without inventing a category.
+
+Fix:
+
+- the adapter normalizes and retains the subtype, then passes it to
+  `createFailureRecord`;
+- `error_max_budget_usd` maps to `budget_exhausted` / `provider` with code
+  `error_max_budget_usd`, after explicit timeout and before text matching;
+- every other subtype remains a bounded code only, unless an explicit code or
+  a timeout code applies; `success` is not a failure code;
+- codes are capped at 64 characters, and secret-shaped tokens are redacted
+  even when glued to an identifier separator.
+
+Measured coverage: one new core taxonomy test and four new Claude adapter
+tests, listed in §2.5. The adapter tests use temporary fake CLI executables.
+
+#### Finding 2 — provider cost authority was too permissive
+
+Before: a `provider-reported` observation could be parsed without a currency,
+and an `authoritative` provider total could carry a missing amount/currency
+reason or non-provider observations. The constructor could also emit a
+currencyless provider observation; tightening the parser alone would have made
+that constructor output invalid, so construction was changed in the same task
+to fail closed.
+
+Fix:
+
+- provider observations require a currency;
+- authoritative provider totals require a provider source, non-null amount and
+  currency, no `cost.amount`/`cost.currency` missing reason, and observations
+  that are empty or all provider-reported;
+- non-authoritative provider and CLI records with an unknown currency remain
+  parseable but cannot claim authority;
+- construction downgrades a currencyless provider amount to
+  `usage-only`/`unavailable` instead of emitting it.
+
+Measured coverage: one new core taxonomy test with positive and negative
+cases, plus the existing cost construction/parser tests, listed in §2.5.
+
+The hardening did not add provider billing, balance, authorization, routing,
+automatic retry or a real provider call. The subtype and authority tests use
+in-memory records and temporary fake CLI executables.
+
 ## 2. Measured verification
 
-Commands were run from the cliyard checkout on 2026-10-27. Code is at HEAD
-`69f62de`; this round's documentation changes are uncommitted.
+Two measurement rounds are recorded. §2.1 is the historical v0 round at HEAD
+`69f62de`. §2.2 is the post-review hardening round at HEAD `fa2694b`; its
+counts are the current claims. All commands were run from the cliyard checkout
+on 2026-10-27.
+
+### 2.1 Prior v0 round (historical, HEAD 69f62de)
+
+Commands:
 
 ```bash
 npm run build
@@ -265,12 +388,56 @@ full suite:                    290/290 pass in 14175.8 ms
 
 The focused counts were reproduced in a second run (same 14/17/12/7 and
 50/50); durations vary between local runs. The full-suite count is 45 tests
-above the prior 245-test baseline: 14 new
-failure-taxonomy tests, 17 new Claude adapter failure/cost tests, 12 new
-supervisor/queue durable tests, and 2 additional queue-control tests. The
-previous `245/245` measurement is historical, not this round's claim.
+above the prior 245-test baseline: 14 failure-taxonomy tests, 17 Claude adapter
+failure/cost tests, 12 supervisor/queue durable tests and 2 additional
+queue-control tests. The previous `245/245` measurement is historical, not a
+claim about this round. This subsection is retained as historical evidence and
+is superseded by §2.2 for the current tree.
 
-Exact enums printed from the built module:
+### 2.2 Hardening round (current, HEAD fa2694b)
+
+The hardening task changed only `src/failures.ts`, `src/agents/claude.ts` and
+the two focused test files; the durable paths were not modified.
+
+Commands:
+
+```bash
+npm run build
+npx tsx --test tests/failure-taxonomy.test.ts
+npx tsx --test tests/claude-failure-cost.test.ts
+npx tsx --test tests/supervisor-failure-cost.test.ts
+npx tsx --test tests/queue-control-snapshot.test.ts
+npx tsx --test tests/failure-taxonomy.test.ts tests/claude-failure-cost.test.ts \
+  tests/supervisor-failure-cost.test.ts tests/queue-control-snapshot.test.ts
+npm test
+git diff --check
+```
+
+Observed results:
+
+```text
+build:                         exit 0
+failure taxonomy:              16/16 pass in 99.1 ms
+claude failure/cost:           21/21 pass in 16394.1 ms
+supervisor failure/cost:       12/12 pass in 1115.5 ms
+queue control snapshot:        7/7 pass in 761.4 ms
+combined focused:              56/56 pass in 14892.2 ms
+full suite:                    296/296 pass in 15085.5 ms
+git diff --check:              exit 0 (documentation diff)
+```
+
+The focused counts were reproduced in a second run (same 16/21/12/7 and
+56/56; combined 14998.9 ms). The full suite was re-run at 296/296 in
+14827.2 ms. Durations vary between local runs. The full suite is 51 tests
+above the 245 baseline and 6 above the v0 round's 290: 2 new failure-taxonomy
+tests and 4 new Claude adapter tests. The 14/17/12/7, 50/50 and 290/290 counts
+in §2.1 are historical, not the current claim.
+
+These tests use temporary fake CLI executables and in-memory records. No real
+provider was invoked, billed or queried for balance; no real self-host
+transcript was parsed by the new subtype path.
+
+### 2.3 Exact enums (printed from the current build)
 
 ```text
 FAILURE_CATEGORIES=["budget_exhausted","timeout","provider_transient","provider_auth","provider_protocol","worker_process_exit","verifier_rejected","policy_blocked","resource_exhausted","unknown"]
@@ -279,9 +446,14 @@ COST_STATES=["provider-reported","cli-estimated","usage-only","unavailable"]
 COST_SOURCES=["provider","cli","none"]
 ```
 
-Representative `supervisor status` human output from a scratch RunManifest with
-one budget rejection and one missing-cost task (exact lines observed; scratch
-paths omitted because they are not part of the claim):
+### 2.4 Representative durable outputs (observed in the v0 round)
+
+The durable output-producing paths did not change in the hardening task. These
+outputs were observed in the v0 round and are retained as historical evidence.
+
+`supervisor status` human output from a scratch RunManifest with one budget
+rejection and one missing-cost task (exact lines observed; scratch paths
+omitted because they are not part of the claim):
 
 ```text
 task budget-task: rejected failure=budget_exhausted/provider (exit_1) cost=cli-estimated 0.07 USD (observed, non-authoritative) missing=cost.usage
@@ -303,7 +475,9 @@ pre  blocked  next=inspect-and-retry  ready=no  worker=claude  attempts=0/3
 The corresponding `queue run` reported `dispatched=0`; the item was blocked
 before any attempt increment or Supervisor call.
 
-The focused tests prove:
+### 2.5 Focused coverage
+
+The focused and durable tests prove:
 
 - the enum contains exactly the ten design categories, all eight stages, and
   the four cost states;
@@ -321,8 +495,24 @@ The focused tests prove:
 - explicit zero cost and zero usage survive; malformed cost/usage do not become
   zero; token-only, amount-only, partial and mixed-currency aggregates keep
   missing reasons;
-- provider-reported cost is authoritative only when amount/currency complete;
-  a CLI estimate is always non-authoritative;
+- provider-reported cost requires currency at the observation level, and is
+  authoritative only with provider source, non-null amount/currency, no
+  amount/currency missing reason, and empty or all-provider observations;
+  non-authoritative provider and CLI records with unknown currency stay
+  non-authoritative; a CLI estimate is always non-authoritative;
+- construction downgrades a currencyless provider amount to `usage-only` (or
+  `unavailable`) instead of emitting a provider observation the parser would
+  reject;
+- provider result subtypes: `error_max_budget_usd` classifies
+  `budget_exhausted`/`provider` with code `error_max_budget_usd`; an explicit
+  timeout signal (flag, exit `124` or non-transient timeout text) outranks it
+  in category and code; unknown subtypes are preserved as bounded codes
+  without inventing a category; `success` is not a code; an explicit code
+  wins; subtype length is bounded and glued secret-shaped tokens are redacted;
+- the Claude adapter forwards the normalized subtype and adds no retry for
+  the budget/auth/resource/protocol cases: a fake budget result yields one
+  attempt, and a fixture that emits the budget subtype then hangs yields
+  `timeout`/`worker` with code `timeout`;
 - Claude preserves top-level usage and falls back to `modelUsage`; a timeout
   and spawn failure carry structured categories and unavailable cost; failures
   retain bounded provider text but no secrets or raw payloads;
@@ -346,7 +536,10 @@ The focused tests prove:
 - event fields are bounded and validated, and a malformed category is counted
   as a malformed journal line;
 - `queue status` prefers durable run categories over stale item text and
-  reports non-authoritative cost; mixed currencies are not combined.
+  reports non-authoritative cost; mixed currencies are not combined;
+- the adapter tests are temporary fake CLI executables emitting shaped result
+  records. They verify adapter behavior only; no real provider session,
+  invoice, balance, authorization result or self-host transcript is involved.
 
 ## 3. Acceptance matrix
 
@@ -355,15 +548,15 @@ Design acceptance items from
 
 | # | Requirement | Status | Measured coverage |
 |---|-------------|--------|-------------------|
-| 1 | Every newly rejected dispatched task has a non-empty structured failure | Implemented | Claude/Codex adapters emit one; closed-loop fallback covers field-less adapters; RunManifest checkpoint test asserts the record |
+| 1 | Every newly rejected dispatched task has a non-empty structured failure | Implemented | Claude/Codex adapters emit one; Claude maps the normalized budget subtype; closed-loop fallback covers field-less adapters; RunManifest checkpoint test asserts the record |
 | 2 | Worker failure and verifier rejection are distinguishable | Implemented | Priority tests + supervisor checkpoint test: worker exit stays `provider_auth`/`worker_process_exit`; only post-success rejection is `verifier_rejected` |
 | 3 | Missing cost is `unavailable`, not zero | Implemented | Cost construction/parser tests; Claude missing-field test; status tests assert `amount: null` and no `$0` |
-| 4 | Claude compatibility cost is explicitly non-authoritative | Implemented | `cli-estimated`, `source: cli`, `authoritative: false` asserted for explicit zero, normal amount and retry aggregation |
+| 4 | Claude compatibility cost is explicitly non-authoritative | Implemented | `cli-estimated`, `source: cli`, `authoritative: false` asserted for explicit zero, normal amount and retry aggregation; provider authority tests reject currencyless and mixed-provenance totals |
 | 5 | Token usage survives when cost does not | Implemented | `usage-only` tests at core and Claude adapter levels; malformed-cost/valid-usage case |
 | 6 | RunManifest remains acceptance authority | Implemented | Queue reads manifest failure/cost without rewriting; QueueItem failure only for no-manifest pre-dispatch blocks; control snapshot dedup test |
 | 7 | Queue status shows failure/cost without mutating authority | Implemented | Read-only tests compare queue and journal bytes; status tests show failure counts and non-authoritative cost |
 | 8 | Existing manifests and queue files remain backward compatible | Implemented | Legacy record tests load absent fields; malformed present fields fail closed with clear parse errors |
-| 9 | Existing build and full suite remain green | Implemented | `npm run build` exit `0`; full `npm test` 290/290; combined focused 50/50 |
+| 9 | Existing build and full suite remain green | Implemented | Hardening round (§2.2): `npm run build` exit `0`; full `npm test` 296/296; combined focused 56/56 |
 | 10 | No daemon, automatic retry, routing, admission or parallel dispatch introduced | Implemented (verified by code/test scope) | Queue remains sequential foreground; no retry path uses `retryableHint`; only the pre-existing Claude transient retry remains; tests assert a non-transient category does not add an attempt |
 
 ## 4. Limits and boundaries
@@ -371,6 +564,11 @@ Design acceptance items from
 - **No billing or balance authority.** `cli-estimated` is Claude Code's own
   `total_cost_usd`, not a DeepSeek invoice, bill, quota or balance. No
   provider quota/balance discovery is implemented.
+- **Fixture-based verification, not a provider call.** The adapter tests spawn
+  temporary fake CLI executables and assert on shaped result records. No real
+  Claude/DeepSeek session was started or billed, no balance, authorization or
+  routing result was observed, and no real self-host transcript was parsed by
+  the new subtype path. No raw fixture payload is copied into this document.
 - **No run-level authoritative total.** Supervisor tasks expose per-task cost;
   the control snapshot's run-wide cost is always `authoritative: false`, even
   when every observation is provider-reported. Known CLI amounts may form an
@@ -378,13 +576,16 @@ Design acceptance items from
 - **`guardBudgetUsd` is a guard, not spend.** It records the configured budget
   cap. Summing guards across sessions or tasks is not expected or actual cost.
 - **No built-in provider-reported cost source.** The type/parser supports
-  `provider-reported`, but the current Claude and Codex integrations emit
-  `cli-estimated`, `usage-only` or `unavailable` only.
-- **Classification is bounded heuristics.** It uses process signals and a
-  bounded tail of provider/worker text. Unusual provider prose can fall to
-  `unknown` or, when a process also failed, `worker_process_exit`. It is not a
-  model-quality judgment and retains no raw provider payload, prompt, file
-  content, auth header or transcript.
+  `provider-reported` under the hardened authority rules in §1.2, but the
+  current Claude and Codex integrations emit `cli-estimated`, `usage-only` or
+  `unavailable` only.
+- **Classification is bounded heuristics.** It uses process signals, a bounded
+  tail of provider/worker text, and the bounded Claude result subtype. Only
+  `error_max_budget_usd` changes a category; other subtypes are codes, not
+  categories. Unusual provider prose can still fall to `unknown` or, when a
+  process also failed, `worker_process_exit`. It is not a model-quality
+  judgment and retains no raw provider payload, prompt, file content, auth
+  header or transcript.
 - **Verifier rejection is post-success only.** A worker process failure keeps
   its stronger category even if verification later fails.
 - **Cost completeness is field-level.** Mixed currencies are never combined;
@@ -398,9 +599,10 @@ Design acceptance items from
 - **No routing, admission, parallel dispatch, daemon or Control API.** Queue
   dispatch remains sequential, same-host and foreground. Failure/cost do not
   feed a scheduler.
-- **Single local measurement.** These are one local macOS run and focused
-  fixtures. They are not a CI result, long-term flake rate, provider invoice,
-  cost forecast or cross-host claim.
+- **Local measurement.** These are local macOS runs and focused fixtures, not
+  a CI result, long-term flake rate, provider invoice, cost forecast or
+  cross-host claim. The v0 and hardening rounds were measured separately at
+  different HEADs, as recorded in §2.1 and §2.2.
 
 ## 5. Links
 
