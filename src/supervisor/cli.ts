@@ -21,9 +21,16 @@ import {
   type WorkerProgressEvent,
 } from "../agents/types.js";
 import {
+  BUDGET_CONTINUATION_POLICY_VERSION,
+  DEFAULT_BUDGET_CONTINUATION_POLICY,
   DEFAULT_DEADLINE_EXTENSION_POLICY,
+  MAX_BUDGET_CONTINUATIONS,
+  MAX_BUDGET_GUARD_USD,
   MAX_DEADLINE_TIMEOUT_MS,
+  parseBudgetContinuationPolicy,
+  parseBudgetGuardUsd,
   parseDeadlineExtensionPolicy,
+  type BudgetContinuationPolicy,
   type DeadlineExtensionPolicy,
 } from "../agents/continuation.js";
 import type { TaskContract } from "../contracts/schema.js";
@@ -200,6 +207,7 @@ async function startCommand(
     return 1;
   }
   const deadlinePolicy = deadlinePolicyFromArgs(rest);
+  const budget = budgetSettingsFromArgs(rest, workerFrom(rest));
 
   const contractsPath = resolve(repoRoot, contractsArg);
   const contracts = loadContractsInput(contractsPath);
@@ -239,6 +247,12 @@ async function startCommand(
     log,
     resumed: false,
     deadlinePolicy,
+    ...(budget.maxBudgetUsd !== undefined
+      ? { maxBudgetUsd: budget.maxBudgetUsd }
+      : {}),
+    ...(budget.budgetPolicy !== undefined
+      ? { budgetPolicy: budget.budgetPolicy }
+      : {}),
     // A new run never has a draft; always start a clean worktree.
     reuseAttempts: false,
   });
@@ -254,6 +268,7 @@ async function resumeCommand(
   log: (line: string) => void,
 ): Promise<number> {
   const deadlinePolicy = deadlinePolicyFromArgs(rest);
+  const budget = budgetSettingsFromArgs(rest, workerFrom(rest));
   const reuseAttempt = has("--reuse-attempt", rest);
   const freshAttempt = has("--fresh-attempt", rest);
   if (reuseAttempt && freshAttempt) {
@@ -330,6 +345,12 @@ async function resumeCommand(
     log,
     resumed: true,
     deadlinePolicy,
+    ...(budget.maxBudgetUsd !== undefined
+      ? { maxBudgetUsd: budget.maxBudgetUsd }
+      : {}),
+    ...(budget.budgetPolicy !== undefined
+      ? { budgetPolicy: budget.budgetPolicy }
+      : {}),
     // Reuse is the default for rejected attempts. --fresh-attempt is the
     // explicit recovery path for a missing, invalid or unwanted draft.
     reuseAttempts: !freshAttempt,
@@ -528,12 +549,30 @@ function printStatus(
       parts.push(`cost=${formatCostObservation(task.cost)}`);
     }
     if (extensions.length > 0) {
-      const last = extensions.at(-1)!;
-      parts.push(
-        `extensions=${extensions.length}`,
-        `last deadline extension=${last.grantedAt} ` +
-          `+${last.extensionMs}ms cumulative=${last.cumulativeTimeoutMs}ms`,
+      parts.push(`extensions=${extensions.length}`);
+      const deadlines = extensions.filter(
+        (extension) => extension.kind === "deadline",
       );
+      const budgets = extensions.filter(
+        (extension) => extension.kind === "budget-continuation",
+      );
+      const lastDeadline = deadlines.at(-1);
+      if (lastDeadline) {
+        parts.push(
+          `last deadline extension=${lastDeadline.grantedAt} ` +
+            `+${lastDeadline.extensionMs}ms ` +
+            `cumulative=${lastDeadline.cumulativeTimeoutMs}ms`,
+        );
+      }
+      const lastBudget = budgets.at(-1);
+      if (lastBudget) {
+        parts.push(
+          `budget-extensions=${budgets.length}`,
+          `last budget continuation=${lastBudget.grantedAt} ` +
+            `+${lastBudget.additionalGuardUsd} ` +
+            `cumulative-guard-usd=${lastBudget.cumulativeGuardUsd}`,
+        );
+      }
     }
     log(parts.join(" "));
   }
@@ -1013,6 +1052,8 @@ interface ExecuteRunInput {
   /** Reuse validated rejected attempt worktrees instead of fresh ones. */
   reuseAttempts: boolean;
   deadlinePolicy?: DeadlineExtensionPolicy;
+  budgetPolicy?: BudgetContinuationPolicy;
+  maxBudgetUsd?: number;
 }
 
 async function executeRun(input: ExecuteRunInput): Promise<number> {
@@ -1025,6 +1066,8 @@ async function executeRun(input: ExecuteRunInput): Promise<number> {
     log,
     resumed,
     deadlinePolicy,
+    budgetPolicy,
+    maxBudgetUsd,
   } = input;
   const removeSignals = installSignalHandlers(
     repoRoot,
@@ -1047,6 +1090,8 @@ async function executeRun(input: ExecuteRunInput): Promise<number> {
       runManifest: manifest,
       reuseAttempts: input.reuseAttempts,
       ...(deadlinePolicy ? { deadlinePolicy } : {}),
+      ...(budgetPolicy ? { budgetPolicy } : {}),
+      ...(maxBudgetUsd !== undefined ? { maxBudgetUsd } : {}),
       workerFactory: options.workerFactory,
     });
     const finalManifest =
@@ -1150,6 +1195,173 @@ const DEADLINE_VALUE_FLAGS = [
   "--max-total-timeout-ms",
   "--healthy-activity-window-ms",
 ] as const;
+
+const BUDGET_VALUE_FLAGS = [
+  "--max-budget-usd",
+  "--continuation-guard-usd",
+  "--max-budget-continuations",
+  "--max-cumulative-budget-guard-usd",
+  "--budget-overshoot-reserve-usd",
+] as const;
+
+function budgetSettingsFromArgs(
+  argv: string[],
+  worker: "codex" | "claude",
+): {
+  maxBudgetUsd?: number;
+  budgetPolicy?: BudgetContinuationPolicy;
+} {
+  const autoOccurrences = flagOccurrences(
+    "--auto-continue-budget",
+    argv,
+  );
+  if (autoOccurrences.length > 1) {
+    throw new Error(
+      "supervisor: --auto-continue-budget may be specified only once",
+    );
+  }
+  if (autoOccurrences.some((value) => value.includes("="))) {
+    throw new Error(
+      "supervisor: --auto-continue-budget does not accept a value",
+    );
+  }
+  const anyBudgetFlag =
+    autoOccurrences.length > 0 ||
+    BUDGET_VALUE_FLAGS.some(
+      (flag) => flagOccurrences(flag, argv).length > 0,
+    );
+  if (anyBudgetFlag && worker !== "claude") {
+    throw new Error(
+      "supervisor: budget continuation flags require --worker claude",
+    );
+  }
+
+  const maxBudgetUsd = moneyFlag("--max-budget-usd", argv, false);
+  const continuationGuardUsd = moneyFlag(
+    "--continuation-guard-usd",
+    argv,
+    false,
+  );
+  const requestedMaxContinuations = integerFlag(
+    "--max-budget-continuations",
+    argv,
+  );
+  if (
+    requestedMaxContinuations !== undefined &&
+    requestedMaxContinuations > MAX_BUDGET_CONTINUATIONS
+  ) {
+    throw new Error(
+      `supervisor: --max-budget-continuations must be at most ` +
+        `${MAX_BUDGET_CONTINUATIONS}`,
+    );
+  }
+  const requestedMaxCumulative = moneyFlag(
+    "--max-cumulative-budget-guard-usd",
+    argv,
+    false,
+  );
+  const overshootReserveUsd = moneyFlag(
+    "--budget-overshoot-reserve-usd",
+    argv,
+    true,
+  );
+  const autoContinue = autoOccurrences.length === 1;
+  const hasPolicyFlag =
+    autoContinue ||
+    continuationGuardUsd !== undefined ||
+    requestedMaxContinuations !== undefined ||
+    requestedMaxCumulative !== undefined ||
+    overshootReserveUsd !== undefined;
+  if (!hasPolicyFlag) return maxBudgetUsd !== undefined ? { maxBudgetUsd } : {};
+
+  const baseGuardUsd =
+    maxBudgetUsd ?? DEFAULT_BUDGET_CONTINUATION_POLICY.baseGuardUsd;
+  const continuationGuard =
+    continuationGuardUsd ??
+    DEFAULT_BUDGET_CONTINUATION_POLICY.continuationGuardUsd;
+  const maxContinuations =
+    requestedMaxContinuations ??
+    DEFAULT_BUDGET_CONTINUATION_POLICY.maxContinuations;
+  const overshootReserve =
+    overshootReserveUsd ??
+    DEFAULT_BUDGET_CONTINUATION_POLICY.overshootReserveUsd;
+  const maxCumulativeGuardUsd =
+    requestedMaxCumulative ??
+    roundMoney(
+      baseGuardUsd +
+        continuationGuard * maxContinuations +
+        overshootReserve,
+    );
+
+  if (autoContinue && maxContinuations === 0) {
+    throw new Error(
+      "supervisor: --auto-continue-budget requires " +
+        "--max-budget-continuations > 0",
+    );
+  }
+  if (maxCumulativeGuardUsd > MAX_BUDGET_GUARD_USD) {
+    throw new Error(
+      `supervisor: max cumulative budget guard must be at most ` +
+        `${MAX_BUDGET_GUARD_USD}`,
+    );
+  }
+  const policy = parseBudgetContinuationPolicy({
+    version: BUDGET_CONTINUATION_POLICY_VERSION,
+    baseGuardUsd,
+    continuationGuardUsd: continuationGuard,
+    maxContinuations,
+    maxCumulativeGuardUsd,
+    autoContinue,
+    overshootReserveUsd: overshootReserve,
+  });
+  if (!policy) {
+    throw new Error(
+      "supervisor: invalid budget continuation policy; positive guards, " +
+        "a cumulative guard covering continuation plus overshoot reserve, " +
+        "and 0..64 continuations are required",
+    );
+  }
+  return { maxBudgetUsd: baseGuardUsd, budgetPolicy: policy };
+}
+
+function moneyFlag(
+  flag: string,
+  argv: string[],
+  allowZero: boolean,
+): number | undefined {
+  const occurrences = flagOccurrences(flag, argv);
+  if (occurrences.length === 0) return undefined;
+  if (occurrences.length > 1) {
+    throw new Error(`supervisor: ${flag} may be specified only once`);
+  }
+  const raw = arg(flag, argv);
+  if (
+    raw === undefined ||
+    !/^(?:0|[1-9]\d*)(?:\.\d{1,6})?$/.test(raw)
+  ) {
+    throw new Error(
+      `supervisor: ${flag} requires a non-negative USD amount with at ` +
+        "most 6 decimal places",
+    );
+  }
+  const value = Number(raw);
+  if (
+    !Number.isFinite(value) ||
+    value > MAX_BUDGET_GUARD_USD ||
+    (!allowZero && value === 0) ||
+    (parseBudgetGuardUsd(value) === undefined && !(allowZero && value === 0))
+  ) {
+    throw new Error(
+      `supervisor: ${flag} requires a ` +
+        `${allowZero ? "non-negative" : "positive"} bounded USD amount`,
+    );
+  }
+  return value;
+}
+
+function roundMoney(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
 
 function deadlinePolicyFromArgs(
   argv: string[],
@@ -1349,6 +1561,7 @@ const VALUE_FLAGS = new Set([
   "--ledger",
   "--plan-id",
   ...DEADLINE_VALUE_FLAGS,
+  ...BUDGET_VALUE_FLAGS,
 ]);
 
 function positionalArg(argv: string[]): string | undefined {
@@ -1377,6 +1590,12 @@ Usage:
                                 [--max-deadline-extensions n]
                                 [--max-total-timeout-ms n]
                                 [--healthy-activity-window-ms n]
+                                [--max-budget-usd usd]
+                                [--auto-continue-budget]
+                                [--continuation-guard-usd usd]
+                                [--max-budget-continuations n]
+                                [--max-cumulative-budget-guard-usd usd]
+                                [--budget-overshoot-reserve-usd usd]
   cliyard supervisor status --repo <path> [--run id] [--json]
   cliyard supervisor resume --repo <path> [--run id] [--worker claude|codex]
                             [--model id] [--dry-run] [--keep-worktrees]
@@ -1387,6 +1606,12 @@ Usage:
                             [--max-deadline-extensions n]
                             [--max-total-timeout-ms n]
                             [--healthy-activity-window-ms n]
+                            [--max-budget-usd usd]
+                            [--auto-continue-budget]
+                            [--continuation-guard-usd usd]
+                            [--max-budget-continuations n]
+                            [--max-cumulative-budget-guard-usd usd]
+                            [--budget-overshoot-reserve-usd usd]
   cliyard supervisor reap --repo <path> [--json]
   cliyard supervisor stop --repo <path> [--run id] [--force]
 
@@ -1399,5 +1624,8 @@ Start/resume reap proven orphaned runtimes after acquiring the lock and fail
 closed when any runtime needs human review. Status only reads persisted
 recovery records; it never reconciles. Automatic deadline extension is off by
 default and is available only with Claude's mapped assistant/tool progress.
-Codex remains fail-closed at its base timeout.`);
+Automatic budget continuation is off by default and max continuations are
+zero; an opted-in grant starts a new Claude invocation and is not a balance,
+invoice, quota or strict hard cap. Codex remains fail-closed at its base
+timeout.`);
 }

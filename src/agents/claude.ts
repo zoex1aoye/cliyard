@@ -9,8 +9,10 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { collectChangedPaths } from "./git-paths.js";
+import { auditPathScope } from "./path-scope.js";
 import {
   boundFailureText,
+  classifyFailure,
   createCostObservation,
   createCostTruth,
   createFailureRecord,
@@ -24,8 +26,11 @@ import {
   type TokenUsage,
 } from "../failures.js";
 import {
+  parseBudgetContinuationPolicy,
+  parseBudgetGuardUsd,
   parseDeadlineExtensionPolicy,
   TASK_EXTENSION_RECORD_VERSION,
+  type BudgetContinuationPolicy,
   type DeadlineExtensionPolicy,
   type TaskExtensionRecord,
 } from "./continuation.js";
@@ -59,6 +64,11 @@ export interface ClaudeWorkerOptions {
   timeoutMs?: number;
   maxBudgetUsd?: number;
   maxTransientRetries?: number;
+  /**
+   * Opt-in budget continuation policy. A grant starts a new CLI invocation
+   * against the same worktree and, when eligible, the same provider session.
+   */
+  budgetPolicy?: BudgetContinuationPolicy;
   /**
    * Opt-in deadline extension policy. When omitted, the existing fixed timeout
    * remains in force and automatic extension stays disabled.
@@ -116,6 +126,13 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
   if (opts.deadlinePolicy !== undefined && !deadlinePolicy) {
     throw new Error("invalid Claude deadline extension policy");
   }
+  const budgetPolicy =
+    opts.budgetPolicy === undefined
+      ? undefined
+      : parseBudgetContinuationPolicy(opts.budgetPolicy);
+  if (opts.budgetPolicy !== undefined && !budgetPolicy) {
+    throw new Error("invalid Claude budget continuation policy");
+  }
   if (
     deadlinePolicy &&
     opts.timeoutMs !== undefined &&
@@ -130,11 +147,27 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
   const configuredBudget = Number(
     process.env.CLIYARD_CLAUDE_MAX_BUDGET_USD,
   );
-  const maxBudgetUsd =
+  const requestedBudget =
     opts.maxBudgetUsd ??
+    budgetPolicy?.baseGuardUsd ??
     (Number.isFinite(configuredBudget) && configuredBudget > 0
       ? configuredBudget
       : 5);
+  const maxBudgetUsd = parseBudgetGuardUsd(requestedBudget);
+  if (maxBudgetUsd === undefined) {
+    throw new Error(
+      "Claude maxBudgetUsd must be a positive, bounded USD amount",
+    );
+  }
+  if (
+    budgetPolicy &&
+    opts.maxBudgetUsd !== undefined &&
+    maxBudgetUsd !== budgetPolicy.baseGuardUsd
+  ) {
+    throw new Error(
+      "Claude maxBudgetUsd contradicts budgetPolicy.baseGuardUsd",
+    );
+  }
   const maxTransientRetries = opts.maxTransientRetries ?? 2;
   const configuredHeartbeat = Number(
     process.env.CLIYARD_CLAUDE_HEARTBEAT_MS,
@@ -171,6 +204,7 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
         id: "claude",
         ok,
         supportsModelFlag: true,
+        supportsProviderSessionResume: true,
         notes,
       };
     },
@@ -225,70 +259,193 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
           };
         }
 
+        const retryNotes: string[] = [];
+        /** Every provider invocation started by this attempt, including retries. */
+        const observations: CostObservation[] = [];
+        const extensionState: DeadlineGrantState = {
+          extensionCount: 0,
+          cumulativeTimeoutMs: timeoutMs,
+          records: [],
+        };
+        let cumulativeGuardUsd = maxBudgetUsd;
         try {
-          const retryNotes: string[] = [];
-          /** Every provider session started by this attempt, including retries. */
-          const observations: CostObservation[] = [];
-          const extensionState: DeadlineGrantState = {
-            extensionCount: 0,
-            cumulativeTimeoutMs: timeoutMs,
-            records: [],
-          };
           let res!: ClaudeRunResult;
           let parsed: ClaudeResult | undefined;
-          for (let retry = 0; ; retry += 1) {
-            const runSessionId = randomUUID();
-            res = await withClaudeSlot(() =>
-              runClaude({
-                binary,
-                cwd: opts.cwd,
-                model,
-                permissionMode,
-                allowedTools,
-                extraArgs: opts.extraArgs ?? [],
-                timeoutMs,
-                attempt: input.attempt,
-                ...(deadlinePolicy ? { deadlinePolicy } : {}),
-                ...(input.onExtension
-                  ? { onExtension: input.onExtension }
-                  : {}),
-                extensionState,
-                maxBudgetUsd,
-                heartbeatMs,
-                sessionId: runSessionId,
-                prompt,
-                emit,
-                onSpawn: (child) => {
-                  const session = sessions.get(sessionId);
-                  if (session) session.child = child;
-                  emit({
-                    type: "session.start",
-                    phase: "starting",
-                    message: "worker started",
-                  });
-                },
-              }),
-            );
-            parsed = res.result;
-            observations.push(recordAttemptCost(runSessionId, res, parsed));
+          let continuationCount = 0;
+          let launch: ClaudeSessionLaunch = {
+            kind: "fresh",
+            sessionId: randomUUID(),
+          };
+
+          for (;;) {
+            /**
+             * Existing transient retries remain fresh sessions. Budget
+             * continuation is a separate outer loop and never masquerades as
+             * a transient retry.
+             */
+            for (let retry = 0; ; retry += 1) {
+              const invocationLaunch =
+                retry === 0
+                  ? launch
+                  : ({ kind: "fresh", sessionId: randomUUID() } as const);
+              res = await withClaudeSlot(() =>
+                runClaude({
+                  binary,
+                  cwd: opts.cwd,
+                  model,
+                  permissionMode,
+                  allowedTools,
+                  extraArgs: opts.extraArgs ?? [],
+                  timeoutMs,
+                  attempt: input.attempt,
+                  ...(deadlinePolicy ? { deadlinePolicy } : {}),
+                  ...(input.onExtension
+                    ? { onExtension: input.onExtension }
+                    : {}),
+                  extensionState,
+                  maxBudgetUsd: cumulativeGuardUsd,
+                  heartbeatMs,
+                  launch: invocationLaunch,
+                  prompt,
+                  emit,
+                  onSpawn: (child) => {
+                    const session = sessions.get(sessionId);
+                    if (session) session.child = child;
+                    emit({
+                      type: "session.start",
+                      phase: "starting",
+                      message:
+                        invocationLaunch.kind === "resume"
+                          ? "worker resumed provider session"
+                          : "worker started",
+                    });
+                  },
+                }),
+              );
+              parsed = res.result;
+              observations.push(
+                recordAttemptCost(invocationLaunch.sessionId, res),
+              );
+              if (
+                !isTransientClaudeFailure(res, parsed) ||
+                retry >= maxTransientRetries
+              ) {
+                break;
+              }
+              const waitMs = 1000 * 2 ** retry;
+              retryNotes.push(
+                `[claude] transient failure; retry ${retry + 1}/${maxTransientRetries} in ${waitMs}ms`,
+              );
+              emit({
+                type: "retry",
+                phase: "waiting",
+                message:
+                  `transient provider failure; retry ` +
+                  `${retry + 1}/${maxTransientRetries} in ${waitMs}ms`,
+              });
+              await delay(waitMs);
+            }
+
+            const nextCumulativeGuardUsd =
+              budgetPolicy === undefined
+                ? cumulativeGuardUsd
+                : roundBudgetGuard(
+                    cumulativeGuardUsd + budgetPolicy.continuationGuardUsd,
+                  );
             if (
-              !isTransientClaudeFailure(res, parsed) ||
-              retry >= maxTransientRetries
+              !canConsiderBudgetContinuation({
+                result: res,
+                policy: budgetPolicy,
+                onExtension: input.onExtension,
+                continuationCount,
+                nextCumulativeGuardUsd,
+              })
             ) {
               break;
             }
-            const waitMs = 1000 * 2 ** retry;
+
+            /**
+             * A changed-path collection failure or out-of-contract change
+             * before the grant denies the grant. The final collection below
+             * remains the normal exit audit.
+             */
+            let boundaryChanged: Awaited<
+              ReturnType<typeof collectChangedPaths>
+            >;
+            try {
+              boundaryChanged = await collectChangedPaths(
+                opts.cwd,
+                input.contract.baseCommit,
+              );
+            } catch (error) {
+              boundaryChanged = {
+                paths: [],
+                error: error instanceof Error ? error.message : String(error),
+              };
+            }
+            const boundaryAudit = boundaryChanged.error
+              ? undefined
+              : auditPathScope(
+                  input.contract.writePaths,
+                  boundaryChanged.paths,
+                );
+            if (
+              boundaryChanged.error ||
+              !boundaryAudit ||
+              boundaryAudit.outsideWritePaths.length > 0
+            ) {
+              break;
+            }
+
+            const policy = budgetPolicy!;
+            const progress = res.meaningfulProgress!;
+            const providerSessionId = res.providerSessionId!;
+            const requestedAt = new Date().toISOString();
+            const continuation: TaskExtensionRecord = {
+              version: TASK_EXTENSION_RECORD_VERSION,
+              extensionId: randomUUID(),
+              attempt: input.attempt,
+              kind: "budget-continuation",
+              source: "auto",
+              requestedAt,
+              grantedAt: requestedAt,
+              reason:
+                `mapped ${progress.type} progress before clean ` +
+                "error_max_budget_usd",
+              healthyEvidence: [`${progress.type}@${progress.at}`],
+              providerSessionId,
+              additionalGuardUsd: policy.continuationGuardUsd,
+              cumulativeGuardUsd: nextCumulativeGuardUsd,
+              continuationIndex: continuationCount + 1,
+            };
+
+            try {
+              await input.onExtension!(continuation);
+            } catch (error) {
+              const detail =
+                error instanceof Error ? error.message : String(error);
+              emit({
+                type: "error",
+                phase: "ending",
+                message: "budget continuation persistence failed",
+                detail: boundProgressText(detail, MAX_PROGRESS_DETAIL),
+              });
+              // The failed callback is not a grant, and no resumed process may
+              // start after this point.
+              break;
+            }
+
+            extensionState.records.push(continuation);
+            continuationCount += 1;
+            cumulativeGuardUsd = nextCumulativeGuardUsd;
             retryNotes.push(
-              `[claude] transient failure; retry ${retry + 1}/${maxTransientRetries} in ${waitMs}ms`,
+              `[claude] budget continuation ${continuationCount}/` +
+                `${policy.maxContinuations}; provider session resumed`,
             );
-            emit({
-              type: "retry",
-              phase: "waiting",
-              message:
-                `transient provider failure; retry ` +
-                `${retry + 1}/${maxTransientRetries} in ${waitMs}ms`,
-            });
-            await delay(waitMs);
+            launch = {
+              kind: "resume",
+              sessionId: providerSessionId,
+            };
           }
           let changed: Awaited<ReturnType<typeof collectChangedPaths>>;
           try {
@@ -326,6 +483,9 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
             : undefined;
           return {
             sessionId,
+            ...(res.providerSessionId
+              ? { providerSessionId: res.providerSessionId }
+              : {}),
             exitCode: failed ? 1 : 0,
             touchedPaths: changed.paths,
             ...(changed.error
@@ -348,7 +508,7 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
               : {}),
             cost: createCostTruth({
               observations,
-              guardBudgetUsd: maxBudgetUsd,
+              guardBudgetUsd: cumulativeGuardUsd,
             }),
           };
         } catch (e) {
@@ -370,11 +530,25 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
               code: "spawn_error",
               messageDetail: `spawn error: ${message}`,
             }),
-            cost: unavailableCostTruth({
-              sessionId,
-              guardBudgetUsd: maxBudgetUsd,
-              note: "worker failed to start",
-            }),
+            ...(extensionState.records.length > 0
+              ? {
+                  extensions: extensionState.records.map((record) => ({
+                    ...record,
+                    healthyEvidence: [...record.healthyEvidence],
+                  })),
+                }
+              : {}),
+            cost:
+              observations.length > 0
+                ? createCostTruth({
+                    observations,
+                    guardBudgetUsd: cumulativeGuardUsd,
+                  })
+                : unavailableCostTruth({
+                    sessionId,
+                    guardBudgetUsd: cumulativeGuardUsd,
+                    note: "worker failed to start",
+                  }),
           };
         }
       })();
@@ -439,6 +613,76 @@ function isTransientClaudeFailure(
   );
 }
 
+function canConsiderBudgetContinuation(input: {
+  result: ClaudeRunResult;
+  policy: BudgetContinuationPolicy | undefined;
+  onExtension: AgentStartInput["onExtension"];
+  continuationCount: number;
+  nextCumulativeGuardUsd: number;
+}): boolean {
+  const { result, policy } = input;
+  const parsed = result.result;
+  if (
+    policy?.autoContinue !== true ||
+    !input.onExtension ||
+    input.continuationCount >= policy.maxContinuations ||
+    result.timedOut ||
+    result.signal !== null ||
+    result.code === 124 ||
+    (result.code !== 0 && result.code !== 1) ||
+    result.unresolvedProviderError ||
+    result.protocolFailure ||
+    Boolean(result.errorText) ||
+    !parsed ||
+    parsed.is_error !== true ||
+    parsed.subtype !== "error_max_budget_usd" ||
+    !result.providerSessionId ||
+    !result.meaningfulProgress ||
+    roundBudgetGuard(
+      input.nextCumulativeGuardUsd + policy.overshootReserveUsd,
+    ) > policy.maxCumulativeGuardUsd
+  ) {
+    return false;
+  }
+
+  // An exact budget subtype is insufficient when the same outcome also
+  // carries an auth, protocol, policy, transient, resource or timeout signal.
+  const bareClassification = classifyFailure({
+    text: [parsed.result ?? "", result.stderr].filter(Boolean).join("\n"),
+  });
+  if (
+    bareClassification.category !== "unknown" &&
+    bareClassification.category !== "budget_exhausted"
+  ) {
+    return false;
+  }
+  return !hasNonBudgetFailureSignal(
+    `${parsed.result ?? ""}\n${result.stderr}`,
+  );
+}
+
+function hasNonBudgetFailureSignal(text: string): boolean {
+  return (
+    /\b(?:401|403|429|500|502|503|504|529)\b/i.test(text) ||
+    /\b(?:unauthori[sz]ed|unauthenticated|api[ _-]?key|invalid[ _-]?token|permission denied|forbidden|oauth|authentication (?:failed|error|required))\b/i.test(
+      text,
+    ) ||
+    /\b(?:timed?\s*out|timeout|ETIMEDOUT|ECONNRESET|overloaded|rate.?limit|service unavailable|bad gateway)\b/i.test(
+      text,
+    ) ||
+    /\b(?:invalid|malformed|unexpected)[ _](?:json|jsonl|response|record|stream|schema|payload)|protocol[ _](?:error|violation|mismatch)|unsupported[ _](?:record|event)[ _]type\b/i.test(
+      text,
+    ) ||
+    /\b(?:policy[ _-]?(?:blocked|denied|violation)|not[ _-]permitted|out[ _-]of[ _-]scope|changed[ _-]paths?[ _-]failed)\b/i.test(
+      text,
+    )
+  );
+}
+
+function roundBudgetGuard(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
@@ -448,10 +692,15 @@ function delay(ms: number): Promise<void> {
  * record yields `unavailable`, never zero.
  */
 function recordAttemptCost(
-  sessionId: string,
+  requestedSessionId: string,
   res: ClaudeRunResult,
-  parsed: ClaudeResult | undefined,
 ): CostObservation {
+  const parsed = res.result;
+  const reportedSessionId = res.providerSessionId;
+  const sessionId =
+    reportedSessionId && reportedSessionId.length <= 128
+      ? reportedSessionId
+      : requestedSessionId;
   if (!parsed) {
     const note = res.timedOut
       ? "worker timed out before a result record"
@@ -507,15 +756,26 @@ function buildClaudeFailure(input: {
 /** Extract only the known result fields; raw provider payloads are dropped. */
 function toClaudeResult(record: Record<string, unknown>): ClaudeResult {
   const subtype = normalizeFailureCode(record.subtype);
+  const providerSessionId = parseProviderSessionId(record.session_id);
   return {
     ...(typeof record.is_error === "boolean"
       ? { is_error: record.is_error }
       : {}),
     ...(typeof record.result === "string" ? { result: record.result } : {}),
     ...(subtype ? { subtype } : {}),
+    ...(providerSessionId ? { providerSessionId } : {}),
     usage: parseClaudeUsage(record),
     totalCostUsd: parseCostAmount(record.total_cost_usd),
   };
+}
+
+function parseProviderSessionId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 256 || trimmed.includes("\0")) {
+    return undefined;
+  }
+  return trimmed;
 }
 
 /**
@@ -572,6 +832,8 @@ interface ClaudeResult {
    * `error_max_budget_usd`). The raw provider value is never retained.
    */
   subtype?: string;
+  /** Provider conversation id, when the CLI reported one. */
+  providerSessionId?: string;
   /** Parsed token usage; null when the record carried none. */
   usage: TokenUsage | null;
   /** `total_cost_usd` as emitted by the CLI; null when absent or malformed. */
@@ -590,9 +852,24 @@ interface ClaudeRunResult {
   signal: NodeJS.Signals | null;
   /** Bounded text from provider `error` records, when any. */
   errorText?: string;
+  /** Last provider conversation id observed in stream-json. */
+  providerSessionId?: string;
+  /** Newest mapped assistant/tool event before this invocation ended. */
+  meaningfulProgress?: {
+    type: "assistant" | "tool.start" | "tool.result";
+    at: string;
+  };
+  /** True when an error/retry has not been followed by mapped progress. */
+  unresolvedProviderError: boolean;
+  /** True when a JSON-shaped provider line could not be parsed. */
+  protocolFailure: boolean;
   /** Deadline in force when this invocation stopped. */
   deadlineTimeoutMs: number;
 }
+
+type ClaudeSessionLaunch =
+  | { kind: "fresh"; sessionId: string }
+  | { kind: "resume"; sessionId: string };
 
 interface DeadlineGrantState {
   extensionCount: number;
@@ -632,7 +909,7 @@ function runClaude(opts: {
   extensionState: DeadlineGrantState;
   maxBudgetUsd: number;
   heartbeatMs: number;
-  sessionId: string;
+  launch: ClaudeSessionLaunch;
   prompt: string;
   emit: ProgressEmitter;
   onSpawn: (child: ChildProcess) => void;
@@ -650,8 +927,9 @@ function runClaude(opts: {
       opts.permissionMode,
       "--allowedTools",
       opts.allowedTools.join(","),
-      "--session-id",
-      opts.sessionId,
+      ...(opts.launch.kind === "resume"
+        ? ["--resume", opts.launch.sessionId]
+        : ["--session-id", opts.launch.sessionId]),
       "--max-budget-usd",
       String(opts.maxBudgetUsd),
       "--no-chrome",
@@ -685,11 +963,19 @@ function runClaude(opts: {
     let lastProviderRecordAt = Date.now();
     let lastRecordLabel = "";
     let providerErrorText = "";
+    let reportedProviderSessionId: string | undefined;
+    let protocolFailure = false;
     let lastMeaningful:
       | {
           type: "assistant" | "tool.start" | "tool.result";
           at: string;
           atMs: number;
+        }
+      | undefined;
+    let meaningfulProgressAtResult:
+      | {
+          type: "assistant" | "tool.start" | "tool.result";
+          at: string;
         }
       | undefined;
     let unresolvedError = false;
@@ -717,6 +1003,12 @@ function runClaude(opts: {
       onResult: (record) => {
         result = record;
         if (resultEmitted) return;
+        if (lastMeaningful) {
+          meaningfulProgressAtResult = {
+            type: lastMeaningful.type,
+            at: lastMeaningful.at,
+          };
+        }
         resultEmitted = true;
         resultEmittedAtMs = Date.now();
         const failed = record.is_error === true;
@@ -740,10 +1032,21 @@ function runClaude(opts: {
       try {
         parsed = JSON.parse(trimmed) as unknown;
       } catch {
-        // A non-JSON log line is not a provider event; ignore it.
+        // JSON-shaped malformed output is protocol evidence. Plain log lines
+        // are not provider events and remain ignorable.
+        if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+          protocolFailure = true;
+        }
         return;
       }
-      if (!isRecord(parsed)) return;
+      if (!isRecord(parsed)) {
+        if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+          protocolFailure = true;
+        }
+        return;
+      }
+      const parsedSessionId = parseProviderSessionId(parsed.session_id);
+      if (parsedSessionId) reportedProviderSessionId = parsedSessionId;
       // Any complete provider record counts as activity, even when it maps to
       // no visible event (notably `system/thinking_tokens`).
       lastProviderRecordAt = Date.now();
@@ -872,7 +1175,8 @@ function runClaude(opts: {
         healthyEvidence: [
           `${lastMeaningful!.type}@${lastMeaningful!.at}`,
         ],
-        providerSessionId: opts.sessionId,
+        providerSessionId:
+          reportedProviderSessionId ?? opts.launch.sessionId,
         extensionMs: policy.extensionStepMs,
         cumulativeTimeoutMs,
       };
@@ -935,6 +1239,12 @@ function runClaude(opts: {
       if (pending.length > MAX_PENDING_LINE) {
         // A single unterminated line larger than the hard bound is not a
         // usable JSONL record; drop it rather than buffering without limit.
+        if (
+          pending.trimStart().startsWith("{") ||
+          pending.trimStart().startsWith("[")
+        ) {
+          protocolFailure = true;
+        }
         pending = "";
       }
     });
@@ -982,6 +1292,15 @@ function runClaude(opts: {
           timedOut,
           signal,
           deadlineTimeoutMs,
+          providerSessionId:
+            reportedProviderSessionId ??
+            result?.providerSessionId ??
+            opts.launch.sessionId,
+          ...(meaningfulProgressAtResult
+            ? { meaningfulProgress: meaningfulProgressAtResult }
+            : {}),
+          unresolvedProviderError: unresolvedError,
+          protocolFailure,
           ...(providerErrorText ? { errorText: providerErrorText } : {}),
         });
       })();

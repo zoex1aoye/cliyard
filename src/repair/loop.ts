@@ -47,8 +47,8 @@ export interface LoopOptions {
    */
   onProgress?: (event: WorkerProgressEvent) => void;
   /**
-   * Persist one deadline grant before the worker adapter may extend its live
-   * timer. A thrown/rejected callback denies the grant.
+   * Persist one deadline or budget grant before the adapter acts on it. A
+   * thrown/rejected callback denies the grant.
    */
   onExtension?: (
     extension: TaskExtensionRecord,
@@ -75,7 +75,7 @@ export interface LoopResult {
    * These records are observational and never grant acceptance.
    */
   pathAudits: PathAuditRecord[];
-  /** Deadline grants whose persistence callback completed. */
+  /** Deadline and budget grants whose persistence callback completed. */
   extensions: TaskExtensionRecord[];
 }
 
@@ -140,7 +140,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
       ? async (extension: TaskExtensionRecord): Promise<void> => {
           const parsed = parseTaskExtensionRecord(extension);
           if (!parsed) {
-            throw new Error("worker emitted an invalid deadline extension");
+            throw new Error("worker emitted an invalid task extension");
           }
           // Validate bounds/conflicts before persistence. Publish the grant to
           // the loop only after the durable callback resolves.

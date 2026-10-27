@@ -89,6 +89,11 @@ export interface AgentCapability {
   ok: boolean;
   version?: string;
   supportsModelFlag?: boolean;
+  /**
+   * The execution profile can launch a later invocation with the same
+   * provider conversation. Budget continuation remains policy-gated.
+   */
+  supportsProviderSessionResume?: boolean;
   notes: string[];
 }
 
@@ -118,6 +123,11 @@ export interface AgentStartInput {
 
 export interface AgentResult {
   sessionId: string;
+  /**
+   * Provider conversation id reported by the CLI, when available. Distinct
+   * from the adapter's task/session handle used by collect().
+   */
+  providerSessionId?: string;
   exitCode: number;
   /** Repository-relative paths reported changed by the worker adapter. */
   touchedPaths: string[];

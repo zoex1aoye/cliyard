@@ -19,9 +19,16 @@ import { spawn } from "node:child_process";
 import { createClaudeAdapter } from "../agents/claude.js";
 import { createCodexAdapter } from "../agents/codex.js";
 import {
+  BUDGET_CONTINUATION_POLICY_VERSION,
+  DEFAULT_BUDGET_CONTINUATION_POLICY,
+  MAX_BUDGET_CONTINUATIONS,
+  MAX_BUDGET_GUARD_USD,
   appendTaskExtensionRecord,
   mergeTaskExtensionRecords,
+  parseBudgetContinuationPolicy,
+  parseBudgetGuardUsd,
   parseDeadlineExtensionPolicy,
+  type BudgetContinuationPolicy,
   type DeadlineExtensionPolicy,
   type TaskExtensionRecord,
 } from "../agents/continuation.js";
@@ -77,6 +84,13 @@ export interface CodexBatchOptions {
    * timeout because it has no mapped meaningful-progress stream.
    */
   deadlinePolicy?: DeadlineExtensionPolicy;
+  /**
+   * Claude-only budget continuation policy. Grants are persisted through the
+   * same run-scoped onExtension checkpoint as deadline extensions.
+   */
+  budgetPolicy?: BudgetContinuationPolicy;
+  /** Initial Claude CLI --max-budget-usd guard. */
+  maxBudgetUsd?: number;
   /** Test/integration seam: replace the real CLI adapter for one worktree. */
   workerFactory?: (
     worker: "codex" | "claude",
@@ -524,6 +538,39 @@ export async function runCodexBatch(
   if (opts.deadlinePolicy !== undefined && !deadlinePolicy) {
     throw new Error("worker-batch: invalid deadline extension policy");
   }
+  const budgetPolicy =
+    opts.budgetPolicy === undefined
+      ? undefined
+      : parseBudgetContinuationPolicy(opts.budgetPolicy);
+  if (opts.budgetPolicy !== undefined && !budgetPolicy) {
+    throw new Error("worker-batch: invalid budget continuation policy");
+  }
+  const maxBudgetUsd =
+    opts.maxBudgetUsd === undefined
+      ? budgetPolicy?.baseGuardUsd
+      : parseBudgetGuardUsd(opts.maxBudgetUsd);
+  if (opts.maxBudgetUsd !== undefined && maxBudgetUsd === undefined) {
+    throw new Error(
+      "worker-batch: maxBudgetUsd must be a positive, bounded USD amount",
+    );
+  }
+  if (
+    budgetPolicy &&
+    maxBudgetUsd !== undefined &&
+    maxBudgetUsd !== budgetPolicy.baseGuardUsd
+  ) {
+    throw new Error(
+      "worker-batch: maxBudgetUsd contradicts budgetPolicy.baseGuardUsd",
+    );
+  }
+  if (
+    (budgetPolicy !== undefined || opts.maxBudgetUsd !== undefined) &&
+    (opts.worker ?? "codex") !== "claude"
+  ) {
+    throw new Error(
+      "worker-batch: budget continuation is supported only by Claude",
+    );
+  }
   const repoRoot = resolve(opts.repoRoot ?? process.cwd());
   const contractsPath = resolveContractsPath(repoRoot, opts.contractsPath);
   const ledgerPath = opts.ledgerPath ?? defaultLedgerPath(repoRoot);
@@ -783,6 +830,8 @@ export async function runCodexBatch(
                   cwd: wt.worktreePath,
                   model: opts.model,
                   dryRun,
+                  ...(maxBudgetUsd !== undefined ? { maxBudgetUsd } : {}),
+                  ...(budgetPolicy ? { budgetPolicy } : {}),
                   ...(deadlinePolicy ? { deadlinePolicy } : {}),
                 })
               : createCodexAdapter({
@@ -812,7 +861,9 @@ export async function runCodexBatch(
             verifier,
             ledgerPath,
             verbose: opts.verbose,
-            ...(checkpoint && deadlinePolicy && workerKind === "claude"
+            ...(checkpoint &&
+              (deadlinePolicy || budgetPolicy) &&
+              workerKind === "claude"
               ? {
                   onExtension: async (
                     extension: TaskExtensionRecord,
@@ -824,7 +875,7 @@ export async function runCodexBatch(
                         const task = manifest.tasks[id];
                         if (!task || task.status !== "running") {
                           throw new Error(
-                            `cannot persist deadline extension for ${id}: ` +
+                            `cannot persist task extension for ${id}: ` +
                               "task is not running",
                           );
                         }
@@ -1567,6 +1618,13 @@ function usage(worker: "codex" | "claude" = "codex"): never {
 Usage:
   cliyard ${worker}-batch <contracts.json> [--repo path] [--ledger path]
                          [--model id] [--dry-run] [--keep-worktrees]
+                         ${worker === "claude"
+                           ? `[--max-budget-usd usd] [--auto-continue-budget]
+                         [--continuation-guard-usd usd]
+                         [--max-budget-continuations n]
+                         [--max-cumulative-budget-guard-usd usd]
+                         [--budget-overshoot-reserve-usd usd]`
+                           : ""}
 
 Defaults:
   codex model: deepseek-v4-pro (or CLIYARD_CODEX_MODEL)
@@ -1601,6 +1659,7 @@ async function runWorkerBatchCli(
   }
   const file = positionalArg(argv);
   if (!file) usage(worker);
+  const budget = budgetSettingsFromArgs(argv, worker);
 
   const result = await runCodexBatch({
     contractsPath: file!,
@@ -1612,6 +1671,12 @@ async function runWorkerBatchCli(
     keepWorktrees:
       argv.includes("--keep-worktrees") ||
       process.env.CLIYARD_KEEP_WORKTREES === "1",
+    ...(budget.maxBudgetUsd !== undefined
+      ? { maxBudgetUsd: budget.maxBudgetUsd }
+      : {}),
+    ...(budget.budgetPolicy !== undefined
+      ? { budgetPolicy: budget.budgetPolicy }
+      : {}),
     verbose: true,
   });
 
@@ -1640,7 +1705,12 @@ async function runWorkerBatchCli(
 }
 
 function positionalArg(argv: string[]): string | undefined {
-  const valueFlags = new Set(["--repo", "--ledger", "--model"]);
+  const valueFlags = new Set([
+    "--repo",
+    "--ledger",
+    "--model",
+    ...BUDGET_VALUE_FLAGS,
+  ]);
   for (let i = 0; i < argv.length; i++) {
     const value = argv[i]!;
     if (value.startsWith("--")) {
@@ -1650,4 +1720,181 @@ function positionalArg(argv: string[]): string | undefined {
     return value;
   }
   return undefined;
+}
+
+const BUDGET_VALUE_FLAGS = [
+  "--max-budget-usd",
+  "--continuation-guard-usd",
+  "--max-budget-continuations",
+  "--max-cumulative-budget-guard-usd",
+  "--budget-overshoot-reserve-usd",
+] as const;
+
+function budgetSettingsFromArgs(
+  argv: string[],
+  worker: "codex" | "claude",
+): {
+  maxBudgetUsd?: number;
+  budgetPolicy?: BudgetContinuationPolicy;
+} {
+  const autoOccurrences = flagOccurrences("--auto-continue-budget", argv);
+  if (autoOccurrences.length > 1) {
+    throw new Error(
+      "worker-batch: --auto-continue-budget may be specified only once",
+    );
+  }
+  if (autoOccurrences.some((value) => value.includes("="))) {
+    throw new Error(
+      "worker-batch: --auto-continue-budget does not accept a value",
+    );
+  }
+  const anyBudgetFlag =
+    autoOccurrences.length > 0 ||
+    BUDGET_VALUE_FLAGS.some(
+      (flag) => flagOccurrences(flag, argv).length > 0,
+    );
+  if (anyBudgetFlag && worker !== "claude") {
+    throw new Error(
+      "worker-batch: budget flags are supported only by claude-batch",
+    );
+  }
+
+  const maxBudgetUsd = moneyFlag("--max-budget-usd", argv, false);
+  const continuationGuardUsd = moneyFlag(
+    "--continuation-guard-usd",
+    argv,
+    false,
+  );
+  const maxContinuations = integerFlag(
+    "--max-budget-continuations",
+    argv,
+  );
+  const requestedMaxCumulative = moneyFlag(
+    "--max-cumulative-budget-guard-usd",
+    argv,
+    false,
+  );
+  const overshootReserveUsd = moneyFlag(
+    "--budget-overshoot-reserve-usd",
+    argv,
+    true,
+  );
+  const autoContinue = autoOccurrences.length === 1;
+  const hasPolicyFlag =
+    autoContinue ||
+    continuationGuardUsd !== undefined ||
+    maxContinuations !== undefined ||
+    requestedMaxCumulative !== undefined ||
+    overshootReserveUsd !== undefined;
+  if (!hasPolicyFlag) return maxBudgetUsd !== undefined ? { maxBudgetUsd } : {};
+
+  const baseGuardUsd =
+    maxBudgetUsd ?? DEFAULT_BUDGET_CONTINUATION_POLICY.baseGuardUsd;
+  const continuation =
+    continuationGuardUsd ??
+    DEFAULT_BUDGET_CONTINUATION_POLICY.continuationGuardUsd;
+  const maximum =
+    maxContinuations ??
+    DEFAULT_BUDGET_CONTINUATION_POLICY.maxContinuations;
+  const reserve =
+    overshootReserveUsd ??
+    DEFAULT_BUDGET_CONTINUATION_POLICY.overshootReserveUsd;
+  const cumulative =
+    requestedMaxCumulative ??
+    roundMoney(baseGuardUsd + continuation * maximum + reserve);
+
+  if (autoContinue && maximum === 0) {
+    throw new Error(
+      "worker-batch: --auto-continue-budget requires " +
+        "--max-budget-continuations > 0",
+    );
+  }
+  if (cumulative > MAX_BUDGET_GUARD_USD) {
+    throw new Error(
+      `worker-batch: max cumulative budget guard must be at most ` +
+        `${MAX_BUDGET_GUARD_USD}`,
+    );
+  }
+  const policy = parseBudgetContinuationPolicy({
+    version: BUDGET_CONTINUATION_POLICY_VERSION,
+    baseGuardUsd,
+    continuationGuardUsd: continuation,
+    maxContinuations: maximum,
+    maxCumulativeGuardUsd: cumulative,
+    autoContinue,
+    overshootReserveUsd: reserve,
+  });
+  if (!policy) {
+    throw new Error(
+      "worker-batch: invalid budget continuation policy; positive guards, " +
+        "a cumulative guard covering continuation plus overshoot reserve, " +
+        "and 0..64 continuations are required",
+    );
+  }
+  return { maxBudgetUsd: baseGuardUsd, budgetPolicy: policy };
+}
+
+function integerFlag(flag: string, argv: string[]): number | undefined {
+  const occurrences = flagOccurrences(flag, argv);
+  if (occurrences.length === 0) return undefined;
+  if (occurrences.length > 1) {
+    throw new Error(`worker-batch: ${flag} may be specified only once`);
+  }
+  const raw = arg(flag, argv);
+  if (
+    raw === undefined ||
+    !/^(?:0|[1-9]\d*)$/.test(raw) ||
+    !Number.isSafeInteger(Number(raw)) ||
+    Number(raw) > MAX_BUDGET_CONTINUATIONS
+  ) {
+    throw new Error(
+      `worker-batch: ${flag} requires an integer from 0 to ` +
+        `${MAX_BUDGET_CONTINUATIONS}`,
+    );
+  }
+  return Number(raw);
+}
+
+function moneyFlag(
+  flag: string,
+  argv: string[],
+  allowZero: boolean,
+): number | undefined {
+  const occurrences = flagOccurrences(flag, argv);
+  if (occurrences.length === 0) return undefined;
+  if (occurrences.length > 1) {
+    throw new Error(`worker-batch: ${flag} may be specified only once`);
+  }
+  const raw = arg(flag, argv);
+  if (
+    raw === undefined ||
+    !/^(?:0|[1-9]\d*)(?:\.\d{1,6})?$/.test(raw)
+  ) {
+    throw new Error(
+      `worker-batch: ${flag} requires a non-negative USD amount with at ` +
+        "most 6 decimal places",
+    );
+  }
+  const value = Number(raw);
+  if (
+    !Number.isFinite(value) ||
+    value > MAX_BUDGET_GUARD_USD ||
+    (!allowZero && value === 0)
+  ) {
+    throw new Error(
+      `worker-batch: ${flag} requires a ` +
+        `${allowZero ? "non-negative" : "positive"} bounded USD amount`,
+    );
+  }
+  return value;
+}
+
+function flagOccurrences(flag: string, argv: string[]): string[] {
+  return argv.filter(
+    (value) => value === flag || value.startsWith(`${flag}=`),
+  );
+}
+
+function roundMoney(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
 }
