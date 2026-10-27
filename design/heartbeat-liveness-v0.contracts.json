@@ -1,0 +1,40 @@
+{
+  "planId": "heartbeat-liveness-v0",
+  "contracts": [
+    {
+      "taskId": "heartbeat-active-provider",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Fix the Claude worker heartbeat false-stale gap found during a real DeepSeek Task Architect run. The provider emitted frequent unmapped system/thinking_tokens JSONL records, which updated activity timestamps but produced no visible progress event; the heartbeat timer then suppressed itself because idle time never reached the interval. Change the heartbeat timer to emit one bounded event every heartbeatMs while the child is alive. Track whether any provider JSON record arrived since the previous heartbeat and emit heartbeat phase thinking/message 'provider active' for that case, or phase waiting/message 'waiting for provider output' for silence. Include a bounded last-record detail if useful. Do not emit one event per token and do not change result/acceptance authority. Add a focused test where a fake provider emits only system/thinking_tokens records for longer than several heartbeat intervals, proving multiple active heartbeats appear before the final result and stop afterward. Update docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md with the observed real-run stale symptom and measured fix. Preserve all existing stream-json, retry, status and continuity behavior."
+      ],
+      "nonGoals": [
+        "No token-level event stream",
+        "No changes to acceptance or verifier authority",
+        "No daemon or background scanner",
+        "No supervisor schema change"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "design/heartbeat-liveness-v0.md",
+        "src/agents/claude.ts",
+        "tests/claude-progress.test.ts",
+        "docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md"
+      ],
+      "writePaths": [
+        "src/agents/claude.ts",
+        "tests/claude-progress.test.ts",
+        "docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "139038af8ec96f0c6cac4872a4aadb7af396a9ac",
+      "verifyCommands": [
+        "npx tsx --test tests/claude-progress.test.ts tests/supervisor-worker-progress.test.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
