@@ -18,6 +18,8 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
 import { createClaudeAdapter } from "../agents/claude.js";
 import { createCodexAdapter } from "../agents/codex.js";
+import { collectChangedPaths } from "../agents/git-paths.js";
+import { auditPathScope } from "../agents/path-scope.js";
 import {
   isWorkerProgressEvent,
   type AgentAdapter,
@@ -36,10 +38,12 @@ import {
   runManifestPath,
   updateRunManifest,
 } from "../supervisor/store.js";
-import type {
-  ReusableAttempt,
-  RunManifest,
-  RunTaskState,
+import {
+  MAX_PATH_AUDITS,
+  type PathAuditRecord,
+  type ReusableAttempt,
+  type RunManifest,
+  type RunTaskState,
 } from "../supervisor/types.js";
 import {
   addWorktree,
@@ -551,6 +555,26 @@ export async function runCodexBatch(
             "discard the recorded draft",
         );
       }
+      const changed = await collectChangedPaths(
+        inspection.attempt.worktree,
+        inspection.attempt.baseCommit,
+      );
+      const audit = auditPathScope(
+        contract.writePaths,
+        changed.paths,
+      );
+      if (changed.error || audit.outsideWritePaths.length > 0) {
+        const detail = changed.error
+          ? `changed-path collection failed: ${JSON.stringify(changed.error)}`
+          : "paths outside contract write scope: " +
+            JSON.stringify(audit.outsideWritePaths);
+        throw new Error(
+          `worker-batch: task ${contract.taskId} rejected attempt cannot be ` +
+            `reused before worker dispatch (${detail}; changedPaths=` +
+            `${JSON.stringify(audit.changedPaths)}). No files were removed; ` +
+            "rerun with --fresh-attempt to leave that draft behind",
+        );
+      }
       reusable.set(contract.taskId, inspection.attempt);
     }
   }
@@ -812,6 +836,10 @@ export async function runCodexBatch(
                   status: "accepted",
                   accepted: true,
                   resultCommit: snapshot,
+                  pathAudits: mergePathAudits(
+                    manifest.tasks[id]?.pathAudits,
+                    result.pathAudits,
+                  ),
                   ...(result.cost !== undefined ? { cost: result.cost } : {}),
                 };
                 manifest.integrationHead = integrationHead;
@@ -847,6 +875,10 @@ export async function runCodexBatch(
                   attemptBaseCommit: attempt.baseCommit,
                   attemptStartedAt: attempt.startedAt,
                   attemptRejectedAt: rejectedAt,
+                  pathAudits: mergePathAudits(
+                    manifest.tasks[id]?.pathAudits,
+                    result.pathAudits,
+                  ),
                 };
                 manifest.tasks[id] = task;
               },
@@ -927,6 +959,13 @@ export async function runCodexBatch(
       }
     }
   }
+}
+
+function mergePathAudits(
+  existing: PathAuditRecord[] | undefined,
+  observed: PathAuditRecord[],
+): PathAuditRecord[] {
+  return [...(existing ?? []), ...observed].slice(-MAX_PATH_AUDITS);
 }
 
 /**
