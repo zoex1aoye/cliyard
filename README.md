@@ -13,7 +13,8 @@ North star: stop babysitting AI. **Master 壳 = DeepSeek Harness GUI**；**cliya
 **Task sizing and cost estimation:** [docs/TASK_ESTIMATION.md](docs/TASK_ESTIMATION.md).
 **Harness boundaries and DSH replacement strategy:** [docs/HARNESS_BOUNDARIES.md](docs/HARNESS_BOUNDARIES.md).
 **Supervisor v0 operations:** [docs/SUPERVISOR_V0.md](docs/SUPERVISOR_V0.md) — durable foreground runs, recovery, limitations, safe self-hosting.
-**Next iteration:** [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md) — Supervisor v0 verification and safe self-hosting.
+**RuntimeManager v0:** [docs/RUNTIME_MANAGER.md](docs/RUNTIME_MANAGER.md) — finite local services, leased ports, runtime manifest/evidence, cleanup, limitations.
+**Next iteration:** [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md) — RuntimeManager v0 verification and runtime-contract drill.
 
 ## What we want (ideal)
 
@@ -34,9 +35,13 @@ Human: requirements + prototype in DeepSeek Harness
 - **Claude Code + DeepSeek worker:** `claude-ds` + `npm run claude-batch`
 - **Continuous waves:** accepted work enters an integration branch before dependent tasks start
 - **Supervisor v0 (durable foreground):** `supervisor start/status/resume/stop`, atomic JSON RunManifest, integration-branch checkpoint, one-lock recovery; resume skips accepted tasks (no daemon, no SQLite)
+- **RuntimeManager v0 (single host):** finite verification services started from the exact task worktree, leased `127.0.0.1` ports, HTTP readiness, URL env injection into `verifyCommands`, runtime manifest + service logs, process-group cleanup; no daemon, SQLite, or browser evidence
 - **Windows track:** `doctor` / `run` / `batch` via WSL (deferred for CodeBuddy E2E)
 
-Not yet: Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, Multica runtime, Supervisor daemon/background service, SQLite manifests.
+Not yet: Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, Multica runtime, Supervisor daemon/background service, SQLite manifests, Playwright/axe/screenshot or a11y evidence, unlimited parallel runtimes.
+
+Measured suite (2026-10-27): `npm run build` passes; `npm test` reports **119/119**
+(33 runtime-focused). The earlier 105-test estimate was not confirmed.
 
 ## Recommended layout
 
@@ -66,6 +71,11 @@ npm run mock-loop -- --fail-verify-times 3                 # exhaust maxRepairs 
 npm run mock-loop -- --briefing-dir .cliyard/briefing      # also write briefing/<taskId>.md
 # Optional real shell verify (still mock worker; no WSL):
 npm run mock-loop -- examples/real-verify.contract.json --real-verify --fail-verify-times 0
+# RuntimeManager v0: finite service + leased URL gate (mock worker, real shell verify):
+npm run mock-loop -- examples/runtime-verifier.contract.json --real-verify --fail-verify-times 0
+# Override the default 19000-19999 lease range if it is busy:
+CLIYARD_PORT_RANGE=21800-21899 npm run mock-loop -- \
+  examples/runtime-verifier.contract.json --real-verify --fail-verify-times 0
 # Multi-task mock scheduler (dependsOn / DAG; parallel ready-wave):
 npm run mock-batch -- examples/mock-batch.chain.json
 npm run mock-batch -- examples/mock-batch.parallel.json
@@ -109,6 +119,13 @@ Ledger: `<target>/.cliyard/ledger.json` (gitignored).
 Supervisor state: `<target>/.cliyard/runs/<runId>.json` + `active.json` + `supervisor.lock`
 (gitignored); accepted tasks and the integration head are checkpointed there.
 Supervisor details: [docs/SUPERVISOR_V0.md](docs/SUPERVISOR_V0.md) — foreground only, JSON manifest, manual review/merge, no daemon or SQLite.
+
+Runtime evidence: `<target>/.cliyard/runtime/<runtimeId>/runtime-manifest.json`
+plus `<service>.log` and `data/<service>/`; port leases live in
+`<target>/.cliyard/runtime/port-leases.json` (all gitignored). Runtime services
+are finite and single-host; details and limitations:
+[docs/RUNTIME_MANAGER.md](docs/RUNTIME_MANAGER.md). No daemon, SQLite,
+Playwright/axe, screenshot, or a11y evidence is produced.
 Glass 实机：[docs/GLASS_TRIAL.md](docs/GLASS_TRIAL.md) · DSH 插件：[plugins/dsh-cliyard/README.md](plugins/dsh-cliyard/README.md).
 Claude + DeepSeek：[docs/CLAUDE_DEEPSEEK_WORKER.md](docs/CLAUDE_DEEPSEEK_WORKER.md).
 
@@ -138,6 +155,7 @@ npm run batch -- examples/module.tasks.yaml --dry-run
 | Bridge | `wsl.exe` | Windows → Linux |
 | Isolation | `git worktree` | Parallel without shared dirty tree |
 | Workers | CodeBuddy / Claude / Codex | BYO install + login |
+| Verification runtime | RuntimeManager v0 | Leased 127.0.0.1 ports, HTTP readiness, manifest, cleanup |
 | Later | Workflow-style ledger, verify gates | Master without fat context |
 | Later | tree-sitter MCP / JetBrains headless | Optional semantic accept |
 | Optional | Docker | Never required |

@@ -1,136 +1,158 @@
-# 下一迭代：Supervisor v0 验收收口与安全自举
+# 下一迭代：RuntimeManager v0 验收与收口
 
 > 日期：2026-10-27（更新）
 >
-> 结论：Supervisor v0 已实现，真实进程级 SIGKILL 恢复 E2E 已通过。下一步让新 Supervisor 接管一次真实自举，再决定是否需要后台化；不扩 daemon、SQLite、Web/GUI 或多租户。
+> 结论：RuntimeManager v0 已实现，端口租约、RuntimeSpec、HTTP readiness、
+> manifest/evidence、进程组清理和 shell Verifier 集成均有测试覆盖。实测完整套件
+> **119/119 通过**；计划中的 105 条只是早期估计，未被实现确认，不再采用。
+> 下一步只做真实 Worker 的 runtime contract 演练与失败演练，然后按实测结果收口。
+> 本迭代不扩 daemon、SQLite、Playwright/axe/截图/无障碍证据、Docker 或无限并发。
 
 ## 0. 当前状态
 
-Supervisor v0 已落地（单仓、本机、前台）：
+已落地（单机、本机仓库、有限服务）：
 
-- `cliyard supervisor start / status / resume / stop`；
-- 持久 RunManifest（原子 JSON）；
-- 每个 accepted / rejected task 后写 checkpoint；
-- integration branch 作为恢复检查点；
-- accepted task 不会在 resume 时重跑；
-- 单 Supervisor 锁、stale/invalid lock 诊断与显式恢复；
-- contracts hash、base commit、integration branch 前置检查；
-- `--retry-rejected` 显式重试被拒任务；
-- 前台信号处理：SIGINT/SIGTERM 标记 interrupted 并释放锁；
-- 真实独立进程 SIGKILL 后，新进程能识别 stale lock，并只恢复未完成 wave。
+- **PortAllocator**
+  - 默认端口范围 `19000-19999`，可用 `CLIYARD_PORT_RANGE="start-end"` 覆盖；
+  - `.cliyard/runtime/port-leases.json` + `.cliyard/runtime/port-leases.lock`；
+  - 跨进程锁、原子替换、占用探测、同 key 复用、死 owner 回收；
+  - `EADDRINUSE` 证据触发每个服务一次换端口重试。
+- **RuntimeManager**
+  - argv 形式的 `RuntimeSpec`，从确切 task worktree 启动；
+  - 每个服务注入 `CLIYARD_<SERVICE>_URL`、可选 `urlEnv`、`portEnv`
+    （默认 `PORT`）和 `CLIYARD_<SERVICE>_DATA_DIR`；
+  - 子进程存活 + HTTP 期望状态 + 未超时才算 ready；
+  - `<repoRoot>/.cliyard/runtime/<runtimeId>/runtime-manifest.json`、服务日志和
+    `data/<service>/`；
+  - SIGTERM → SIGKILL 整个进程组、确认端口释放、释放租约、持久化最终 manifest。
+- **Shell Verifier**
+  - 只在 Worker implement 成功且 path gate 通过后启动 runtime；
+  - URL 变量注入所有 `verifyCommands`；
+  - 无论命令成功、失败还是抛错都执行 `stop()`；cleanup 失败也会使验收失败；
+  - mock verifier 和 batch `--dry-run` 永不启动 runtime。
+- **Contract / Plan**
+  - `TaskContract.runtime` 可选；plan 编译保留并校验，畸形 spec 在派发前拒绝；
+  - 无 runtime 的 contract 保持原有静态验证行为。
+- **示例**
+  - [examples/runtime-verifier.contract.json](../examples/runtime-verifier.contract.json)
+    使用内联 Node 服务，verifyCommand 直接请求租约 URL 的 `/health`。
 
 明确未落地：
 
-- 后台 daemon / 24h 常驻；
-- SQLite（仍为原子 JSON manifest）；
-- 自动合入 default branch；
-- Web/GUI、RuntimeManager、多租户/云执行；
-- 第二家 Supervisor Worker（仅 claude / codex）。
+- 后台 daemon / 24h 常驻 / 队列 / 云执行；
+- SQLite（仍为原子 JSON）；
+- Playwright、axe、截图或无障碍证据；
+- Docker / 远程沙箱；
+- CPU/内存/浏览器并发准入调度或“无限并行 runtime”；
+- 自动合入 main、自动 push；
+- HTTPS、TCP-only readiness、自定义优雅关闭命令；
+- Windows 下的 POSIX 进程组等价清理。
 
-验证（2026-10-27，本工作树）：
-
-```text
-npm run build   → 通过
-npm test        → 86/86 通过
-```
-
-操作语义、RunManifest 字段、锁状态、恢复手册和自举步骤见
-[docs/SUPERVISOR_V0.md](SUPERVISOR_V0.md)。
+操作语义、manifest 字段、环境变量、清理顺序和完整限制见
+[docs/RUNTIME_MANAGER.md](RUNTIME_MANAGER.md)。
 
 ## 1. V0 完成标准对照
 
-| # | 原完成标准 | 状态 |
-|---|------------|------|
-| 1 | `supervisor start` 创建 RunManifest | 已实现 |
-| 2 | 每个 accepted task 后写 checkpoint | 已实现；rejected task 也写 checkpoint |
-| 3 | `supervisor status` 能看到 completed / running / pending | 已实现；另报告 `effectiveStatus`、blocked、锁与 integration head |
-| 4 | 中断后 `supervisor resume` 不重跑 accepted task | 已实现；进程内中断测试覆盖 |
-| 5 | resume 使用已有 integration branch | 已实现；缺失、head 不包含或 accepted commit 不在分支上会拒绝 |
-| 6 | plan/base/contracts hash 不一致时拒绝 resume | 已实现；contracts 按字节 hash，base 必须解析到同一 commit |
-| 7 | 两个 Supervisor 同时启动只有一个取得锁 | 已实现；`O_EXCL` 锁 + 测试覆盖 |
-| 8 | 所有现有测试继续通过 | 已实现；86/86 |
-| 9 | 新增中断恢复测试 | 已实现；进程内注入和真实独立进程 SIGKILL/restart 均覆盖 |
+设计要求的 10 项测试与实际覆盖：
 
-## 2. 下一迭代范围
+| # | 设计要求 | 状态 | 覆盖 |
+|---|----------|------|------|
+| 1 | 两个独立进程的 allocator 不能租到同一端口 | 已实现 | `runtime-ports`: separate live processes never lease the same port |
+| 2 | 同一 live key 重新分配返回同一租约 | 已实现 | `runtime-ports`: allocate persists a lease and reuses it for the same live runId+service |
+| 3 | release 后端口重新可用 | 已实现 | `runtime-ports`: release is idempotent…and frees the port |
+| 4 | 已占用端口被跳过 | 已实现 | `runtime-ports`: a separate process skips an occupied port |
+| 5 | 同一 runtime 的两个服务拿到不同端口 | 已实现 | `runtime-manager`: starts two services with leased ports… |
+| 6 | readiness 失败保留日志且不跑 verifyCommands | 已实现 | `runtime-manager` + `runtime-verifier` readiness failure tests |
+| 7 | readiness 成功后暴露 `WEB_URL` 并执行 HTTP 断言 | 已实现 | `runtime-verifier`: exposes WEB_URL, persists manifest, releases port |
+| 8 | cleanup 后没有遗留监听进程 | 已实现 | `runtime-manager` 进程组测试 + `runtime-verifier` 端口探测 |
+| 9 | Plan → Contract 保留 runtime 并拒绝畸形 spec | 已实现 | `contract-runtime`（10 项） |
+| 10 | 无 runtime 的 contract 行为不变 | 已实现 | `runtime-verifier` static test + 完整套件 |
+
+设计验收中的“两个验收同时持有不同端口”目前由独立进程端口租约测试支撑；
+两个完整验收并发的端到端演练仍列入下一迭代，不把它算作已完成。“每次验收前清理
+服务进程组”由 cleanup 测试覆盖。它仍是单机范围，不构成无限并发承诺。
+
+## 2. 验证（2026-10-27，本工作树）
+
+```text
+npm run build   → 通过
+npm test        → 119/119 通过
+```
+
+Runtime 相关 33 项：
+
+```text
+tests/runtime-ports.test.ts       10
+tests/runtime-manager.test.ts      8
+tests/runtime-verifier.test.ts     5
+tests/contract-runtime.test.ts    10
+```
+
+实测套件大小是 **119**，不是早期计划的 105。首次完整运行与 `npm run build`
+并行时出现过一次 118/119；随后两次独立完整运行均为 119/119，runtime 相关套件
+连续三次 33/33。记录时以可复现的实测结果为准，不宣称 105。
+
+## 3. 下一迭代范围
 
 只做三件事：
 
-1. **进程级中断恢复 E2E（已完成）**
-   - 独立 supervisor 进程在第二 wave 运行时整进程组 SIGKILL；
-   - `status --json` 报告 `interrupted` / `stale` lock；
-   - `resume` 只派发未完成任务；
-   - accepted task 的 commit 保持不变；
-   - 完成后 integration branch 与 manifest 一致。
+1. **真实 Worker 的 runtime contract 演练（scratch repo）**
+   - 使用 `claude-batch` 或 `codex-batch` 在临时 git 仓库运行本仓库的示例 contract
+     或等价的最小 contract；
+   - 服务必须是有限进程并绑定租约端口；
+   - verifyCommand 必须通过 `CLIYARD_<SERVICE>_URL`（或 `urlEnv`）请求租约 URL；
+   - 检查 manifest 的 `cleanup`、`exitCode`/`signal`、日志路径和租约释放。
 
-2. **冻结 baseline 并完成一次安全自举（人工执行）**
-   - 按 [SUPERVISOR_V0.md §8](SUPERVISOR_V0.md#8-safe-tool-self-hosting-procedure) 执行；
-   - 稳定 Supervisor 从冻结的 control checkout 运行；
-   - 新代码只存在于 worktree，accepted 后进入 integration branch；
-   - integration 上跑旧测试 + 新测试；
-   - 人工审阅后手工 merge；
-   - 新 Supervisor 第一次启动只做 read-only / dry-run 演练，再接管真实 run。
+2. **并发与失败演练**
+   - 两个验收同时运行，确认拿到不同端口且互不覆盖 manifest；
+   - readiness 超时：确认 verifyCommands 被跳过、日志被捕获、无遗留监听；
+   - 端口被外部占用：确认一次 `EADDRINUSE` 重试或明确失败，且最终释放租约；
+   - verifyCommand 失败：确认 runtime 仍被停止，cleanup 状态可审计；
+   - cleanup 失败路径：确认验收失败而不是静默接受。
 
 3. **记录证据并收口文档**
-   - 记录 runId、contracts hash、base commit、integration branch/head、任务结果、测试输出、审阅结论；
-   - 只按实际结果更新 README / NEXT_ITERATION / SUPERVISOR_V0。
+   - 记录 `runtimeId`、端口、manifest 路径、测试输出和失败演练结果；
+   - 只按实测结果更新 README / NEXT_ITERATION / RUNTIME_MANAGER；
+   - 发现文档与实现不一致时先修文档，不扩大能力声明。
 
-不在本迭代范围：
+## 4. 不在本迭代范围
 
 - daemon / 后台常驻 / 24h 无人值守；
 - SQLite 或其他状态存储迁移；
-- 自动合入 main；
-- Web/GUI 改版；
-- RuntimeManager；
-- 第二家 Worker；
-- 多租户/云执行。
-
-## 3. 自举安全规则
-
-完整命令与检查表见
-[SUPERVISOR_V0.md §8](SUPERVISOR_V0.md#8-safe-tool-self-hosting-procedure)。最小规则：
-
-1. 正在运行的 Supervisor 代码不被 Worker 修改；Supervisor 只从冻结的 control checkout 启动。
-2. Worker 只写自己的 task worktree；不得写 `.cliyard/supervisor.lock`、`.cliyard/runs/*`、control checkout 或仓库外路径。
-3. contracts 与 base commit 在 `start` 前冻结；运行中不编辑 contracts，不改 base。
-4. 所有 task 的 `writePaths` 互不重叠，`sharedResources` 为空，不使用 XL 任务。
-5. accepted 后先进入 integration branch，不自动改 main；必须人工审阅后 merge。
-6. 运行中不热重载任务控制面；先 stop，再 merge，再重启。
-7. 新代码必须通过 baseline 旧测试和新增测试；恢复测试必须模拟真实进程中断。
-8. 新 Supervisor 第一次启动必须支持只读 `status` 和 `--dry-run`。
-9. 保留旧 baseline ref 与旧二进制，失败可回滚。
-
-## 4. 开始自举前的前置条件
-
-1. 当前工作树通过 `npm run build` 和 `npm test`（本次已通过）。
-2. 当前工作树冻结为可复现的 baseline commit/tag；实现快照与本次文档改动都需进入 baseline 并由人工提交/打标签。除本次文档文件外，未跟踪项只有 `node_modules` 符号链接（忽略规则未覆盖符号链接，不应提交）。
-3. Design Pack 与 Plan 进入 baseline B；冻结 contracts 写到受版本控制的路径并单独提交（C），`baseCommit` 使用完整 SHA。
-4. 使用 `estimate-plan` 检查任务粒度；任何 XL 任务先拆分。
-5. contracts 的 `writePaths` 互不重叠，`sharedResources` 为空，verifyCommands 能在 worktree 内独立运行。
-6. 稳定 Supervisor 从 control checkout 运行，并从 baseline 启动；不要从 task worktree 运行。
-7. 保留旧版本 ref 与二进制，作为回滚路径。
+- Playwright、axe、截图或无障碍证据；
+- Docker / 远程沙箱 / 多租户 / 云执行；
+- 无限并行 runtime 或 CPU/内存/浏览器准入调度；
+- 自动合入 main 或自动 push；
+- HTTPS / 认证 / TCP-only readiness；
+- Windows POSIX 进程组等价清理；
+- 自定义优雅关闭命令或日志轮转。
 
 ## 5. 完成标准
 
-1. 进程级 kill/restart E2E 已通过；accepted task 不被重跑。
-2. 至少一次工具自举 run 在 integration branch 上得到 accepted 结果，且旧测试 + 新测试通过。
-3. 人工审阅完成，手工 merge；没有自动合入 main 或自动 push。
-4. 新 Supervisor 的 read-only / `--dry-run` 首次启动检查通过。
-5. 文档按真实结果记录 runId、branch、commit、测试输出与审阅结论。
-6. 所有现有测试继续通过。
-7. 全文不宣称 daemon、24h 常驻或 SQLite 支持。
+1. 至少一次真实 Worker 的 runtime contract 在 scratch repo 被接受，且
+   verifyCommand 确实请求了租约 URL。
+2. 验收后 manifest `cleanup` 为 `complete`，端口不再监听，租约存储为空。
+3. 两个并发 runtime 使用不同端口，manifest 路径互不冲突。
+4. readiness 失败、verifyCommand 失败和 cleanup 失败均有可审计结果。
+5. `npm run build` 与 `npm test` 通过，并记录实测测试数（当前为 119）。
+6. 文档不宣称 daemon、SQLite、Playwright/axe、截图/无障碍证据或无限并发。
 
 ## 6. 下一步顺序
 
 ```text
-1. [已完成] Verifier 进程级 kill/restart E2E
-2. 冻结 baseline commit/tag
-3. estimate-plan + 编译并提交 contracts
-4. scratch repo dry-run 演练
-5. 真实 self-host supervisor run（stop/resume 演练）
-6. integration branch build + test + 人工 diff 审阅
-7. 新 Supervisor read-only / dry-run 首启动
-8. 人工 merge + 重启
-9. 记录证据，再决定是否需要后台化或 SQLite
+1. [已完成] RuntimeManager v0 实现 + 119/119 测试
+2. 创建 scratch repo 与最小 runtime contract
+3. 真实 Worker dry-run（确认 worktree、writePaths、contract 校验）
+4. 真实 Worker runtime 验收，检查 manifest / 日志 / 租约
+5. 两个并发 runtime 演练
+6. readiness / EADDRINUSE / verify / cleanup 失败演练
+7. 按实测结果收口 README / NEXT_ITERATION / RUNTIME_MANAGER
+8. 人工审阅后再决定是否扩大范围
 ```
 
-后台化和 SQLite 只有在真实并发/查询/常驻需求出现后才进入设计；当前不作为 v0 能力或承诺。
+## 7. 上一迭代状态
+
+Supervisor v0（前台、原子 JSON RunManifest、进程级 SIGKILL 恢复）已完成，
+其操作语义与自举手册见 [docs/SUPERVISOR_V0.md](SUPERVISOR_V0.md)。当前完整套件
+仍包含 supervisor 测试（119/119 通过）。本轮没有引入 daemon 或 SQLite，也没有
+把 supervisor 的后台化列入计划。

@@ -236,6 +236,7 @@ function compileTask(
     });
   }
 
+  const runtime = raw.runtime;
   const result = validateContract({
     taskId: taskId ?? path,
     version,
@@ -251,6 +252,7 @@ function compileTask(
     deliverables,
     forbidden,
     maxRepairs: maxRepairsRaw,
+    ...(runtime === undefined || runtime === null ? {} : { runtime }),
   });
   if (!result.ok) {
     for (const issue of result.issues) {
