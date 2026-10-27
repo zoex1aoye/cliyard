@@ -1,20 +1,21 @@
-# 下一迭代：Task Architect 与持久化持续编排
+# 下一迭代：持久化持续编排（Task Architect 已完成）
 
 > 日期：2026-10-27（更新）
 >
 > 结论：RuntimeManager v0、Runtime Orphan Reaper v0、orphan hardening、
-> **runtime failure drills v0**，以及 **attempt continuity / worker progress /
-> drill abnormal recovery v0** 均已实现。本轮实测：focus 组
-> （attempt reuse、Claude progress、worker progress、failure drills 四个文件）
-> **13/13**，runtime/恢复相关 **81/81**（13 个文件），完整套件 **177/177**，
-> `npm run build` 通过。failure drill 的正常路径仍为 3/3；超时异常路径报告
-> 2/3（`cleanup-failure` 子进程超时，按设计不能通过 child-exit 检查），但
-> 精确 reaper 回收 1 个 runtime、0 个 `needs_human`，manifest 收尾为
-> `cleanup: "complete"` + `reaped`，端口与 lease 均已核实干净。
+> **runtime failure drills v0**、**attempt continuity / worker progress /
+> drill abnormal recovery v0**，以及 **Task Architect v0（只读 Plan 生产者）**
+> 均已实现。本轮实测：`npm run build` 通过；architect focused
+> `tests/architect.test.ts` **14/14**（2193.3 ms）；完整套件 **191/191**
+> （11236.8 ms）。fake worker 实测了 dirty、touched-path、moved-HEAD、
+> 未跟踪/越界 design、非法 JSON/schema/cycle/overlap、planId 不符和 worker
+> 失败等 fail-closed 路径；一份真实 Claude Code + DeepSeek smoke 在 16 s 内
+> 生成合法的两任务 Plan，`touchedPaths` 为空，HEAD、worktree status 和 design
+> hash 均未改变。Task Architect 只产出供人类审查的 Plan，**不会自动冻结契约，
+> 也不会自动派发**。
 >
-> 下一具体能力：**Task Architect**。**持久化持续编排（durable continuous
-> orchestration）** 是其后独立的缺口。两者尚未实现，需要各自的设计与验收；
-> 本轮文档不把它们写成已完成能力。
+> 下一具体能力/缺口：**持久化持续编排（durable continuous orchestration）**。
+> 它是 Task Architect 之后独立的缺口，尚未实现，需要独立设计与验收。
 >
 > 本轮明确不引入 daemon、跨主机回收、浏览器证据、SQLite、准入调度或
 > 24 小时无人值守声明。attempt reuse 只是 worktree 连续性（不是 provider
@@ -58,6 +59,36 @@
     output 只记录大小；事件不是 acceptance authority，无 retention/rotation；
   - 本轮用本地 stream-json fixture 实测：assistant/tool 事件在 worker 退出前
     可见，provider 静默产生 heartbeat，`status` 前后 manifest hash 不变。
+- **Task Architect v0（只读 Plan 生产者）**
+  - `cliyard architect --repo <target> --design <repo-relative-design.md>
+    --plan-id <id> [--worker claude] [--model <id>] [--out <plan.json>] [--json]`；
+    默认 worker `claude`、模型 `deepseek-flash[1m]`、输出
+    `<target>/.cliyard/plans/<planId>.json`；前台有限命令，不运行 Plan；
+  - preflight：目标必须是 git repo、worktree 干净、design 已 tracked 且在
+    repo 内、HEAD 解析为精确 base commit；任何失败都在 worker 启动前拒绝；
+  - worker 配置 `permission-mode=plan`、`allowedTools=Read,Grep,Glob`；prompt
+    明确禁止写文件、执行命令、commit/push/merge、创建 worktree、写 contracts
+    或派发；design 以 fenced text 注入，超过 64 KiB 截断并在结果中报告；
+  - post-run：worker exit 0、`touchedPaths` 为空、worktree status 与运行前
+    字节相同、HEAD 未移动、final text 可解析；候选 Plan 复用既有
+    `compilePlan` 校验 plan/task id、goals/verifyCommands、repo-relative
+    paths、dependsOn/cycle、writePaths overlap、sharedResources 和 runtime
+    shape；
+  - 默认只写 `.cliyard/plans/<planId>.json`（`--out` 可指定其他路径）；
+    不写 contracts、不建 worktree/run/integration branch、不
+    dispatch/merge/push；design 文件本身不会被覆盖（绝对 `--out` 指向
+    design 时拒绝）；
+  - 实测：valid fake Plan、human 输出、dirty（0 次 worker 调用）、touched path、
+    moved HEAD、未跟踪 design、越界 design、非法 plan id、非 git target、
+    invalid JSON、空 schema、cycle、overlap、planId mismatch、worker 非零退出、
+    design overwrite；真实 Claude Code + DeepSeek 16 s smoke 生成合法 Plan，
+    `touchedPaths=[]`，HEAD/status/design hash 不变，最终只有三个 plan
+    artifact，没有 contracts/runs/worktrees/runtime/ledger；
+  - 已知操作 caveat：显式相对 `--out` 按调用者当前目录解析，不是 target
+    repo；非默认位置应使用绝对路径。实测细节与限制见
+    [docs/evidence/TASK_ARCHITECT.md](evidence/TASK_ARCHITECT.md)。
+  - Human gate：Plan 必须经过 review/edit → 既有 plan compiler/freeze →
+    显式 Supervisor start；Task Architect 不自动冻结契约或派发。
 - **PortAllocator**
   - 默认端口范围 `19000-19999`，可用 `CLIYARD_PORT_RANGE="start-end"` 覆盖；
   - `.cliyard/runtime/port-leases.json` + `.cliyard/runtime/port-leases.lock`；
@@ -156,12 +187,15 @@
   - [examples/runtime-verifier.contract.json](../examples/runtime-verifier.contract.json)
     使用内联 Node 服务，verifyCommand 直接请求租约 URL 的 `/health`。
 
-明确未落地：
+明确未落地 / 已知限制：
 
-- **Task Architect**（结构化任务架构 / 契约生成）：下一具体能力，需要独立
-  设计与验收；
 - **durable continuous orchestration**（持久化持续编排）：Task Architect
   之后的独立缺口，需要独立设计与验收；
+- **自动契约冻结 / 自动派发（明确非目标）**：Task Architect 只产出
+  human-reviewable Plan；必须经人类 review/edit → 原 plan compiler/freeze →
+  显式 Supervisor start，不存在自动 freeze 或自动 dispatch；
+- **相对 `--out` 的 target-relative 语义（v0 限制）**：v0 按调用者 CWD
+  解析；非默认位置应传绝对路径（见 evidence 的 caveat）；
 - provider 会话续跑：attempt reuse 只复用 worktree/draft，不恢复 provider
   对话；也不会给 interrupted active worker 再挂一个 worker；
 - 自动 worktree/manifest GC：`--fresh-attempt` 丢弃的 draft、保留的 rejected
@@ -231,7 +265,7 @@ failure drill 的设计验收对照
 | 4 | cleanup release 失败拒绝、`cleanup: "failed"`、绝不 accepted | 已实现 | `RuntimeCleanupError`；failureReason 含注入故障；`cleanup: "failed"` |
 | 5 | 每个场景服务端口事后可绑定 | 已实现 | 22800 / 22830 / 22860 均 `portFree=true`；事后 `lsof` 无监听 |
 | 6 | 机器可读报告 + 每场景证据 | 已实现 | `runtime-failure-drills.json`、`child.log`、`child-result.json`、manifest/log/lease |
-| 7 | focused drill、full suite 与 build 通过 | 已实现 | drill 文件 3/3、full suite 177/177、build pass |
+| 7 | focused drill、full suite 与 build 通过 | 已实现 | drill 文件 3/3、当时 full suite 177/177、build pass；当前完整套件 191/191 |
 | 8 | 文档只记录实测结果、不扩大能力 | 已实现 | [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md) 与本轮文档更新 |
 
 本轮 attempt continuity / worker progress / drill abnormal recovery 的设计验收
@@ -249,32 +283,65 @@ failure drill 的设计验收对照
 | 8 | `status` 读取 progress 而不改变 run state | 已实现 | live status 前后 manifest sha256 相同；focused test 断言 manifest/event 字节不变 |
 | 9 | 超时 drill child 的已证明 service 在 child 退出后被回收 | 已实现 | child SIGKILL(6009 ms)；executor scanned 1 / reaped 1 / needs_human 0 |
 | 10 | drill report 保留异常回收并证明端口 free | 已实现 | `abnormalRecovery` 持久化；manifest `cleanup=complete`+`reaped`；lease 0；24860 free |
-| 11 | focused tests、full suite、TypeScript build 通过 | 已实现 | 13/13、177/177、build pass；runtime 组 81/81 |
+| 11 | focused tests、full suite、TypeScript build 通过 | 已实现 | 该切片 13/13；当时完整套件 177/177、build pass；新增 Task Architect 后当前完整套件 191/191 |
 | 12 | 文档只记录实测行为并保留全部非目标 | 已实现 | [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md) 与四份文档更新 |
 
-未覆盖的能力不会被写成“已实现”：跨主机回收、leader-dead 自动 kill、daemon
-周期回收、Windows 进程身份、生产或跨仓库端口协调、Task Architect、durable
-continuous orchestration、provider 会话续跑、自动 worktree GC。
+本轮 Task Architect v0 的设计验收对照
+（[design/task-architect-v0.md](../design/task-architect-v0.md)）：
+
+| # | 设计要求 | 状态 | 实测覆盖 |
+|---|----------|------|----------|
+| 1 | clean repo + committed design → validated Plan artifact | 已实现 | fake valid Plan 与真实 Claude Code + DeepSeek smoke 均生成两任务 Plan；复用 `compilePlan` 通过；只写 `.cliyard/plans/architect-*.json` |
+| 2 | dirty repo rejected before worker starts | 已实现 | `?? dirty.txt` → preflight；fake worker **0 次调用**；无 artifact |
+| 3 | worker touches any path → rejected, no Plan | 已实现 | `rogue.txt` → validation；worktree-change 另由 focused test 覆盖 |
+| 4 | invalid JSON/schema/cycles/overlapping writes rejected | 已实现 | 四种错误均 exit 1、stage `validation`、无 artifact；错误文本见 evidence |
+| 5 | never creates contracts/worktrees/runs/integration branches | 已实现 | 最终只有 3 个 plan artifact；HEAD、refs、worktree list 不变；contracts/runs/worktrees/runtime/ledger 均 absent |
+| 6 | JSON summary and human-readable help/output | 已实现 | `--json`、human 输出、`--help` 均实测；另有 focused CLI tests |
+| 7 | existing plan/Supervisor/progress tests remain green | 已实现 | 完整套件 191/191；`npm run build` 通过 |
+| 8 | documentation records measured real-worker behavior and limitations | 已实现 | [docs/evidence/TASK_ARCHITECT.md](evidence/TASK_ARCHITECT.md) 与 README/NEXT_ITERATION/SUPERVISOR_V0 更新 |
+| 9 | additional fail-closed guards | 已实现 | 未跟踪/越界 design、非法 plan id、非 git target、planId mismatch、worker 非零退出、design overwrite；preflight 失败均 0 次 worker 调用 |
+| 10 | real Claude Code + DeepSeek smoke | 已实现（单次） | 16 s、exit 0、两任务 Plan、`touchedPaths=[]`；HEAD/status/design hash 不变；cost 未由 CLI 报告，仅记录 $1 budget cap |
+
+Task Architect v0 已实现；它只产出 human-reviewable Plan，不自动冻结契约或
+派发。未覆盖的能力不会被写成“已实现”：跨主机回收、leader-dead 自动 kill、
+daemon 周期回收、Windows 进程身份、生产或跨仓库端口协调、自动契约冻结/自动
+派发、durable continuous orchestration、provider 会话续跑、自动 worktree GC。
 
 ## 2. 验证（2026-10-27，本工作树，macOS）
 
-当前套件（包含 attempt continuity / worker progress 与 failure drill 测试）：
+当前套件（包含 Task Architect、attempt continuity / worker progress 与 failure
+drill 测试）：
 
 ```text
-npm run build                                      → 通过
-focused attempt/progress/drill group（4 个文件）   → 13/13 通过（9769.2 ms）
-runtime/恢复 focused group（13 个文件）            → 81/81 通过（9968.0 ms）
-npm test（完整套件）                               → 177/177 通过（10887.8 ms）
+npm run build                                       → 通过
+focused architect file（tests/architect.test.ts）   → 14/14 通过（2193.3 ms）
+npm test（完整套件）                                → 191/191 通过（11236.8 ms）
 ```
 
 以上均为本机单次运行；这是本机 macOS 证据，不是长期 flake 率、CI 或跨主机
-结论。failure drill 实测细节（子进程、场景、端口、lease）见
+结论。完整套件包含此前的 13 项 attempt/progress/drill 组和 81 项 runtime/
+恢复组；这两组本轮未单独重跑，全部 191 项在完整运行中通过。failure drill
+实测细节（子进程、场景、端口、lease）见
 [docs/evidence/RUNTIME_FAILURE_DRILLS.md](evidence/RUNTIME_FAILURE_DRILLS.md)；
 attempt continuity、worker progress 与异常 drill 回收的实测细节见
-[docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md)。
+[docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](evidence/ATTEMPT_CONTINUITY_PROGRESS.md)；
+Task Architect 的 fake-worker/真实 provider 实测见
+[docs/evidence/TASK_ARCHITECT.md](evidence/TASK_ARCHITECT.md)。
 
-本轮另外做了 CLI 级实测（使用本地 stream-json fixture，不是真实
-DeepSeek/Claude provider）：一次 rejected attempt 在默认 resume 中复用同一
+Task Architect 的 CLI 实测使用 `/tmp` scratch target（base
+`f836c4b7220ac6d207415ad35a4ba1dd35da4265`）：fake worker 的 valid Plan、
+human 输出，以及 dirty（0 次 worker 调用）、touched path、moved HEAD、
+未跟踪/越界 design、非法 plan id、非 git target、invalid JSON、空 schema、
+cycle、overlap、planId mismatch、worker 非零退出和 design overwrite 均按预期
+拒绝且不写 Plan。有效运行只写 `.cliyard/plans/`；HEAD、refs、worktree list、
+design hash 和 `git status` 均不变，没有 contracts/runs/worktrees/runtime/
+ledger。真实 Claude Code + DeepSeek（`claude-ds`、`deepseek-flash[1m]`，$1
+budget cap）在 16 s 内生成合法两任务 Plan，`touchedPaths=[]`，HEAD/status
+不变；CLI 不报告实际费用。相对 `--out` 按调用者 CWD 解析，已在 evidence
+中记录为 caveat。Task Architect 不冻结契约、不派发。
+
+本轮另外做了 attempt continuity 的 CLI 级实测（使用本地 stream-json fixture，
+不是真实 DeepSeek/Claude provider）：一次 rejected attempt 在默认 resume 中复用同一
 worktree（第二次 `draftSeen=true`），一次 `--fresh-attempt` 使用不同 worktree
 （`draftSeen=false`），live `status` 在 worker 运行时显示 `tool.start` 与
 heartbeat，且 status 前后 manifest hash 不变。异常 drill 以
@@ -342,21 +409,23 @@ Worker 验收演练，因此不把它们当作 drill、reaper 或跨主机证据
 
 ## 3. 下一迭代范围
 
-已完成的 RuntimeManager v0、Orphan Reaper v0、hardening、failure drills v0，以及
-attempt continuity / worker progress / drill abnormal recovery v0 不在下一迭代
-重复。下一具体能力是 **Task Architect**；其后的独立缺口是 **持久化持续编排
+已完成的 RuntimeManager v0、Orphan Reaper v0、hardening、failure drills v0、
+attempt continuity / worker progress / drill abnormal recovery v0，以及
+**Task Architect v0** 不在下一迭代重复。下一具体能力/缺口是 **持久化持续编排
 （durable continuous orchestration）**：
 
-1. **Task Architect（下一具体能力）**
-   - 把需求/计划转成结构化任务架构与可冻结契约（在现有 plan bridge 之上补齐
-     设计缺口）；
-   - 需要独立设计与验收，本文档不预写实现细节。
-2. **持久化持续编排（Task Architect 之后）**
+1. **持久化持续编排（下一具体能力/缺口）**
    - 跨 wave 的持久状态与连续推进；
    - 需要独立设计与验收；本轮不把它写成已完成能力。
+2. **Task Architect 的人类门禁保持不变**
+   - Task Architect 只产出 human-reviewable Plan，不自动冻结契约、不自动
+     派发、不 merge、不 push；
+   - 路径仍是 review/edit Plan → 既有 plan compiler/freeze → 显式
+     Supervisor start；
+   - 它不是 contract/run authority，也不是长期 architect agent。
 
-对本轮已完成的 attempt continuity / progress / drill 切片，以下仍是明确
-非目标，不得用本轮结果反推为已实现：
+对本轮已完成的 Task Architect / attempt continuity / progress / drill 切片，
+以下仍是明确非目标，不得用本轮结果反推为已实现：
 
 - daemon、周期扫描、后台常驻或 24 小时无人值守；
 - 跨主机回收、远程 kill 或共享租约存储；
@@ -369,15 +438,16 @@ attempt continuity / worker progress / drill abnormal recovery v0 不在下一�
 - worker event 的 retention/rotation 或作为 acceptance authority；
 - leader-dead 进程组的启发式回收；
 - Docker / 远程沙箱 / 多租户 / 云执行；
+- 自动契约冻结或自动派发；Task Architect 只写 Plan；
 - 自动合入 main 或自动 push；
 - HTTPS / 认证 / TCP-only readiness；
 - Windows POSIX 进程组等价清理；
 - 自定义优雅关闭命令或日志轮转。
 
 Attempt reuse 是 worktree 连续性，不是 provider 会话续跑；worker progress 是
-观察信息，不是验收依据；“持久化持续编排”仍是后续独立缺口，不是本轮 daemon
-声明。若未来设计需要后台执行模型，必须单独设计和验收，不能从本切片的单机
-前台证据推导出来。
+观察信息，不是验收依据；Task Architect 只产出 Plan，不是契约或运行权威；
+“持久化持续编排”仍是后续独立缺口，不是本轮 daemon 声明。若未来设计需要后台
+执行模型，必须单独设计和验收，不能从本切片的单机前台证据推导出来。
 
 ## 4. 完成标准
 
@@ -408,7 +478,7 @@ Failure drills v0（已完成）：
 12. [已完成] 每个场景确认服务进程/进程组消失且租约端口可绑定；cleanup-failure
     保留 1 条 lease 作为证据。
 13. [已完成] 机器可读报告与 per-scenario 证据保留；父进程独立复核。
-14. [已完成] drill 文件 3/3（含超时异常回收）、full suite 177/177、
+14. [已完成] drill 文件 3/3（含超时异常回收）、当时 full suite 177/177、
     `npm run build` 通过。
 15. [已完成] 文档只记录实测结果；daemon、跨主机、浏览器证据、SQLite 与
     准入调度仍为非目标。
@@ -433,15 +503,35 @@ Attempt continuity / worker progress / drill abnormal recovery v0（已完成）
 22. [已完成] 异常 child 绝不被解释为 accepted；manifest 收尾
     `cleanup: "complete"` + `recovery.state: "reaped"`，`needs_human=0`，
     端口 free，lease 0。
-23. [已完成] focused 13/13、runtime 组 81/81、full suite 177/177、
+23. [已完成] focused 13/13、runtime 组 81/81、当时 full suite 177/177、
     `npm run build` 通过。
 24. [已完成] 文档只记录实测行为，保留 daemon、跨主机、SQLite、浏览器证据、
-    准入调度与 24 小时声明等全部非目标；Task Architect 未实现。
+    准入调度与 24 小时声明等全部非目标。
+
+Task Architect v0（已完成）：
+
+25. [已完成] clean repo + committed design → validated Plan artifact；fake
+    valid Plan 与真实 Claude Code + DeepSeek smoke 均通过 `compilePlan`。
+26. [已完成] dirty worktree、未跟踪/越界 design、非 git target、非法 plan id
+    在 worker 启动前 fail closed；dirty/non-git/invalid-id 的 fake worker 调用
+    次数为 0。
+27. [已完成] worker 非零退出、touched paths、worktree 变化、moved HEAD、
+    invalid JSON、空 schema、cycle、overlap、planId mismatch、design
+    overwrite 均拒绝且不写 Plan。
+28. [已完成] 有效运行默认只写 `.cliyard/plans/<planId>.json`（`--out` 可覆盖
+    路径）；没有 contracts、worktrees、runs、integration branches、ledger、
+    dispatch、merge 或 push；Plan 必须经人类 review → compiler/freeze →
+    显式 Supervisor start。
+29. [已完成] architect focused 14/14、完整套件 191/191、`npm run build`
+    通过。
+30. [已完成] 真实 Claude Code + DeepSeek smoke：16 s、exit 0、两任务 Plan、
+    `touchedPaths=[]`、HEAD/status/design hash 不变。
+31. [已完成] 文档只记录实测行为与限制，保留全部非目标。
 
 下一缺口（未完成）：
 
-25. [未完成] Task Architect：独立设计与验收。
-26. [未完成] 持久化持续编排：独立设计与验收。
+32. [未完成] 持久化持续编排（durable continuous orchestration）：独立设计与
+    验收。
 
 ## 5. 下一步顺序
 
@@ -457,22 +547,26 @@ Attempt continuity / worker progress / drill abnormal recovery v0（已完成）
 6. [已完成] Attempt continuity / worker progress / drill abnormal recovery v0：
             默认复用 + --fresh-attempt + 篡改 fail-closed、stream events +
             heartbeat、status 只读、超时 drill 精确回收；focused 13/13、
-            runtime 81/81、full 177/177、build 通过
-7. [已完成] 本轮文档更新：README / NEXT_ITERATION / SUPERVISOR_V0 /
+            runtime 81/81、当时 full 177/177、build 通过
+7. [已完成] 该轮文档更新：README / NEXT_ITERATION / SUPERVISOR_V0 /
             RUNTIME_MANAGER / docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md
-8. 下一迭代：Task Architect（独立设计与验收）
-9. 后续：durable continuous orchestration（独立设计与验收）
-10. 不重复已完成切片；不新增 daemon、跨主机、浏览器证据、SQLite、准入调度、
-    provider 会话续跑、自动 worktree GC 或 24 小时声明
+8. [已完成] Task Architect v0：只读 preflight/worker/post-run guards、
+            deterministic Plan validation、仅 plan artifact；focused 14/14、
+            full 191/191、build 通过；真实 Claude Code + DeepSeek 16 s smoke
+9. [已完成] 本轮文档更新：README / NEXT_ITERATION / SUPERVISOR_V0 /
+            docs/evidence/TASK_ARCHITECT.md
+10. 下一迭代：durable continuous orchestration（独立设计与验收）
+11. 不重复已完成切片；不新增 daemon、跨主机、浏览器证据、SQLite、准入调度、
+    provider 会话续跑、自动 worktree GC、自动契约冻结/自动派发或 24 小时声明
 ```
 
 ## 6. 上一迭代状态
 
 Supervisor v0（前台、原子 JSON RunManifest、进程级 SIGKILL 恢复）已完成，
 其操作语义与自举手册见 [docs/SUPERVISOR_V0.md](SUPERVISOR_V0.md)。当前完整套件
-包含 supervisor、attempt continuity/progress 与 runtime/drill 测试
-（177/177 通过）。本轮没有引入 daemon 或 SQLite，也没有把 supervisor 的
+包含 Task Architect、supervisor、attempt continuity/progress 与 runtime/drill
+测试（191/191 通过）。本轮没有引入 daemon 或 SQLite，也没有把 supervisor 的
 后台化列入计划。attempt reuse 是 worktree 连续性，worker progress 是观察
-信息；两者都不改变验收权威。RuntimeManager、Orphan Reaper、hardening、
-failure drills 与 attempt continuity/progress/异常 drill 回收均已收口；
-下一具体能力是 Task Architect，之后是持久化持续编排。
+信息；Task Architect 只产出 Plan；三者都不改变验收权威。RuntimeManager、
+Orphan Reaper、hardening、failure drills、attempt continuity/progress/异常
+drill 回收与 Task Architect 均已收口；下一具体能力/缺口是持久化持续编排。

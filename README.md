@@ -17,7 +17,8 @@ North star: stop babysitting AI. **Master 壳 = DeepSeek Harness GUI**；**cliya
 **Runtime orphan recovery:** [docs/RUNTIME_ORPHAN_RECOVERY.md](docs/RUNTIME_ORPHAN_RECOVERY.md) — exact-identity preflight, exact lease-owner PID, `runtimeId`-bearing recovery records, `supervisor reap`, start/resume reconciliation, evidence-preserving gaps.
 **Runtime failure drills:** [docs/evidence/RUNTIME_FAILURE_DRILLS.md](docs/evidence/RUNTIME_FAILURE_DRILLS.md) — three measured failure scenarios in independent child processes, report, leases, ports.
 **Attempt continuity, worker progress, abnormal drill recovery:** [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md) — measured rejected-attempt reuse, `--fresh-attempt`, live stream events, heartbeats, read-only status, and timed-out drill recovery.
-**Next iteration:** [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md) — Task Architect is the next capability; durable continuous orchestration follows. Daemon, cross-host, browser evidence, SQLite and admission scheduling remain non-goals.
+**Task Architect evidence:** [docs/evidence/TASK_ARCHITECT.md](docs/evidence/TASK_ARCHITECT.md) — measured read-only Plan production (fake-worker guards plus one real Claude Code + DeepSeek smoke), human review gate and limitations.
+**Next iteration:** [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md) — Task Architect v0 is implemented; durable continuous orchestration is the next gap. Daemon, cross-host, browser evidence, SQLite and admission scheduling remain non-goals.
 
 ## What we want (ideal)
 
@@ -34,6 +35,7 @@ Human: requirements + prototype in DeepSeek Harness
 - **Darwin MVP:** mock closed loop, DAG, `mock-batch` (parallel ready-wave), optional `--real-verify`, JSON ledger
 - **Master spike (S1):** `plugins/dsh-cliyard` + `npm run master-monitor` / `master-dispatch`
 - **Plan bridge:** structured Plan → validated/frozen contracts → isolated dispatch, also exposed to DSH as the `cliyard_plan_dispatch` agent tool
+- **Task Architect v0 (read-only Plan producer):** `npm run architect -- --repo <target> --design <committed-design.md> --plan-id <id> [--json]` requires a clean target and a tracked, repo-relative design; Claude runs in `plan` permission mode with only Read/Grep/Glob, and post-run guards reject touched paths, a changed worktree, a moved HEAD or an invalid Plan. With the default output it writes only `<target>/.cliyard/plans/<planId>.json` — never contracts, worktrees, runs, dispatch, merge or push. The Plan is for human review; freezing and dispatch remain explicit later steps.
 - **Codex worker spike (S2):** `npm run codex-batch -- … --dry-run` (real Codex without `--dry-run`)
 - **Claude Code + DeepSeek worker:** `claude-ds` + `npm run claude-batch`
 - **Continuous waves:** accepted work enters an integration branch before dependent tasks start
@@ -44,12 +46,15 @@ Human: requirements + prototype in DeepSeek Harness
 - **Runtime failure drills v0:** `npm run runtime-drill` runs readiness-timeout, verify-failure and cleanup-failure in three independent child processes, writes a versioned JSON report plus per-scenario manifests/logs/leases, and verifies the service/port is clean afterward. A timed-out/abnormal child is terminated (SIGTERM → bounded SIGKILL) and its proven orphan runtime is reconciled by the exact reaper; the recovery is persisted in the report, while the abnormal scenario itself still reports failure. Diagnostic only — no daemon
 - **Windows track:** `doctor` / `run` / `batch` via WSL (deferred for CodeBuddy E2E)
 
-Not yet: **Task Architect** (the next concrete capability) and then **durable continuous orchestration**, Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, Multica runtime, Supervisor daemon/background service, daemon-based or periodic orphan cleanup, cross-host runtime recovery, automatic reaping of leader-dead process groups, cross-repository port coordination, SQLite manifests, Playwright/axe/screenshot or a11y evidence, unlimited parallel runtimes, and a resumed provider conversation (attempt reuse is worktree continuity only). The completed attempt-continuity/progress and failure-drill slices add none of these.
+Not yet: **durable continuous orchestration** (the next concrete gap), Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, Multica runtime, Supervisor daemon/background service, daemon-based or periodic orphan cleanup, cross-host runtime recovery, automatic reaping of leader-dead process groups, cross-repository port coordination, SQLite manifests, Playwright/axe/screenshot or a11y evidence, unlimited parallel runtimes, and a resumed provider conversation (attempt reuse is worktree continuity only). Task Architect produces a human-reviewable Plan only; it does **not** freeze contracts or dispatch automatically. The completed Task Architect, attempt-continuity/progress and failure-drill slices add none of the other items.
 
-Measured suite (2026-10-27, HEAD `3093508`): `npm run build` passes; the focused
-attempt-continuity/progress/drill group is **13/13**, the runtime/recovery group
-is **81/81 across 13 files**, and `npm test` is **177/177** in one run. These are
-local macOS results, not a long-term flake-rate or CI claim. Evidence:
+Measured suite (2026-10-27, HEAD `3bc56e4`): `npm run build` passes; the focused
+Task Architect file is **14/14** (2193.3 ms), and `npm test` is **191/191** in
+one run (11236.8 ms). The full run includes the prior 13-test
+attempt-continuity/progress/drill group and the 81-test runtime/recovery group;
+those groups were not separately re-run this round. These are local macOS
+results, not a long-term flake-rate or CI claim. Evidence:
+[docs/evidence/TASK_ARCHITECT.md](docs/evidence/TASK_ARCHITECT.md),
 [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md)
 and [docs/evidence/RUNTIME_FAILURE_DRILLS.md](docs/evidence/RUNTIME_FAILURE_DRILLS.md);
 per-run hardening durations and acceptance matrix:
@@ -114,6 +119,12 @@ npm run codex-batch -- examples/codex-batch.parallel.json --dry-run
 claude-ds -p 'Reply exactly with PROBE_OK.'
 npm run claude-batch -- examples/claude-smoke.contract.json --repo /path/to/temp-git-repo
 
+# Task Architect v0: read-only Plan from a committed design (clean target)
+npm run architect -- --repo /path/to/clean-target \
+  --design design/feature.md --plan-id feature --json
+# Writes only <target>/.cliyard/plans/<planId>.json; review it, then use the
+# existing plan compiler/plan-dispatch and Supervisor explicitly.
+
 # Plan → contract file → optional dispatch (distinct parallel writePaths required)
 npm run plan-dispatch -- examples/glass-parallel.plan.json --repo ../ui-prototype
 npm run plan-dispatch -- examples/glass-parallel.plan.json --repo ../ui-prototype \
@@ -140,12 +151,17 @@ npm run dev -- supervisor reap --repo <scratch-repo> --json  # orphan runtime re
 # After `npm run build`: node dist/cli.js supervisor …
 ```
 
-Plan compile writes `<target>/.cliyard/plans/<planId>.json` and
+By default, `architect` writes only `<target>/.cliyard/plans/<planId>.json`
+(`--out` may select another path); it writes no contracts and dispatches
+nothing. After human review, plan compile writes
+`<target>/.cliyard/plans/<planId>.json` and
 `<target>/.cliyard/contracts/<planId>.contracts.json`. The control plane
 resolves `HEAD` to a commit, freezes each contract, and rejects unknown deps,
 cycles, repo-external paths, and overlapping task `writePaths`.
 
 Ledger: `<target>/.cliyard/ledger.json` (gitignored).  
+Task Architect artifact: `<target>/.cliyard/plans/<planId>.json` (gitignored;
+human-reviewable Plan only — no contracts, runs or dispatch).
 Supervisor state: `<target>/.cliyard/runs/<runId>.json` + `active.json` + `supervisor.lock`
 (gitignored); accepted tasks, the integration head and rejected-attempt
 worktree/branch/base fields are checkpointed there. Worker progress is
