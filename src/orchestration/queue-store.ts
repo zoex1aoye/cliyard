@@ -36,6 +36,10 @@ import {
   isSameHost,
   SUPERVISOR_DIR,
 } from "../supervisor/store.js";
+import {
+  parseFailureRecord,
+  type FailureRecord,
+} from "../failures.js";
 import { materializedContractsPath } from "./plan-materializer.js";
 import { tryAppendQueueEvent } from "./event-journal.js";
 
@@ -113,6 +117,12 @@ export interface QueueItem {
   createdAt: string;
   updatedAt: string;
   reason?: string;
+  /**
+   * Durable structured failure for a deterministic pre-dispatch block only.
+   * A dispatched run's failure lives in its RunManifest; the queue never
+   * duplicates it or overrides that authority. Cleared by retry.
+   */
+  failure?: FailureRecord;
 }
 
 /** Frozen contracts path/hash for one queue item, whatever its source kind. */
@@ -659,6 +669,9 @@ export function retryQueueItem(repoRoot: string, id: string): QueueItem {
     item.status = "pending";
     item.nextAction = item.lastRunId ? "resume" : "start";
     delete item.reason;
+    // A pre-dispatch failure describes the blocked attempt, not the retry.
+    // Dispatched-run failures live in the RunManifest and are never copied.
+    delete item.failure;
     item.updatedAt = at;
     document.updatedAt = at;
     saveQueue(root, document);
@@ -1295,6 +1308,17 @@ function parseQueueItem(
       );
     }
   }
+  // Optional for legacy items; when present the record must validate fully.
+  let failure: FailureRecord | undefined;
+  if (raw.failure !== undefined) {
+    const parsed = parseFailureRecord(raw.failure);
+    if (!parsed) {
+      throw new QueueValidationError(
+        `${source}: failure is not a valid failure record`,
+      );
+    }
+    failure = parsed;
+  }
 
   const dependsOn = uniqueStrings(raw.dependsOn as string[]);
   const runIds = uniqueStrings(raw.runIds as string[]);
@@ -1357,6 +1381,7 @@ function parseQueueItem(
       createdAt: raw.createdAt as string,
       updatedAt: raw.updatedAt as string,
       ...(raw.reason !== undefined ? { reason: raw.reason as string } : {}),
+      ...(failure !== undefined ? { failure } : {}),
     };
   }
 
@@ -1379,6 +1404,7 @@ function parseQueueItem(
     createdAt: raw.createdAt as string,
     updatedAt: raw.updatedAt as string,
     ...(raw.reason !== undefined ? { reason: raw.reason as string } : {}),
+    ...(failure !== undefined ? { failure } : {}),
   };
 }
 

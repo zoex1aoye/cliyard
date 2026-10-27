@@ -1,4 +1,5 @@
 import type { TaskContract } from "../contracts/schema.js";
+import type { CostTruth, FailureRecord } from "../failures.js";
 
 export type AgentAdapterId = "mock" | "claude" | "codex" | "codebuddy";
 
@@ -120,6 +121,16 @@ export interface AgentResult {
   finalText?: string;
   /** Hint for mock verifier scenarios */
   mockMeta?: { intendedVerifyFail?: boolean };
+  /**
+   * Bounded structured failure observation when the adapter rejected the
+   * attempt. Observational only: acceptance and retry policy are unchanged.
+   */
+  failure?: FailureRecord;
+  /**
+   * Provider/CLI token and cost observation. CLI estimates are explicitly
+   * non-authoritative; unavailable cost is never coerced to zero.
+   */
+  cost?: CostTruth;
 }
 
 export interface AgentAdapter {

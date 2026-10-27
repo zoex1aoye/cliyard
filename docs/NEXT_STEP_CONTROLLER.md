@@ -4,10 +4,12 @@
 >
 > Baseline: `3065ad9` / `selfhost/chained-read-context-complete`
 >
-> Implementation update (2026-10-27): `queue status`, the queue event journal
-> and the first read-only resource/provider snapshot are implemented. The next
-> P0 slice is worker-failure taxonomy plus cost truth. Evidence:
-> [evidence/CONTROL_SNAPSHOT.md](evidence/CONTROL_SNAPSHOT.md).
+> Implementation update (2026-10-27): `queue status`, the queue event journal,
+> the read-only resource/provider snapshot, and worker failure taxonomy/cost
+> truth are implemented. The next P0 slice is CLI + model execution-profile
+> routing. Evidence:
+> [evidence/CONTROL_SNAPSHOT.md](evidence/CONTROL_SNAPSHOT.md) and
+> [evidence/FAILURE_COST_TRUTH.md](evidence/FAILURE_COST_TRUTH.md).
 
 ## Decision
 
@@ -26,7 +28,7 @@ The implementation order was revised after the competitive and entry review:
 
 ```text
 queue observe / status
-  -> worker failure taxonomy + cost/resource telemetry
+  -> worker failure taxonomy + cost truth (implemented)
   -> CLI + model ExecutionProfile routing
   -> parallel Supervisor/queue architecture spike
   -> shared hierarchical admission broker with fixed limits
@@ -113,7 +115,10 @@ acceptance evidence and not a replacement for RunManifest.
 
 ### 3. `worker-failure-taxonomy-v0` (P0)
 
-Capture a bounded, secret-free failure class in worker/run evidence:
+**Status: implemented 2026-10-27 (`failure-cost-core` + `failure-cost-durable`).**
+
+Every newly rejected dispatched task carries a bounded, secret-free
+`FailureRecord`. The taxonomy has exactly ten categories:
 
 ```text
 budget_exhausted
@@ -124,12 +129,36 @@ provider_protocol
 worker_process_exit
 verifier_rejected
 policy_blocked
+resource_exhausted
 unknown
 ```
 
-The adapter must preserve the provider's final bounded error text when one is
-available. A provider process disappearing near a budget boundary must not
-remain indistinguishable from a verifier rejection or a model-quality failure.
+Stages are `contract | preflight | spawn | provider | worker | verifier | policy | unknown`.
+Priority is timeout > budget > auth > resource > transient >
+protocol > worker process exit > verifier > policy > unknown. `verifier_rejected`
+requires a successful worker result; a worker process failure is never
+relabeled as a verifier rejection. Records preserve a bounded final provider
+error while dropping raw payloads, prompts, file contents and auth headers;
+`retryableHint` is advisory only.
+
+`CostTruth` has exactly four states: `provider-reported`, `cli-estimated`,
+`usage-only` and `unavailable`, with per-session observations, token usage,
+explicit `missing` reasons and `guardBudgetUsd`. Claude Code `total_cost_usd` is
+`cli-estimated` with `authoritative: false`; it is never a DeepSeek invoice,
+bill or balance. Missing cost stays `unavailable`, never `$0`. The configured
+budget is a guard, not spend.
+
+The RunManifest task is the durable authority for a dispatched run; the queue
+stores a `policy_blocked` failure only for a deterministic pre-dispatch block
+with no manifest. `supervisor status` and `queue status` expose failure/cost
+read-only, and `run.blocked` events carry bounded category/stage/code/cost
+state. No automatic retry, routing, admission or parallel dispatch is
+introduced. The Claude adapter's pre-existing bounded transient retry is
+unchanged; after exhaustion it returns the final structured failure.
+
+Measured: focused failure/cost 50/50, full suite 290/290, `npm run build`
+exit 0. Evidence:
+[evidence/FAILURE_COST_TRUTH.md](evidence/FAILURE_COST_TRUTH.md).
 
 ### 4. Audited attempt-policy recovery (P1)
 
@@ -226,9 +255,9 @@ V0 behavior:
 - accept bounded test flags such as `--max-cycles`;
 - never approve Plans, freeze contracts, merge, push or mark acceptance.
 
-V0 should not auto-retry verifier rejections. Automatic retry is introduced
-only after the failure taxonomy can prove an infrastructure failure and only
-within an explicit attempt policy.
+V0 should not auto-retry verifier rejections. The failure taxonomy now exists,
+but automatic retry remains unimplemented: it requires an explicit attempt
+policy, a reason code, an attempt bound and an audit record.
 
 ### 9. Long-run verification
 
@@ -252,15 +281,15 @@ considered as an external process-lifecycle concern.
 | P0 | Queue is sequential although the original pain is managing several terminal/branch lines | Current queue and Supervisor allow one item and one repo-global run at a time | Throughput remains limited by manual terminal switching or by a serial queue | parallel Supervisor/queue spike + bounded parallel v0 |
 | P0 | Worker/model binding is fixed too early | Queue items store `worker` and optional `model` at add time | Cannot route across multi-model subscriptions, single-CLI limits or one-model/multi-CLI availability | `ExecutionProfile` feasibility + scoring |
 | P0 | No stable client-neutral Control API | Current DSH plugin reads a batch ledger and starts its own monitor | DSH becomes a de facto entry dependency and cannot show complete authority state | versioned local API + SSE/NDJSON |
-| P0 | Provider failures are not machine-classified | Three documentation attempts ended after several minutes with only `worker failed`; no final `is_error` or budget classification was retained | Cannot distinguish budget, network, provider protocol or worker failure automatically | failure taxonomy + bounded final provider detail |
-| P0 | The default `$5` budget limit was discovered by repeated provider exits | The same docs task completed only after increasing budget to `$12` | Wasted attempts/time and nearly exhausted queue retry budget | expose configured budget in status; classify budget exhaustion |
+| P0 | Provider failures are not machine-classified | Three documentation attempts ended after several minutes with only `worker failed`; no final `is_error` or budget classification was retained | Cannot distinguish budget, network, provider protocol or worker failure automatically | **Closed by failure/cost v0:** durable ten-category `FailureRecord` plus bounded final provider detail |
+| P0 | The default `$5` budget limit was discovered by repeated provider exits | The same docs task completed only after increasing budget to `$12` | Wasted attempts/time and nearly exhausted queue retry budget | **Closed by failure/cost v0:** `budget_exhausted` category; per-task `guardBudgetUsd` records the configured guard (not spend) |
 | P0 | Attempt maximum cannot be changed through an audited command | During recovery, `maxAttempts` was manually changed from 3 to 4 in `.cliyard/queue.json` | Operator recovery bypasses a first-class control-plane path | audited `extend-attempts` command |
 | P1 | Provider session restarts are not first-class UI state | One queue attempt moved to a new worker session id and appended to the same task event file | Requires inspecting raw JSONL to understand whether the worker revived | session-generation events and aggregate status |
 | P1 | `queue run --json` is terminal-only | It emits the final summary after dispatch finishes | External monitor cannot incrementally observe a long dispatch | event journal and/or streaming status |
 | P1 | No foreground controller heartbeat exists yet | Only Supervisor and worker heartbeats exist during an active run | Idle controller, dead controller and blocked controller are indistinguishable | controller lock + heartbeat/status file |
-| P1 | Controller auto-retry policy is undefined | Queue currently blocks provider/worker failures for explicit retry | Safe automation is impossible without classification | explicit infrastructure-only retry policy |
+| P1 | Controller auto-retry policy is undefined | Queue currently blocks provider/worker failures for explicit retry | Safe automation is impossible without classification | Taxonomy implemented; automatic retry still gated on an audited attempt policy |
 | P2 | Worker events are advisory and lack retention | Append-only diagnostic files are useful but can grow indefinitely | Long-run operational cost and forensic noise | bounded event schema; deferred rotation/GC |
-| P2 | Actual provider cost is unavailable | Only the configured budget cap and a separate probe cost were observed | Cost estimation remains approximate | provider-reported usage when available |
+| P2 | Actual provider cost is unavailable | Only the configured budget cap and a separate probe cost were observed | Cost estimation remains approximate | Partially closed: four-state `CostTruth` with `cli-estimated`/`usage-only`/`unavailable`; no provider-reported source or DeepSeek bill yet |
 | P2 | Tests are local single runs | No CI, flake-rate or multi-hour soak exists | Cannot claim unattended stability | focused soak then CI/nightly |
 | P2 | Queue supports one linear Plan dependency | Multi-parent integration remains unimplemented | Branches cannot be composed automatically | separate integration-envelope/merge-queue design |
 | P2 | Artifacts and attempts accumulate | No queue history/event/artifact GC exists | Long-running disk usage is unbounded | retention policy after event volume is measured |
@@ -283,13 +312,14 @@ considered as an external process-lifecycle concern.
 The controller slice is ready to start when:
 
 1. `queue status --json` can explain the current item without manual file
-   joining.
+   joining. **Implemented.**
 2. Infrastructure failure, verifier rejection and policy blocking have distinct
-   reason codes.
+   reason codes. **Implemented** as the ten-category, eight-stage
+   `FailureRecord`; policy blocks use `policy_blocked` with a bounded code.
 3. Operator-driven attempt extension is audited and does not dispatch by
-   itself.
-4. The monitoring projection is demonstrably read-only.
-5. The existing 240-test suite remains green.
+   itself. **Not implemented.**
+4. The monitoring projection is demonstrably read-only. **Implemented.**
+5. The existing 290-test suite remains green.
 6. Execution routing can select CLI and model separately from current
    endpoint/model/runtime capability and availability.
 7. Multiple queue items can be recovered independently and bounded by explicit
@@ -298,3 +328,6 @@ The controller slice is ready to start when:
    the same status projection as queue-item concurrency.
 9. Admission combines host/provider/runtime capacity and explains the binding
    limit; the warm-start value 3 is not hardcoded as a permanent cap.
+
+Conditions 1, 2, 4 and 5 are met. Conditions 3 and 6-9 remain open; the
+controller is not ready to start.

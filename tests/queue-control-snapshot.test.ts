@@ -39,6 +39,14 @@ import {
   createRunManifest,
   updateRunManifest,
 } from "../src/supervisor/store.js";
+import {
+  createCostObservation,
+  createCostTruth,
+  createFailureRecord,
+  type CostTruth,
+  type FailureRecord,
+  type TokenUsage,
+} from "../src/failures.js";
 
 const CLI_PATH = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 
@@ -114,6 +122,7 @@ function setQueueState(
     attempts: number;
     runId?: string;
     reason?: string;
+    failure?: FailureRecord;
   },
 ): void {
   const document = loadQueue(repo);
@@ -127,6 +136,8 @@ function setQueueState(
     item.runIds = [state.runId];
   }
   if (state.reason) item.reason = state.reason;
+  if (state.failure) item.failure = state.failure;
+  else delete item.failure;
   document.updatedAt = new Date().toISOString();
   writeFileSync(
     queuePaths(repo).queuePath,
@@ -398,6 +409,203 @@ test("queue mutations and dispatch append bounded lifecycle events", async () =>
     journal = readQueueEventJournal(repo);
     assert.equal(journal.events.at(-1)?.type, "queue.cancel");
     assert.equal(loadQueue(repo).items[0]?.status, "cancelled");
+  });
+});
+
+test("queue status prefers durable run failure categories and reports non-authoritative cost", async () => {
+  await withRepo(async (repo) => {
+    const contracts = writeContracts(repo);
+    const item = addQueueItem(repo, {
+      id: "durable",
+      contractsPath: contracts.path,
+    });
+    const runId = "run-durable";
+    // Deliberately misleading legacy text and a stale queue-item failure:
+    // the dispatched run's RunManifest is the authority.
+    setQueueState(repo, item.id, {
+      status: "blocked",
+      attempts: 1,
+      runId,
+      reason: "verifier rejected the test",
+      failure: createFailureRecord({
+        policyBlocked: true,
+        stage: "policy",
+        code: "stale_pre_dispatch",
+      }),
+    });
+    createRunManifest(repo, {
+      runId,
+      planId: "plan-durable",
+      contractsPath: contracts.path,
+      baseCommit: contracts.baseCommit,
+      integrationBranch: `cliyard/integration/${runId}`,
+      tasks: ["task"],
+    });
+    const usage: TokenUsage = {
+      inputTokens: 10,
+      outputTokens: 2,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+    };
+    const cost: CostTruth = createCostTruth({
+      observations: [
+        createCostObservation({
+          sessionId: "session-durable",
+          amount: 0.04,
+          currency: "USD",
+          usage,
+        }),
+      ],
+    });
+    updateRunManifest(repo, runId, (manifest) => {
+      manifest.status = "blocked";
+      const task = manifest.tasks["task"]!;
+      task.status = "rejected";
+      task.accepted = false;
+      task.reason = "provider returned 503";
+      task.failure = createFailureRecord({
+        exitCode: 1,
+        text: "503 service unavailable",
+      });
+      task.cost = cost;
+    });
+
+    const snapshot = await buildControlSnapshot(repo);
+    const entry = snapshot.items.find((candidate) => candidate.id === item.id)!;
+    assert.equal(entry.failure?.code, "stale_pre_dispatch");
+    assert.equal(entry.run?.tasks[0]?.failure?.category, "provider_transient");
+    assert.equal(entry.decision.category, "infrastructure");
+    assert.deepEqual(snapshot.failureCounts, { provider_transient: 1 });
+    assert.equal(snapshot.cost.state, "cli-estimated");
+    assert.equal(snapshot.cost.authoritative, false);
+    assert.equal(snapshot.cost.amount, 0.04);
+    assert.equal(snapshot.cost.currency, "USD");
+    assert.equal(snapshot.cost.completeness, "complete");
+    assert.deepEqual(snapshot.cost.missing, []);
+
+    const cli = await runCli(repo, ["status", "--json"]);
+    assert.equal(cli.code, 0);
+    assert.equal(
+      cli.json.items[0].run.tasks[0].failure.category,
+      "provider_transient",
+    );
+    assert.deepEqual(cli.json.failureCounts, { provider_transient: 1 });
+    assert.equal(cli.json.cost.amount, 0.04);
+    assert.equal(cli.json.cost.authoritative, false);
+
+    const humanLines: string[] = [];
+    assert.equal(
+      await runQueueCli(["status", "--repo", repo], {
+        log: (line) => humanLines.push(line),
+      }),
+      0,
+    );
+    const human = humanLines.join("\n");
+    for (const fragment of [
+      "failure categories: provider_transient 1",
+      "task task: rejected failure=provider_transient/provider (exit_1)",
+      "cost=cli-estimated 0.04 USD (observed, non-authoritative)",
+      "cost: cli-estimated 0.04 USD observed; non-authoritative; completeness complete",
+    ]) {
+      assert.ok(human.includes(fragment), `missing ${fragment}:\n${human}`);
+    }
+  });
+});
+
+test("queue status never combines mixed currencies and reports missing reasons", async () => {
+  await withRepo(async (repo) => {
+    const contracts = writeContracts(repo);
+    const item = addQueueItem(repo, {
+      id: "mixed",
+      contractsPath: contracts.path,
+    });
+    const runId = "run-mixed";
+    setQueueState(repo, item.id, {
+      status: "blocked",
+      attempts: 1,
+      runId,
+      reason: "run blocked",
+    });
+    createRunManifest(repo, {
+      runId,
+      planId: "plan-mixed",
+      contractsPath: contracts.path,
+      baseCommit: contracts.baseCommit,
+      integrationBranch: `cliyard/integration/${runId}`,
+      tasks: ["task", "other"],
+    });
+    const usage: TokenUsage = {
+      inputTokens: 1,
+      outputTokens: 1,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+    };
+    const usd = createCostTruth({
+      observations: [
+        createCostObservation({
+          sessionId: "session-usd",
+          amount: 0.05,
+          currency: "USD",
+          usage,
+        }),
+      ],
+    });
+    const eur = createCostTruth({
+      observations: [
+        createCostObservation({
+          sessionId: "session-eur",
+          amount: 0.04,
+          currency: "EUR",
+          usage,
+        }),
+      ],
+    });
+    updateRunManifest(repo, runId, (manifest) => {
+      manifest.status = "blocked";
+      for (const [taskId, taskCost] of [
+        ["task", usd],
+        ["other", eur],
+      ] as const) {
+        const task = manifest.tasks[taskId]!;
+        task.status = "rejected";
+        task.accepted = false;
+        task.reason = "rejected";
+        task.cost = taskCost;
+      }
+    });
+
+    const snapshot = await buildControlSnapshot(repo);
+    assert.equal(snapshot.cost.authoritative, false);
+    assert.equal(snapshot.cost.state, "usage-only");
+    assert.equal(snapshot.cost.amount, null);
+    assert.equal(snapshot.cost.currency, null);
+    assert.equal(snapshot.cost.completeness, "partial");
+    for (const reason of ["cost.amount", "cost.currency"]) {
+      assert.ok(
+        snapshot.cost.missing.includes(reason),
+        `missing ${reason}: ${snapshot.cost.missing.join(",")}`,
+      );
+    }
+
+    const cli = await runCli(repo, ["status", "--json"]);
+    assert.equal(cli.code, 0);
+    assert.equal(cli.json.cost.amount, null);
+    assert.equal(cli.json.cost.authoritative, false);
+
+    const humanLines: string[] = [];
+    assert.equal(
+      await runQueueCli(["status", "--repo", repo], {
+        log: (line) => humanLines.push(line),
+      }),
+      0,
+    );
+    const human = humanLines.join("\n");
+    assert.match(
+      human,
+      /cost: usage-only; non-authoritative; completeness partial; missing cost\.amount, cost\.currency/,
+    );
+    // Neither per-task observation may leak into a combined amount.
+    assert.ok(!/cost=usage-only[^\n]*0\.0[45]/.test(human), human);
   });
 });
 
