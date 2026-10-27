@@ -9,6 +9,19 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { collectChangedPaths } from "./git-paths.js";
+import {
+  boundFailureText,
+  createCostObservation,
+  createCostTruth,
+  createFailureRecord,
+  parseCostAmount,
+  parseTokenUsage,
+  sumTokenUsage,
+  unavailableCostTruth,
+  type CostObservation,
+  type FailureRecord,
+  type TokenUsage,
+} from "../failures.js";
 import type {
   AgentAdapter,
   AgentCapability,
@@ -169,14 +182,28 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
             exitCode: 1,
             touchedPaths: [],
             logTail: `[claude] cwd missing: ${opts.cwd}`,
+            failure: createFailureRecord({
+              exitCode: 1,
+              stage: "preflight",
+              code: "cwd_missing",
+              text: "worker cwd is missing",
+            }),
+            cost: unavailableCostTruth({
+              sessionId,
+              guardBudgetUsd: maxBudgetUsd,
+              note: "worker cwd is missing",
+            }),
           };
         }
 
         try {
           const retryNotes: string[] = [];
+          /** Every provider session started by this attempt, including retries. */
+          const observations: CostObservation[] = [];
           let res!: ClaudeRunResult;
           let parsed: ClaudeResult | undefined;
           for (let retry = 0; ; retry += 1) {
+            const runSessionId = randomUUID();
             res = await withClaudeSlot(() =>
               runClaude({
                 binary,
@@ -188,7 +215,7 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
                 timeoutMs,
                 maxBudgetUsd,
                 heartbeatMs,
-                sessionId: randomUUID(),
+                sessionId: runSessionId,
                 prompt,
                 emit,
                 onSpawn: (child) => {
@@ -203,6 +230,7 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
               }),
             );
             parsed = res.result;
+            observations.push(recordAttemptCost(runSessionId, res, parsed));
             if (
               !isTransientClaudeFailure(res, parsed) ||
               retry >= maxTransientRetries
@@ -236,17 +264,31 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
             .join("\n")
             .trim()
             .slice(-6000);
+          const failed =
+            Boolean(changed.error) ||
+            res.code !== 0 ||
+            parsed?.is_error === true;
+          const failure = failed
+            ? buildClaudeFailure({
+                res,
+                ...(parsed ? { parsed } : {}),
+                ...(changed.error ? { changedError: changed.error } : {}),
+                timeoutMs,
+              })
+            : undefined;
           return {
             sessionId,
-            exitCode:
-              changed.error || res.code !== 0 || parsed?.is_error
-                ? 1
-                : 0,
+            exitCode: failed ? 1 : 0,
             touchedPaths: changed.paths,
             logTail: `${output}${changedLog}`,
             ...(typeof parsed?.result === "string" && parsed.result
               ? { finalText: parsed.result }
               : {}),
+            ...(failure ? { failure } : {}),
+            cost: createCostTruth({
+              observations,
+              guardBudgetUsd: maxBudgetUsd,
+            }),
           };
         } catch (e) {
           const message = e instanceof Error ? e.message : String(e);
@@ -261,6 +303,17 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
             exitCode: 1,
             touchedPaths: [],
             logTail: `[claude] spawn error: ${message}`,
+            failure: createFailureRecord({
+              spawnFailed: true,
+              stage: "spawn",
+              code: "spawn_error",
+              messageDetail: `spawn error: ${message}`,
+            }),
+            cost: unavailableCostTruth({
+              sessionId,
+              guardBudgetUsd: maxBudgetUsd,
+              note: "worker failed to start",
+            }),
           };
         }
       })();
@@ -329,6 +382,97 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
 
+/**
+ * Preserve one provider session's cost/usage observation. An absent result
+ * record yields `unavailable`, never zero.
+ */
+function recordAttemptCost(
+  sessionId: string,
+  res: ClaudeRunResult,
+  parsed: ClaudeResult | undefined,
+): CostObservation {
+  if (!parsed) {
+    const note = res.timedOut
+      ? "worker timed out before a result record"
+      : res.code !== 0
+        ? `worker exited with code ${res.code} before a result record`
+        : "provider emitted no result record";
+    return createCostObservation({ sessionId, note });
+  }
+  return createCostObservation({
+    sessionId,
+    amount: parsed.totalCostUsd,
+    usage: parsed.usage,
+    currency: parsed.totalCostUsd !== null ? "USD" : null,
+    source: "cli",
+    ...(parsed.totalCostUsd === null && parsed.usage === null
+      ? { note: "result record had no cost or usage" }
+      : {}),
+  });
+}
+
+/** Build the final structured failure from bounded provider text only. */
+function buildClaudeFailure(input: {
+  res: ClaudeRunResult;
+  parsed?: ClaudeResult;
+  changedError?: string;
+  timeoutMs: number;
+}): FailureRecord {
+  const providerErrorTexts =
+    input.parsed?.is_error === true
+      ? [input.parsed.result, input.res.errorText]
+      : [input.res.errorText];
+  const text = [...providerErrorTexts, input.res.stderr]
+    .filter((part): part is string => Boolean(part && part.trim()))
+    .join("\n");
+  return createFailureRecord({
+    timedOut: input.res.timedOut,
+    exitCode: input.res.code,
+    signal: input.res.signal,
+    timeoutMs: input.timeoutMs,
+    text,
+    providerError: input.parsed?.is_error === true && input.res.code === 0,
+    postCheckFailed:
+      Boolean(input.changedError) &&
+      input.parsed?.is_error !== true &&
+      input.res.code === 0,
+    ...(input.changedError
+      ? { messageDetail: `git diff failed: ${input.changedError}` }
+      : {}),
+  });
+}
+
+/** Extract only the known result fields; raw provider payloads are dropped. */
+function toClaudeResult(record: Record<string, unknown>): ClaudeResult {
+  return {
+    ...(typeof record.is_error === "boolean"
+      ? { is_error: record.is_error }
+      : {}),
+    ...(typeof record.result === "string" ? { result: record.result } : {}),
+    usage: parseClaudeUsage(record),
+    totalCostUsd: parseCostAmount(record.total_cost_usd),
+  };
+}
+
+/**
+ * Top-level `usage` is preferred. When absent or malformed, aggregate the
+ * per-model `modelUsage` records without retaining their raw fields.
+ */
+function parseClaudeUsage(
+  record: Record<string, unknown>,
+): TokenUsage | null {
+  const direct = parseTokenUsage(record.usage);
+  if (direct) return direct;
+  if (!isRecord(record.modelUsage)) return null;
+  const perModel: TokenUsage[] = [];
+  for (const value of Object.values(record.modelUsage)) {
+    if (!isRecord(value)) continue;
+    const usage = parseTokenUsage(value);
+    if (usage) perModel.push(usage);
+  }
+  return sumTokenUsage(perModel);
+}
+
 function buildPrompt(input: AgentStartInput): string {
   return [
     input.briefing ?? "",
@@ -355,10 +499,14 @@ function buildPrompt(input: AgentStartInput): string {
     .join("\n\n");
 }
 
-/** The fields the acceptance and transient-retry logic needs from a result. */
+/** The fields the acceptance, failure and cost logic needs from a result. */
 interface ClaudeResult {
   is_error?: boolean;
   result?: string;
+  /** Parsed token usage; null when the record carried none. */
+  usage: TokenUsage | null;
+  /** `total_cost_usd` as emitted by the CLI; null when absent or malformed. */
+  totalCostUsd: number | null;
 }
 
 interface ClaudeRunResult {
@@ -367,6 +515,12 @@ interface ClaudeRunResult {
   stderr: string;
   /** Final `type: "result"` record, when the provider emitted one. */
   result?: ClaudeResult;
+  /** True when the adapter's wall-clock timeout fired. */
+  timedOut: boolean;
+  /** Terminating signal, when the child was killed. */
+  signal: NodeJS.Signals | null;
+  /** Bounded text from provider `error` records, when any. */
+  errorText?: string;
 }
 
 type ProgressEmitter = (draft: {
@@ -381,6 +535,8 @@ interface StreamContext {
   /** tool_use id → tool name, so tool results carry a readable label. */
   toolNames: Map<string, string>;
   onResult: (record: ClaudeResult) => void;
+  /** Bounded provider error text; never a raw payload. */
+  onProviderError: (text: string) => void;
 }
 
 function runClaude(opts: {
@@ -441,6 +597,7 @@ function runClaude(opts: {
     let recordsSinceHeartbeat = 0;
     let lastProviderRecordAt = Date.now();
     let lastRecordLabel = "";
+    let providerErrorText = "";
     const context: StreamContext = {
       emit: opts.emit,
       toolNames: new Map(),
@@ -456,6 +613,9 @@ function runClaude(opts: {
           message: failed ? "worker failed" : "worker completed",
           ...(text ? { detail: text } : {}),
         });
+      },
+      onProviderError: (text) => {
+        providerErrorText = boundFailureText(text, 2_000);
       },
     };
 
@@ -549,7 +709,7 @@ function runClaude(opts: {
       cleanup();
       reject(error);
     });
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       if (settled) return;
       settled = true;
       cleanup();
@@ -569,7 +729,15 @@ function runClaude(opts: {
           message: `provider exited with code ${exitCode}`,
         });
       }
-      resolvePromise({ code: exitCode, stdout, stderr, result });
+      resolvePromise({
+        code: exitCode,
+        stdout,
+        stderr,
+        result,
+        timedOut,
+        signal,
+        ...(providerErrorText ? { errorText: providerErrorText } : {}),
+      });
     });
   });
 }
@@ -585,12 +753,7 @@ function handleClaudeRecord(
     (type === undefined &&
       ("is_error" in record || typeof record.result === "string"))
   ) {
-    context.onResult({
-      ...(typeof record.is_error === "boolean"
-        ? { is_error: record.is_error }
-        : {}),
-      ...(typeof record.result === "string" ? { result: record.result } : {}),
-    });
+    context.onResult(toClaudeResult(record));
     return;
   }
 
@@ -672,6 +835,7 @@ function handleClaudeRecord(
       message: "provider error",
       ...(detail ? { detail } : {}),
     });
+    if (detail) context.onProviderError(detail);
   }
 }
 
@@ -795,12 +959,7 @@ function parseClaudeJson(stdout: string): ClaudeResult | undefined {
     ) {
       return undefined;
     }
-    return {
-      ...(typeof value.is_error === "boolean"
-        ? { is_error: value.is_error }
-        : {}),
-      ...(typeof value.result === "string" ? { result: value.result } : {}),
-    };
+    return toClaudeResult(value);
   } catch {
     return undefined;
   }
