@@ -5,6 +5,11 @@ import type {
   AgentStartInput,
   WorkerProgressEvent,
 } from "../agents/types.js";
+import {
+  appendTaskExtensionRecord,
+  parseTaskExtensionRecord,
+  type TaskExtensionRecord,
+} from "../agents/continuation.js";
 import { auditPathScope } from "../agents/path-scope.js";
 import type { Verifier } from "../verification/verifier.js";
 import {
@@ -41,6 +46,13 @@ export interface LoopOptions {
    * adapter's task/session-scoped event; the batch owns any persistence.
    */
   onProgress?: (event: WorkerProgressEvent) => void;
+  /**
+   * Persist one deadline grant before the worker adapter may extend its live
+   * timer. A thrown/rejected callback denies the grant.
+   */
+  onExtension?: (
+    extension: TaskExtensionRecord,
+  ) => void | Promise<void>;
 }
 
 export interface LoopResult {
@@ -63,6 +75,8 @@ export interface LoopResult {
    * These records are observational and never grant acceptance.
    */
   pathAudits: PathAuditRecord[];
+  /** Deadline grants whose persistence callback completed. */
+  extensions: TaskExtensionRecord[];
 }
 
 function setStatus(
@@ -113,6 +127,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
    */
   const attemptCosts: CostTruth[] = [];
   const pathAudits: PathAuditRecord[] = [];
+  let extensions: TaskExtensionRecord[] = [];
 
   while (true) {
     await updateLedger(ledgerPath, (ledger) => {
@@ -121,13 +136,32 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
       appendEvent(record, "implement.start", `attempt=${attempt}`);
     });
 
+    const onExtension = opts.onExtension
+      ? async (extension: TaskExtensionRecord): Promise<void> => {
+          const parsed = parseTaskExtensionRecord(extension);
+          if (!parsed) {
+            throw new Error("worker emitted an invalid deadline extension");
+          }
+          // Validate bounds/conflicts before persistence. Publish the grant to
+          // the loop only after the durable callback resolves.
+          const next = appendTaskExtensionRecord(extensions, parsed);
+          await opts.onExtension!(parsed);
+          extensions = next;
+        }
+      : undefined;
     const { sessionId } = await worker.start({
       contract,
       attempt,
       priorFailure,
       ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
+      ...(onExtension ? { onExtension } : {}),
     });
     const agentResult = await worker.collect(sessionId);
+    for (const extension of agentResult.extensions ?? []) {
+      const parsed = parseTaskExtensionRecord(extension);
+      if (!parsed) continue;
+      extensions = appendTaskExtensionRecord(extensions, parsed);
+    }
     // Fail closed on malformed adapter observations: an unusable record is
     // omitted (cost becomes missing), never guessed at.
     const parsedCost = agentResult.cost
@@ -199,7 +233,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         record.cost = aggregateCostTruth(attemptCosts);
         appendEvent(record, "verdict", record.reason);
       });
-      return finish(record, ledgerPath, pathAudits);
+      return finish(record, ledgerPath, pathAudits, extensions);
     }
 
     await updateLedger(ledgerPath, (ledger) => {
@@ -224,7 +258,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         delete record.failure;
         appendEvent(record, "verdict", record.reason);
       });
-      return finish(record, ledgerPath, pathAudits);
+      return finish(record, ledgerPath, pathAudits, extensions);
     }
 
     const exhausted = await updateLedger(ledgerPath, (ledger) => {
@@ -259,7 +293,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
     });
 
     if (exhausted) {
-      return finish(record, ledgerPath, pathAudits);
+      return finish(record, ledgerPath, pathAudits, extensions);
     }
     priorFailure = {
       attempt,
@@ -273,6 +307,7 @@ function finish(
   record: LedgerTaskRecord,
   ledgerPath: string,
   pathAudits: PathAuditRecord[],
+  extensions: TaskExtensionRecord[],
 ): LoopResult {
   return {
     taskId: record.taskId,
@@ -292,6 +327,10 @@ function finish(
       ...audit,
       changedPaths: [...audit.changedPaths],
       outsideWritePaths: [...audit.outsideWritePaths],
+    })),
+    extensions: extensions.map((extension) => ({
+      ...extension,
+      healthyEvidence: [...extension.healthyEvidence],
     })),
   };
 }

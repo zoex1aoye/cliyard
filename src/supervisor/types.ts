@@ -8,6 +8,7 @@
  */
 import type { TaskStatus } from "../core/status.js";
 import type { CostTruth, FailureRecord } from "../failures.js";
+import type { TaskExtensionRecord } from "../agents/continuation.js";
 
 export const RUN_MANIFEST_VERSION = 1 as const;
 export const ACTIVE_RUN_VERSION = 1 as const;
@@ -74,6 +75,11 @@ export interface RunTaskState {
    * task. Older manifests may omit this field.
    */
   pathAudits?: PathAuditRecord[];
+  /**
+   * Durable deadline grants, appended before the worker can extend its live
+   * timer. Older manifests omit this field.
+   */
+  extensions?: TaskExtensionRecord[];
 }
 
 /** A rejected attempt whose worktree still validates for reuse. */

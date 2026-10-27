@@ -1,5 +1,6 @@
 import type { TaskContract } from "../contracts/schema.js";
 import type { CostTruth, FailureRecord } from "../failures.js";
+import type { TaskExtensionRecord } from "./continuation.js";
 
 export type AgentAdapterId = "mock" | "claude" | "codex" | "codebuddy";
 
@@ -106,6 +107,13 @@ export interface AgentStartInput {
    * a no-op: progress can never block or fail a worker attempt.
    */
   onProgress?: (event: WorkerProgressEvent) => void;
+  /**
+   * Durable deadline-grant sink. The adapter awaits this callback before it
+   * reschedules a live child's timer; a rejection denies the grant.
+   */
+  onExtension?: (
+    extension: TaskExtensionRecord,
+  ) => void | Promise<void>;
 }
 
 export interface AgentResult {
@@ -136,6 +144,8 @@ export interface AgentResult {
    * non-authoritative; unavailable cost is never coerced to zero.
    */
   cost?: CostTruth;
+  /** Deadline grants persisted during this worker attempt. */
+  extensions?: TaskExtensionRecord[];
 }
 
 export interface AgentAdapter {
