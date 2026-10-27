@@ -3,8 +3,8 @@
 > Date: 2026-10-27
 >
 > Environment: macOS (Darwin 27.0.0), Node `v20.20.2`, npm `10.8.2`,
-> cliyard HEAD `ac9dc8d` (failure-cost-hardening-docs merged; this evidence
-> correction is uncommitted).
+> cliyard failure/cost integration merged through `73c46a5`; this evidence
+> includes the post-run self-host correction.
 >
 > Scope: the shared failure/cost shapes, the classifier and parsers, the
 > Claude/Codex adapter observations, closed-loop aggregation, durable

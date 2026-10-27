@@ -58,7 +58,8 @@ Implemented correction on the integration branch:
 - bounded provider detail and non-authoritative cost truth.
 
 Status before merge: implemented and independently tested, not yet merged into
-the current branch.
+the current branch at the time of the run. It was merged after independent
+review.
 
 ### 2.2 First dispatch is invisible to the queue projection
 
@@ -146,3 +147,6 @@ P1: replace static task estimate numbers with telemetry-backed estimation
 
 The estimation problem is specified separately in
 [task-estimation-v1.md](task-estimation-v1.md).
+
+Budget continuation and live deadline extension are specified in
+[task-continuation-and-deadline-v0.md](task-continuation-and-deadline-v0.md).

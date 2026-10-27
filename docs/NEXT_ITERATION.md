@@ -61,6 +61,16 @@
 > 下一步是 CLI + 模型执行组合路由。证据见
 > [evidence/FAILURE_COST_TRUTH.md](evidence/FAILURE_COST_TRUTH.md)。
 >
+> **2026-10-28 合并后复核：** failure/cost integration 已合入；build 通过、
+> full suite 296/296。真实自举暴露三个待修缺口：首次 dispatch 期间 queue
+> 没有 run id；失败 attempt 可留下 writePaths 外的 editor 临时文件；预算和
+> 时长估计仍是静态启发式。下一步先补 queue run binding、每次 worker exit
+> 的 path audit，以及 health-gated budget continuation / deadline extension，
+> 再做 CLI + 模型路由。预算续跑与延时设计见
+> [task-continuation-and-deadline-v0.md](../design/task-continuation-and-deadline-v0.md)，
+> 遥测估算见 [task-estimation-v1.md](../design/task-estimation-v1.md)，缺陷
+> 汇总见 [selfhost-iteration-v0.md](../design/selfhost-iteration-v0.md)。
+>
 > 当前已完成能力仍不包含 daemon/后台服务、跨主机回收、浏览器证据、SQLite、
 > 有界并行准入和多父 integration/merge queue；其中 **CLI + 模型路由、有界
 > 并行派发和 EvidenceBundle 已升级为下一阶段目标**，不代表当前已经实现。

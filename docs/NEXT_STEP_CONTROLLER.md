@@ -29,6 +29,9 @@ The implementation order was revised after the competitive and entry review:
 ```text
 queue observe / status
   -> worker failure taxonomy + cost truth (implemented)
+  -> live first-run identity + failed-attempt path audit
+  -> healthy budget continuation + deadline extension
+  -> telemetry-backed task estimates
   -> CLI + model ExecutionProfile routing
   -> parallel Supervisor/queue architecture spike
   -> shared hierarchical admission broker with fixed limits
@@ -283,6 +286,10 @@ considered as an external process-lifecycle concern.
 | P0 | No stable client-neutral Control API | Current DSH plugin reads a batch ledger and starts its own monitor | DSH becomes a de facto entry dependency and cannot show complete authority state | versioned local API + SSE/NDJSON |
 | P0 | Provider failures are not machine-classified | Three documentation attempts ended after several minutes with only `worker failed`; no final `is_error` or budget classification was retained | Cannot distinguish budget, network, provider protocol or worker failure automatically | **Closed by failure/cost v0:** durable ten-category `FailureRecord` plus bounded final provider detail |
 | P0 | The default `$5` budget limit was discovered by repeated provider exits | The same docs task completed only after increasing budget to `$12` | Wasted attempts/time and nearly exhausted queue retry budget | **Closed by failure/cost v0:** `budget_exhausted` category; per-task `guardBudgetUsd` records the configured guard (not spend) |
+| P0 | First active queue dispatch has no bound run id | Real run showed `status=running`, `attempts=1`, but queue `run=null`; Supervisor held the actual run | Operator must leave the single control view; unsafe once multiple runs exist | Pass a preallocated run id into Supervisor start and bind it before worker execution |
+| P0 | Failed attempts can retain files outside frozen write scope | A budget-exhausted docs attempt left `NEXT_STEP_CONTROLLER.md.tmp...` in its reusable worktree | Retry may inherit non-contract artifacts; normal path gate was skipped by non-zero exit | Audit paths after every worker exit and re-audit reused worktrees before start |
+| P1 | Budget and time cannot be extended from healthy live state | Real tasks exhausted guards; current CLI exposes failure only at exit and the Supervisor has no extension control path | Operators retry a whole attempt and lose/reconstruct context | Same-session budget continuation after clean exhaustion; health-gated deadline extension; both preauthorized and audited |
+| P1 | Task estimates are static heuristics rather than telemetry | Estimated L tasks `$8 / 6–15 min`; real attempts exhausted `$10` or `$5` guards and several tasks needed continuation | Misleading budget/time expectations and poor admission inputs | [task-estimation-v1.md](../design/task-estimation-v1.md): LLM supplies complexity signals, controller calculates calibrated ranges |
 | P0 | Attempt maximum cannot be changed through an audited command | During recovery, `maxAttempts` was manually changed from 3 to 4 in `.cliyard/queue.json` | Operator recovery bypasses a first-class control-plane path | audited `extend-attempts` command |
 | P1 | Provider session restarts are not first-class UI state | One queue attempt moved to a new worker session id and appended to the same task event file | Requires inspecting raw JSONL to understand whether the worker revived | session-generation events and aggregate status |
 | P1 | `queue run --json` is terminal-only | It emits the final summary after dispatch finishes | External monitor cannot incrementally observe a long dispatch | event journal and/or streaming status |
