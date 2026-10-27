@@ -15,6 +15,7 @@ import { runEstimatePlanCli } from "./planner/estimate-cli.js";
 import { runArchitectCli } from "./architect/cli.js";
 import { runRuntimeDrillCli } from "./runtime/failure-drills.js";
 import { runSupervisorCli } from "./supervisor/cli.js";
+import { runQueueCli } from "./orchestration/cli.js";
 import type { PermissionIntent, WorkerId } from "./types.js";
 
 function usage(): never {
@@ -47,6 +48,14 @@ Usage:
   cliyard supervisor resume --repo <path> [--run <id>] [--worker claude|codex]
                            [--dry-run] [--retry-rejected] [--force]
   cliyard supervisor stop --repo <path> [--run <id>] [--force]
+  cliyard queue add <contracts.json> --repo <path> --id <queue-id>
+                    [--depends-on <id>]... [--worker claude|codex]
+                    [--model id] [--max-attempts n] [--plan-id id] [--json]
+  cliyard queue list --repo <path> [--json]
+  cliyard queue retry <queue-id> --repo <path> [--json]
+  cliyard queue cancel <queue-id> --repo <path> [--json]
+  cliyard queue run --repo <path> [--continue-on-blocked]
+                    [--max-dispatches n] [--json]
 
 Master (DeepSeek Harness plugin / local demo):
   npm run master-monitor
@@ -165,6 +174,12 @@ async function main(): Promise<void> {
   if (cmd === "supervisor") {
     // Let Node exit naturally so stdout is flushed before the process ends.
     process.exitCode = await runSupervisorCli(argv.slice(1));
+    return;
+  }
+
+  if (cmd === "queue") {
+    // Let Node exit naturally so stdout is flushed before the process ends.
+    process.exitCode = await runQueueCli(argv.slice(1));
     return;
   }
 

@@ -19,6 +19,7 @@
     "claude-batch": "tsx src/cli.ts claude-batch",
     "plan-dispatch": "tsx src/cli.ts plan-dispatch",
     "architect": "tsx src/cli.ts architect",
+    "queue": "tsx src/cli.ts queue",
     "estimate-plan": "tsx src/cli.ts estimate-plan",
     "runtime-drill": "tsx src/cli.ts runtime-drill",
     "master-dispatch": "node plugins/dsh-cliyard/lib/dispatch-cli.js",
