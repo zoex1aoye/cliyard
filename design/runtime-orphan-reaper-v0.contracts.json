@@ -1,0 +1,235 @@
+{
+  "planId": "runtime-orphan-reaper-v0",
+  "contracts": [
+    {
+      "taskId": "orphan-process-identity",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Add RuntimeOwner, RuntimeProcessIdentity, RuntimeRecoveryRecord and related optional manifest fields to runtime types. Implement a dependency-free process inspector for macOS/Linux that captures exact pid, pgid and OS-reported process start identity via ps, detects same-host process liveness, lists process-group members, and compares identities. Keep old runtime manifests readable by treating missing identity as unknown rather than guessing. Add tests for capture, alive/dead pids, group inspection, identity mismatch, and no-PID behavior."
+      ],
+      "nonGoals": [
+        "No manager changes",
+        "No supervisor changes",
+        "No reaper kill behavior",
+        "No cross-host probing"
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "design/runtime-orphan-reaper-v0.md",
+        "src/runtime/types.ts",
+        "src/runtime/manager.ts",
+        "src/runtime/ports.ts"
+      ],
+      "writePaths": [
+        "src/runtime/types.ts",
+        "src/runtime/process.ts",
+        "tests/runtime-process.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "55343487bd0e1782b76a69430f26f2c2f5af810d",
+      "verifyCommands": [
+        "test -f src/runtime/process.ts",
+        "grep -q 'RuntimeProcessIdentity' src/runtime/types.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "orphan-manager-identity",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Update RuntimeManager to persist owner pid/host, service pgid and exact process identity immediately after successful spawn, and retain that evidence through readiness and cleanup. Do not use a wall-clock timestamp as the OS start identity. Add tests that inspect persisted manifests before and after stop, including owner metadata, pid==pgid, process identity, start failures, and backwards-compatible optional fields."
+      ],
+      "nonGoals": [
+        "No reaper implementation",
+        "No supervisor CLI changes",
+        "No port allocator changes"
+      ],
+      "dependsOn": [
+        "orphan-process-identity"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "design/runtime-orphan-reaper-v0.md",
+        "src/runtime/types.ts",
+        "src/runtime/process.ts",
+        "src/runtime/manager.ts",
+        "tests/runtime-manager.test.ts"
+      ],
+      "writePaths": [
+        "src/runtime/manager.ts",
+        "tests/runtime-manager-identity.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "55343487bd0e1782b76a69430f26f2c2f5af810d",
+      "verifyCommands": [
+        "grep -q 'processIdentity' src/runtime/manager.ts",
+        "test -f tests/runtime-manager-identity.test.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "orphan-reaper-preflight",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Implement read-only orphan recovery preflight. Scan runtime manifests under .cliyard/runtime and correlate unfinished services with exact PortAllocator leases. Require same host, dead runtime owner, service pid==pgid, exact persisted process identity, and no competing manifest. Return per-runtime plans classified safe_to_reap, needs_human, or skip with detailed reasons; never signal a process, release a lease or mutate a manifest. Old manifests without identity must be needs_human when potentially active. Add tests for safe orphan, completed/foreign-host skips, missing identity, changed identity, lease mismatch, competing manifests, and a proof that preflight leaves process/lease/manifest unchanged."
+      ],
+      "nonGoals": [
+        "No process signals",
+        "No lease release",
+        "No manifest mutation",
+        "No supervisor CLI edits"
+      ],
+      "dependsOn": [
+        "orphan-manager-identity"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "design/runtime-orphan-reaper-v0.md",
+        "src/runtime/types.ts",
+        "src/runtime/process.ts",
+        "src/runtime/manager.ts",
+        "src/runtime/ports.ts",
+        "tests/runtime-manager-identity.test.ts"
+      ],
+      "writePaths": [
+        "src/runtime/reaper.ts",
+        "tests/runtime-reaper-plan.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "55343487bd0e1782b76a69430f26f2c2f5af810d",
+      "verifyCommands": [
+        "test -f src/runtime/reaper.ts",
+        "grep -q 'needs_human' src/runtime/reaper.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "orphan-reaper-execute",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Implement the destructive executor for preflight-approved orphan plans. Add a reaper lock for one reconciler. For safe_to_reap runtimes, SIGTERM proven service groups in reverse order, wait with bounded SIGKILL escalation, confirm each leased port is bindable, release only exact leases, and atomically append RuntimeRecoveryRecord with final cleanup state. Any uncertainty or cleanup failure must preserve evidence, mark cleanup failed/needs_human, and never report reaped. Add a real child-process E2E where a supervisor-like owner is SIGKILLed while a detached RuntimeManager service remains; also cover identity mismatch, lease mismatch, completed, foreign-host, concurrent reaper serialization, and group-remains-but-leader-dead needs_human."
+      ],
+      "nonGoals": [
+        "No re-planning heuristics",
+        "No daemon or periodic polling",
+        "No cross-host kill",
+        "No supervisor CLI edits"
+      ],
+      "dependsOn": [
+        "orphan-reaper-preflight"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "design/runtime-orphan-reaper-v0.md",
+        "src/runtime/types.ts",
+        "src/runtime/process.ts",
+        "src/runtime/reaper.ts",
+        "src/runtime/manager.ts",
+        "src/runtime/ports.ts",
+        "tests/runtime-reaper-plan.test.ts"
+      ],
+      "writePaths": [
+        "src/runtime/reaper-execute.ts",
+        "tests/runtime-reaper.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "55343487bd0e1782b76a69430f26f2c2f5af810d",
+      "verifyCommands": [
+        "test -f src/runtime/reaper-execute.ts",
+        "test -f tests/runtime-reaper.test.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "orphan-supervisor-wire",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Integrate reconciliation into the Supervisor CLI. Add a supervisor reap command with human and --json output. After supervisor start or resume acquires the repository lock and before creating/marking a run, call the reaper; fail closed if any candidate needs human review. Keep status read-only while exposing persisted recovery records. Add process-level CLI tests with a scratch repo that prove reap and resume behavior, output records, and that no batch starts when reconciliation fails closed."
+      ],
+      "nonGoals": [
+        "No status-triggered mutation",
+        "No background daemon",
+        "No changes to runtime reaper safety rules"
+      ],
+      "dependsOn": [
+        "orphan-reaper-execute"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "design/runtime-orphan-reaper-v0.md",
+        "src/runtime/reaper.ts",
+        "src/runtime/reaper-execute.ts",
+        "src/runtime/types.ts",
+        "src/supervisor/cli.ts",
+        "src/supervisor/store.ts",
+        "tests/supervisor-cli.test.ts"
+      ],
+      "writePaths": [
+        "src/supervisor/cli.ts",
+        "tests/supervisor-runtime-reaper.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "55343487bd0e1782b76a69430f26f2c2f5af810d",
+      "verifyCommands": [
+        "grep -q 'supervisor reap' src/supervisor/cli.ts",
+        "test -f tests/supervisor-runtime-reaper.test.ts",
+        "npm test",
+        "npm run build"
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "orphan-docs",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Document the Runtime orphan reaper safety rules, persisted identity fields, recovery report states, supervisor reap command, automatic start/resume reconciliation, process-level incident workflow, limitations and remaining cross-host/leader-dead gaps. Update RuntimeManager and NEXT_ITERATION and README with only measured test counts and actual implemented behavior. Include an incident checklist for preserving evidence before human intervention."
+      ],
+      "nonGoals": [
+        "No source changes",
+        "No claim of cross-host recovery",
+        "No claim of daemon-based cleanup"
+      ],
+      "dependsOn": [
+        "orphan-supervisor-wire"
+      ],
+      "readPaths": [
+        "README.md",
+        "docs/RUNTIME_MANAGER.md",
+        "docs/NEXT_ITERATION.md",
+        "design/runtime-orphan-reaper-v0.md",
+        "src/runtime/reaper-execute.ts",
+        "src/runtime/reaper.ts",
+        "src/supervisor/cli.ts"
+      ],
+      "writePaths": [
+        "docs/RUNTIME_ORPHAN_RECOVERY.md",
+        "docs/RUNTIME_MANAGER.md",
+        "docs/NEXT_ITERATION.md",
+        "README.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "55343487bd0e1782b76a69430f26f2c2f5af810d",
+      "verifyCommands": [
+        "test -f docs/RUNTIME_ORPHAN_RECOVERY.md",
+        "grep -q 'supervisor reap' docs/RUNTIME_ORPHAN_RECOVERY.md",
+        "npm run build"
+      ],
+      "maxRepairs": 0
+    }
+  ]
+}
