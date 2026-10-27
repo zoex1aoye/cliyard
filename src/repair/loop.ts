@@ -3,6 +3,7 @@ import type { TaskContract } from "../contracts/schema.js";
 import type {
   AgentAdapter,
   AgentStartInput,
+  WorkerProgressEvent,
 } from "../agents/types.js";
 import type { Verifier } from "../verification/verifier.js";
 import {
@@ -19,6 +20,11 @@ export interface LoopOptions {
   ledgerPath?: string;
   /** Log each transition to stdout */
   verbose?: boolean;
+  /**
+   * Forward live worker progress for every attempt. The callback receives the
+   * adapter's task/session-scoped event; the batch owns any persistence.
+   */
+  onProgress?: (event: WorkerProgressEvent) => void;
 }
 
 export interface LoopResult {
@@ -85,6 +91,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
       contract,
       attempt,
       priorFailure,
+      ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
     });
     const agentResult = await worker.collect(sessionId);
 
