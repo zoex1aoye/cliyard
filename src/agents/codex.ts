@@ -5,6 +5,10 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { collectChangedPaths } from "./git-paths.js";
+import {
+  createFailureRecord,
+  unavailableCostTruth,
+} from "../failures.js";
 import type {
   AgentAdapter,
   AgentCapability,
@@ -15,6 +19,8 @@ import type {
 export interface CodexWorkerOptions {
   /** Working directory (worktree path). Required for real runs. */
   cwd: string;
+  /** Default: `codex`. Overridable for deterministic fixture tests. */
+  binary?: string;
   model?: string;
   /** Extra args after `codex exec` (before prompt). */
   extraArgs?: string[];
@@ -34,22 +40,31 @@ interface Session {
 }
 
 function runCodex(
+  binary: string,
   cwd: string,
   model: string,
   prompt: string,
   extraArgs: string[],
   timeoutMs: number,
-): Promise<{ code: number; stdout: string; stderr: string }> {
+): Promise<{
+  code: number;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  signal: NodeJS.Signals | null;
+}> {
   return new Promise((resolvePromise, reject) => {
     const args = ["exec", "-m", model, ...extraArgs, prompt];
-    const child = spawn("codex", args, {
+    const child = spawn(binary, args, {
       cwd,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
     const timer = setTimeout(() => {
+      timedOut = true;
       child.kill("SIGTERM");
     }, timeoutMs);
     child.stdout.on("data", (d) => {
@@ -62,14 +77,21 @@ function runCodex(
       clearTimeout(timer);
       reject(err);
     });
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       clearTimeout(timer);
-      resolvePromise({ code: code ?? 1, stdout, stderr });
+      resolvePromise({
+        code: timedOut ? 124 : (code ?? 1),
+        stdout,
+        stderr,
+        timedOut,
+        signal,
+      });
     });
   });
 }
 
 export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
+  const binary = opts.binary ?? "codex";
   const model = opts.model ?? process.env.CLIYARD_CODEX_MODEL ?? "deepseek-v4-pro";
   const timeoutMs = opts.timeoutMs ?? 10 * 60_000;
   const sessions = new Map<string, Session>();
@@ -85,7 +107,7 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
       if (!opts.dryRun) {
         try {
           const which = await new Promise<number>((resolve) => {
-            const c = spawn("codex", ["--version"], { stdio: "ignore" });
+            const c = spawn(binary, ["--version"], { stdio: "ignore" });
             c.on("close", (code) => resolve(code ?? 1));
             c.on("error", () => resolve(1));
           });
@@ -173,11 +195,18 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
             exitCode: 1,
             touchedPaths: [],
             logTail: `[codex] cwd missing: ${opts.cwd}`,
+            failure: createFailureRecord({
+              exitCode: 1,
+              stage: "preflight",
+              code: "cwd_missing",
+              text: "worker cwd is missing",
+            }),
           };
         }
 
         try {
           const res = await runCodex(
+            binary,
             opts.cwd,
             model,
             prompt,
@@ -193,6 +222,14 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
             : changed.paths.length
               ? `\n[codex] changed: ${changed.paths.join(", ")}`
               : "\n[codex] changed: (none)";
+          const failed =
+            res.timedOut || res.code !== 0 || Boolean(changed.error);
+          const detail = [
+            res.stderr.trim(),
+            changed.error ? `git diff failed: ${changed.error}` : "",
+          ]
+            .filter(Boolean)
+            .join("; ");
           return {
             sessionId,
             exitCode: changed.error ? 1 : res.code,
@@ -200,13 +237,32 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
             logTail:
               (res.stdout + "\n" + res.stderr).trim().slice(-4000) +
               changedLog,
+            ...(failed
+              ? {
+                  failure: createFailureRecord({
+                    timedOut: res.timedOut,
+                    exitCode: res.code,
+                    signal: res.signal,
+                    timeoutMs,
+                    stage: "worker",
+                    ...(detail ? { messageDetail: detail } : {}),
+                  }),
+                }
+              : {}),
           };
         } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
           return {
             sessionId,
             exitCode: 1,
             touchedPaths: [],
-            logTail: `[codex] spawn error: ${e instanceof Error ? e.message : e}`,
+            logTail: `[codex] spawn error: ${message}`,
+            failure: createFailureRecord({
+              spawnFailed: true,
+              stage: "spawn",
+              code: "spawn_error",
+              messageDetail: `spawn error: ${message}`,
+            }),
           };
         }
       })();
@@ -218,7 +274,18 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
     async collect(sessionId: string): Promise<AgentResult> {
       const s = sessions.get(sessionId);
       if (!s) throw new Error(`unknown codex session: ${sessionId}`);
-      if (!s.result) s.result = await s.promise;
+      if (!s.result) {
+        const result = await s.promise;
+        s.result = result.cost
+          ? result
+          : {
+              ...result,
+              cost: unavailableCostTruth({
+                sessionId,
+                note: "codex CLI exposes no token or cost usage",
+              }),
+            };
+      }
       return s.result;
     },
 
