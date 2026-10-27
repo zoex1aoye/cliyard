@@ -3,6 +3,11 @@
 > Revision: chained-read-context-v0
 >
 > Scope: validate worker read context against the pinned contracts base
+>
+> Status: implemented and measured (2026-10-27). Evidence:
+> [docs/evidence/CHAINED_READ_CONTEXT.md](../docs/evidence/CHAINED_READ_CONTEXT.md).
+> The "Current gap" section records the pre-fix behavior; the pinned-base check
+> described here is now the implemented preflight.
 
 ## Current gap
 
@@ -73,6 +78,26 @@ whether a tracked path exists in a task worktree.
    downstream task's explicit `readPaths` and complete through the real
    Supervisor and Claude Code + DeepSeek path.
 8. Existing contract-backed behavior and all prior tests remain green.
+
+## Implementation status
+
+Implemented 2026-10-27. `validateReadContexts` receives the contracts' resolved
+shared base and proves each non-exempt path with
+`git cat-file -e <base>:<path>`; the control checkout is consulted only to keep
+the distinct untracked-context error. `.`, a genuinely missing optional
+`AGENTS.md` and task-produced paths keep their existing exemptions. A file
+tracked at current `HEAD` but absent at the pinned base is rejected.
+
+The pre-fix false negative was measured earlier for a real chain. The fix was
+measured with focused tests and one real Claude Code + DeepSeek two-item chain
+whose downstream task declared `foundation.txt` in `readPaths`. That chain
+completed 2/2 in 13.953 s, captured the live downstream worktree at the
+upstream `integrationHead` with `foundation.txt` present and `upper.txt`
+absent, recorded the worker reading `foundation.txt` from that worktree, and
+proved the upstream head is an ancestor of the downstream head. Acceptance
+items 1-7 are measured; item 8 is measured by the full suite (240/240) and
+`npm run build` exit `0`. See the evidence document for IDs, hashes, commands
+and limits. This is one local run, not a CI or flake-rate claim.
 
 ## Non-goals
 
