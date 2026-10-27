@@ -40,7 +40,7 @@ export interface ClaudeWorkerOptions {
   maxBudgetUsd?: number;
   maxTransientRetries?: number;
   /**
-   * Emit a heartbeat after this much provider silence.
+   * Emit one heartbeat per this interval while the child is alive.
    * Default: CLIYARD_CLAUDE_HEARTBEAT_MS or 15000ms.
    */
   heartbeatMs?: number;
@@ -433,7 +433,14 @@ function runClaude(opts: {
     let resultEmitted = false;
     let timedOut = false;
     let settled = false;
-    let lastProviderEventAt = Date.now();
+    /**
+     * Provider JSON records since the previous heartbeat, including records
+     * (`system/thinking_tokens`, etc.) that map to no progress event. A
+     * bounded count keeps a chatty provider from producing an event per token.
+     */
+    let recordsSinceHeartbeat = 0;
+    let lastProviderRecordAt = Date.now();
+    let lastRecordLabel = "";
     const context: StreamContext = {
       emit: opts.emit,
       toolNames: new Map(),
@@ -463,19 +470,42 @@ function runClaude(opts: {
         return;
       }
       if (!isRecord(parsed)) return;
+      // Any complete provider record counts as activity, even when it maps to
+      // no visible event (notably `system/thinking_tokens`).
+      lastProviderRecordAt = Date.now();
+      recordsSinceHeartbeat += 1;
+      lastRecordLabel = describeProviderRecord(parsed);
       handleClaudeRecord(parsed, context);
     };
 
+    // A provider can stream only unmapped records while the worker is alive.
+    // Emit one bounded heartbeat per interval so status never mistakes that
+    // traffic for silence; never emit one event per token.
     const heartbeatTimer = setInterval(() => {
-      const idleMs = Date.now() - lastProviderEventAt;
-      if (idleMs < opts.heartbeatMs) return;
+      // The result record already ended the observable run; a heartbeat after
+      // it would replace progress/ending in status with a weaker observation.
+      if (resultEmitted) return;
+      if (recordsSinceHeartbeat > 0) {
+        const count = recordsSinceHeartbeat;
+        recordsSinceHeartbeat = 0;
+        opts.emit({
+          type: "heartbeat",
+          phase: "thinking",
+          message: "provider active",
+          detail: `${count} record${count === 1 ? "" : "s"} since last heartbeat${
+            lastRecordLabel ? `; last ${lastRecordLabel}` : ""
+          }`,
+        });
+        return;
+      }
+      const idleMs = Date.now() - lastProviderRecordAt;
       opts.emit({
         type: "heartbeat",
         phase: "waiting",
         message: "waiting for provider output",
-        detail: `idle ${Math.round(idleMs / 1000)}s`,
+        detail: `idle ${Math.max(1, Math.ceil(idleMs / 1000))}s`,
       });
-    }, Math.max(25, Math.floor(opts.heartbeatMs / 2)));
+    }, Math.max(25, Math.floor(opts.heartbeatMs)));
     heartbeatTimer.unref?.();
 
     const timeoutTimer = setTimeout(() => {
@@ -495,7 +525,6 @@ function runClaude(opts: {
 
     child.stdout?.on("data", (data) => {
       const text = String(data);
-      lastProviderEventAt = Date.now();
       stdout = appendBounded(stdout, text, MAX_RAW_STDOUT);
       pending += text;
       let newline = pending.indexOf("\n");
@@ -644,6 +673,18 @@ function handleClaudeRecord(
       ...(detail ? { detail } : {}),
     });
   }
+}
+
+/**
+ * A heartbeat-detail label for a provider record. Only the record type and
+ * subtype are surfaced (bounded below), never its message or token content.
+ */
+function describeProviderRecord(record: Record<string, unknown>): string {
+  const type = typeof record.type === "string" ? record.type.trim() : "";
+  const subtype =
+    typeof record.subtype === "string" ? record.subtype.trim() : "";
+  const label = [type, subtype].filter(Boolean).join("/");
+  return label ? label.slice(0, 48) : "record";
 }
 
 /** Only path/program metadata is surfaced; file contents and argv are not. */
