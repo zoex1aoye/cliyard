@@ -11,7 +11,7 @@
  * only reads it to classify an outcome and never rewrites it.
  */
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { runSupervisorCli } from "../supervisor/cli.js";
@@ -20,6 +20,7 @@ import {
   isProcessAlive,
   isSameHost,
   loadRunManifest,
+  RunNotFoundError,
 } from "../supervisor/store.js";
 import type { RunManifest, RunStatus } from "../supervisor/types.js";
 import {
@@ -55,7 +56,13 @@ export interface QueueSupervisorRequest {
   /** Snapshot of the persisted `running` item, after attempts increment. */
   item: QueueItem;
   action: QueueNextAction;
-  /** Run id to resume; present only when action is `resume`. */
+  /**
+   * Run id to resume; present only when action is `resume`.
+   *
+   * A start receives its preallocated id in `item.lastRunId`, which is persisted
+   * before this request is built. Keeping this field resume-only preserves the
+   * existing injected-runner contract.
+   */
   runId?: string;
   log?: (line: string) => void;
 }
@@ -75,6 +82,11 @@ export interface QueueSupervisorResult {
 export type QueueSupervisorRunner = (
   request: QueueSupervisorRequest,
 ) => QueueSupervisorResult | Promise<QueueSupervisorResult>;
+
+export interface CreateQueueSupervisorRunnerOptions {
+  /** Test/embedding seam; defaults to the real Supervisor CLI. */
+  runSupervisorCli?: typeof runSupervisorCli;
+}
 
 export interface QueueDispatchRecord {
   id: string;
@@ -145,11 +157,16 @@ export interface QueueRunOptions {
  * Supervisor failures are returned (not thrown) with whatever run evidence is
  * durable so the queue can persist an exact blocked reason.
  */
-export function createQueueSupervisorRunner(): QueueSupervisorRunner {
+export function createQueueSupervisorRunner(
+  options: CreateQueueSupervisorRunnerOptions = {},
+): QueueSupervisorRunner {
+  const runCli = options.runSupervisorCli ?? runSupervisorCli;
   return async (request) => {
     const { repoRoot, item, action } = request;
     const resumeRunId =
       action === "resume" ? (request.runId ?? item.lastRunId) : undefined;
+    const startRunId =
+      action === "start" ? (item.lastRunId ?? request.runId) : undefined;
     if (action === "resume" && !resumeRunId) {
       return {
         exitCode: 1,
@@ -169,6 +186,8 @@ export function createQueueSupervisorRunner(): QueueSupervisorRunner {
       };
     }
 
+    const dispatchRunId =
+      action === "resume" ? resumeRunId : startRunId;
     const args: string[] =
       action === "resume"
         ? [
@@ -186,6 +205,9 @@ export function createQueueSupervisorRunner(): QueueSupervisorRunner {
             contracts!.contractsPath,
             "--repo",
             repoRoot,
+            ...(startRunId !== undefined
+              ? ["--run-id", startRunId]
+              : []),
             "--worker",
             item.worker,
           ];
@@ -195,23 +217,26 @@ export function createQueueSupervisorRunner(): QueueSupervisorRunner {
     }
 
     const activeBefore =
-      action === "start" ? getActiveRunId(repoRoot) : undefined;
+      action === "start" && dispatchRunId === undefined
+        ? getActiveRunId(repoRoot)
+        : undefined;
     const lines: string[] = [];
     let exitCode = 1;
     let failure: string | undefined;
     try {
-      exitCode = await runSupervisorCli(args, {
+      exitCode = await runCli(args, {
         log: (line) => lines.push(line),
       });
     } catch (error) {
       failure = errorMessage(error);
     }
 
-    let runId = resumeRunId;
+    let runId = dispatchRunId;
     if (!runId) {
       runId = readSummaryRunId(lines.join("\n"));
       if (!runId) {
-        // A failed start may still have created a manifest before throwing.
+        // This fallback exists only for callers that do not provide the
+        // preallocated id. With an explicit id, active.json is never used.
         const activeAfter = getActiveRunId(repoRoot);
         if (activeAfter && activeAfter !== activeBefore) runId = activeAfter;
       }
@@ -526,11 +551,25 @@ async function dispatchItem(
 ): Promise<QueueDispatchRecord> {
   const action = item.nextAction;
   const resumeRunId = action === "resume" ? item.lastRunId : undefined;
+  const assignedRunId = resumeRunId ?? randomUUID();
+  let assignedManifestExisted = false;
+  if (action === "start") {
+    try {
+      loadRunManifest(repoRoot, assignedRunId);
+      assignedManifestExisted = true;
+    } catch {
+      /* a new id normally has no manifest */
+    }
+  }
 
-  // Persist running and the attempt before any supervisor work can start.
+  // Persist the exact run binding, running state and attempt before any
+  // supervisor work can start. A crash from here leaves an explicit id that
+  // the next invocation can reconcile against its RunManifest.
   const startedAt = now();
   item.status = "running";
   item.attempts += 1;
+  item.lastRunId = assignedRunId;
+  if (!item.runIds.includes(assignedRunId)) item.runIds.push(assignedRunId);
   delete item.reason;
   // From here on the RunManifest is the task authority; the queue never
   // duplicates or overrides a dispatched run's failure.
@@ -542,7 +581,7 @@ async function dispatchItem(
     type: "attempt.started",
     at: startedAt,
     itemId: item.id,
-    ...(resumeRunId !== undefined ? { runId: resumeRunId } : {}),
+    runId: assignedRunId,
     attempt: item.attempts,
     action,
     status: item.status,
@@ -551,7 +590,7 @@ async function dispatchItem(
     type: action === "resume" ? "run.resumed" : "run.started",
     at: startedAt,
     itemId: item.id,
-    ...(resumeRunId !== undefined ? { runId: resumeRunId } : {}),
+    runId: assignedRunId,
     attempt: item.attempts,
     action,
   });
@@ -576,28 +615,71 @@ async function dispatchItem(
   } catch (error) {
     result = {
       exitCode: 1,
-      ...(resumeRunId !== undefined ? { runId: resumeRunId } : {}),
+      runId: assignedRunId,
       reason: `supervisor runner failed: ${errorMessage(error)}`,
     };
   }
 
-  const runId = result.runId ?? resumeRunId;
-  if (runId) {
+  // The manifest is read-only evidence for classification and journal
+  // observations; the queue never rewrites it and never becomes its authority.
+  let runId: string | undefined = assignedRunId;
+  let manifest: RunManifest | undefined;
+  let assignedManifestError: unknown;
+  try {
+    manifest = loadRunManifest(repoRoot, assignedRunId);
+  } catch (error) {
+    assignedManifestError = error;
+  }
+  const assignedManifestMissing =
+    assignedManifestError instanceof RunNotFoundError;
+
+  let startBindingDiscard: "collision" | "missing-manifest" | undefined;
+  if (action === "start" && assignedManifestExisted) {
+    startBindingDiscard = "collision";
+    clearRunBinding(item, assignedRunId);
+    runId = undefined;
+    manifest = undefined;
+  }
+
+  // Compatibility for an injected runner that predates --run-id and reports
+  // a different id explicitly. Real queue dispatch always uses assignedRunId.
+  if (
+    startBindingDiscard === undefined &&
+    action === "start" &&
+    assignedManifestMissing &&
+    manifest === undefined &&
+    result.runId !== undefined &&
+    result.runId !== assignedRunId
+  ) {
+    clearRunBinding(item, assignedRunId);
+    runId = result.runId;
+    try {
+      manifest = loadRunManifest(repoRoot, runId);
+    } catch {
+      /* classified below */
+    }
+  }
+
+  // A start that did not create its preallocated manifest never established
+  // run authority. Remove the speculative binding so retry is a new start.
+  if (
+    startBindingDiscard === undefined &&
+    action === "start" &&
+    assignedManifestMissing &&
+    manifest === undefined &&
+    runId === assignedRunId
+  ) {
+    clearRunBinding(item, assignedRunId);
+    runId = undefined;
+    startBindingDiscard = "missing-manifest";
+  } else if (runId) {
     item.lastRunId = runId;
     if (!item.runIds.includes(runId)) item.runIds.push(runId);
   }
 
-  // The manifest is read-only evidence for classification and journal
-  // observations; the queue never rewrites it and never becomes its authority.
-  let manifest: RunManifest | undefined;
-  if (runId) {
-    try {
-      manifest = loadRunManifest(repoRoot, runId);
-    } catch {
-      /* reported as missing/ambiguous evidence below */
-    }
-  }
-  const manifestStatus = result.status ?? manifest?.status;
+  const manifestStatus = startBindingDiscard !== undefined
+    ? undefined
+    : (result.status ?? manifest?.status);
 
   const completed =
     result.exitCode === 0 && manifestStatus === "completed";
@@ -607,9 +689,28 @@ async function dispatchItem(
     delete item.reason;
   } else {
     item.status = "blocked";
-    item.reason =
-      result.reason ??
-      describeFailedDispatch(result.exitCode, manifestStatus, runId);
+    let reason = result.reason;
+    if (!reason) {
+      if (startBindingDiscard === "collision") {
+        reason =
+          "preallocated run id already had a manifest; retry from start";
+      } else if (
+        startBindingDiscard === "missing-manifest" &&
+        manifest === undefined &&
+        runId === undefined &&
+        result.exitCode === 0
+      ) {
+        reason =
+          "supervisor exited 0 without creating its preallocated RunManifest";
+      } else {
+        reason = describeFailedDispatch(
+          result.exitCode,
+          manifestStatus,
+          runId,
+        );
+      }
+    }
+    item.reason = reason;
   }
   item.nextAction = item.lastRunId ? "resume" : "start";
   item.updatedAt = finishedAt;
@@ -638,6 +739,11 @@ async function dispatchItem(
     status: item.status as "completed" | "blocked",
     ...(item.reason !== undefined ? { reason: item.reason } : {}),
   };
+}
+
+function clearRunBinding(item: QueueItem, runId: string): void {
+  if (item.lastRunId === runId) delete item.lastRunId;
+  item.runIds = item.runIds.filter((candidate) => candidate !== runId);
 }
 
 interface PreDispatchBlock {
@@ -1532,27 +1638,49 @@ function reconcileRunningItems(
     // A running item was dispatched, so the RunManifest owns its failure.
     delete item.failure;
 
-    const runId =
+    const attemptedRunId =
       item.lastRunId ?? item.runIds[item.runIds.length - 1] ?? undefined;
+    let boundRunId: string | undefined = attemptedRunId;
     // Default is fail-closed; every successful evidence branch reassigns it.
     let to: QueueItemStatus = "blocked";
     let reason: string | undefined;
 
-    if (!runId) {
+    if (!attemptedRunId) {
       to = "blocked";
       reason = "running item has no recorded run id";
     } else {
       let manifest: RunManifest | undefined;
       try {
-        manifest = loadRunManifest(repoRoot, runId);
+        manifest = loadRunManifest(repoRoot, attemptedRunId);
       } catch (error) {
         to = "blocked";
-        reason = `cannot reconcile run ${runId}: ${errorMessage(error)}`;
+        if (error instanceof RunNotFoundError) {
+          if (item.nextAction === "start") {
+            clearRunBinding(item, attemptedRunId);
+            boundRunId = undefined;
+            reason =
+              `run manifest not found for start attempt ${attemptedRunId}; ` +
+              "retry from start";
+          } else {
+            reason =
+              `cannot reconcile resumed run ${attemptedRunId}: ` +
+              errorMessage(error);
+          }
+        } else {
+          reason =
+            `cannot reconcile run ${attemptedRunId}: ${errorMessage(error)}`;
+        }
       }
       if (manifest) {
         const evidenceReason = isPlanBackedQueueItem(item)
-          ? planReconcileEvidence(repoRoot, item, byId, runId, manifest)
-          : contractEvidenceReason(item, runId, manifest);
+          ? planReconcileEvidence(
+              repoRoot,
+              item,
+              byId,
+              attemptedRunId,
+              manifest,
+            )
+          : contractEvidenceReason(item, attemptedRunId, manifest);
         if (evidenceReason !== undefined) {
           to = "blocked";
           reason = evidenceReason;
@@ -1569,18 +1697,18 @@ function reconcileRunningItems(
           if (ownerAlive === true) {
             to = "blocked";
             reason =
-              `run ${runId} is still owned by a live process ` +
+              `run ${attemptedRunId} is still owned by a live process ` +
               `(pid ${manifest.owner.pid} on ${manifest.owner.host})`;
           } else if (ownerAlive === null) {
             to = "blocked";
             reason =
-              `run ${runId} owner is on ${manifest.owner.host}; ` +
+              `run ${attemptedRunId} owner is on ${manifest.owner.host}; ` +
               "liveness cannot be proven from this host";
           } else if (item.attempts >= item.maxAttempts) {
             to = "blocked";
             reason =
               `attempt limit reached (${item.attempts}/${item.maxAttempts}) ` +
-              `while recovering interrupted run ${runId}`;
+              `while recovering interrupted run ${attemptedRunId}`;
           } else {
             to = "pending";
           }
@@ -1588,7 +1716,7 @@ function reconcileRunningItems(
           to = "blocked";
           reason =
             `attempt limit reached (${item.attempts}/${item.maxAttempts}) ` +
-            `after run ${runId} ended ${manifest.status}`;
+            `after run ${attemptedRunId} ended ${manifest.status}`;
         } else {
           // interrupted or blocked: Supervisor resume can retry non-accepted
           // work, so keep the existing run instead of starting a fresh one.
@@ -1599,9 +1727,9 @@ function reconcileRunningItems(
 
     const at = now();
     item.status = to;
-    if (runId) {
-      item.lastRunId = runId;
-      if (!item.runIds.includes(runId)) item.runIds.push(runId);
+    if (boundRunId) {
+      item.lastRunId = boundRunId;
+      if (!item.runIds.includes(boundRunId)) item.runIds.push(boundRunId);
     }
     if (to === "completed") {
       item.nextAction = item.lastRunId ? "resume" : "start";
@@ -1620,7 +1748,9 @@ function reconcileRunningItems(
       id: item.id,
       from: "running",
       to,
-      ...(runId !== undefined ? { runId } : {}),
+      ...(attemptedRunId !== undefined
+        ? { runId: attemptedRunId }
+        : {}),
       ...(reason !== undefined ? { reason } : {}),
     });
   }
