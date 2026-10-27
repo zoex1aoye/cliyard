@@ -5,10 +5,10 @@
 > Environment: macOS (Darwin 27.0.0), Node `v20.20.2`, npm `10.8.2`,
 > checkout HEAD `3093508`.
 >
-> Scope: one foreground Supervisor on one local git repository, a local
-> stream-json fixture provider, and one scratch runtime-drill root. This is a
-> checked-in summary of one local measurement. It is **not** a real
-> DeepSeek/Claude provider run, a CI result, a long-term flake rate, or a
+> Scope: one foreground Supervisor on one local git repository, fixture-based
+> continuity/progress measurements, one real Claude Code + DeepSeek smoke run,
+> and one scratch runtime-drill root. This is a checked-in summary of local
+> measurements. It is not a CI result, a long-term flake rate, or a
 > 24-hour/daemon claim.
 
 This document records only observed output. Raw scratch artifacts remained
@@ -60,7 +60,8 @@ after `tool_result`, and the adapter was configured with
 The production default remains 15000 ms.
 
 This fixture tests the adapter/CLI/supervisor path. It is not evidence about
-the real provider's timing, model behavior, cost, or output quality.
+the real provider's timing, model behavior, cost, or output quality. A separate
+real-provider smoke measurement is recorded in §4.1.
 
 The manual CLI runs used this environment; the fresh repository used its own
 log and counter paths:
@@ -381,6 +382,88 @@ renders the latest event without changing run state. Events are observational
 only: acceptance still came from the worker result plus verifier, and stale or
 malformed event files cannot change status (covered by the focused tests).
 
+### 4.1 Real Claude Code + DeepSeek self-host smoke
+
+After both implementation runs were merged, a separate scratch repository was
+created under the gitignored
+`.cliyard/live-progress-smoke/` directory. Its single task asked the real
+`claude-ds` / `deepseek-flash[1m]` worker to create a 21-byte file:
+
+```text
+CLiyard live progress
+```
+
+The exact command was:
+
+```bash
+CLIYARD_CLAUDE_MAX_BUDGET_USD=2 \
+CLIYARD_CLAUDE_HEARTBEAT_MS=500 \
+node --import tsx src/cli.ts supervisor start contracts.json \
+  --repo .cliyard/live-progress-smoke \
+  --worker claude --model 'deepseek-flash[1m]' --verbose
+```
+
+The first attempt run id was
+`c53163d7-fc16-46b0-b13a-52c7c336ce26`. It exited `1` and was correctly
+rejected because the natural-language goal ended with a period and the worker
+therefore wrote `CLiyard live progress.`. The persisted attempt had rejected
+status, a reusable worktree, and the real Claude cost was `$0.139976`.
+
+The retry used the new default reuse path:
+
+```bash
+CLIYARD_CLAUDE_MAX_BUDGET_USD=2 \
+CLIYARD_CLAUDE_HEARTBEAT_MS=200 \
+node --import tsx src/cli.ts supervisor resume \
+  --repo .cliyard/live-progress-smoke \
+  --run c53163d7-fc16-46b0-b13a-52c7c336ce26 \
+  --retry-rejected --worker claude \
+  --model 'deepseek-flash[1m]' --verbose
+```
+
+The observed dispatch line was:
+
+```text
+reuse attempt worktree live-progress-smoke → .../mvqm8q5e-live-progress-smoke
+```
+
+While the real worker was still running, a separate read-only status command
+returned `status: "running"`, `accepted: 0`, and:
+
+```json
+{
+  "taskId": "live-progress-smoke",
+  "event": {
+    "version": 1,
+    "source": "claude",
+    "taskId": "live-progress-smoke",
+    "type": "heartbeat",
+    "phase": "waiting",
+    "message": "waiting for provider output"
+  },
+  "ageMs": 21,
+  "stale": false
+}
+```
+
+The real event log contained `session.start`, heartbeats, `Read` tool start and
+result, `Write` tool start and result, assistant text, and result records. The
+retry saw the existing draft worktree, corrected the trailing period, passed
+the verifier, and was accepted with real Claude cost `$0.161518`.
+
+Final evidence:
+
+- task verdict: `accepted`;
+- `resultCommit`: `330975293d26d70bfd6f2c93ceaa8ff9a0881e06`;
+- `integrationHead`: `7fb45bb354906303300b8d691e01d0df0877dc8a`;
+- `smoke.txt`: 21 bytes, no trailing newline;
+- reusable attempts after acceptance: empty;
+- later status worker event: `result` / `ending`.
+
+This is a short real-provider smoke, not a long-duration or flake-rate claim. It
+does establish that the real Claude Code JSONL stream is parsed into live
+events and that default rejected-attempt reuse works with DeepSeek.
+
 ## 5. Timed-out drill child recovery
 
 The public runtime-drill CLI does not expose a child timeout. The measurement
@@ -579,9 +662,11 @@ counts are the ones above.
 - **Heartbeat is a silence observation.** It shows the adapter is still
   waiting for provider output; it does not prove provider health, progress
   quality, or eventual success.
-- **Fixture evidence.** The live progress and continuity measurements used a
-  local stream-json fixture, not a real DeepSeek/Claude provider. Provider
-  timing, retries, cost and output behavior were not measured here.
+- **Provider evidence is a short smoke.** Most continuity/progress measurements
+  use a local stream-json fixture. The additional real Claude Code + DeepSeek
+  smoke (§4.1) lasted single-digit seconds and cost about `$0.30` across the
+  rejected and accepted attempts. It does not establish long-run provider
+  timing, retries, failure rates or output quality.
 - **Drill timeout hook is test-only.** The public CLI does not expose
   `childTimeoutMs`; abnormal-path evidence uses the documented test-only
   environment hook.
