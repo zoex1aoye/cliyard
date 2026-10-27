@@ -19,6 +19,7 @@
     "claude-batch": "tsx src/cli.ts claude-batch",
     "plan-dispatch": "tsx src/cli.ts plan-dispatch",
     "estimate-plan": "tsx src/cli.ts estimate-plan",
+    "runtime-drill": "tsx src/cli.ts runtime-drill",
     "master-dispatch": "node plugins/dsh-cliyard/lib/dispatch-cli.js",
     "master-monitor": "node plugins/dsh-cliyard/lib/monitor-cli.js",
     "glass-dry": "tsx src/cli.ts codex-batch examples/glass-parallel.contracts.json --repo ../ui-prototype --dry-run",
