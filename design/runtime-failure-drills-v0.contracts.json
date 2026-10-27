@@ -42,7 +42,7 @@
         "package.json"
       ],
       "sharedResources": [],
-      "baseCommit": "23607f5ab2adcc58f18f30c4c3ed20b35c715171",
+      "baseCommit": "03671a44310924f8052871ac9311e166ba9dec7a",
       "verifyCommands": [
         "npx tsx --test tests/runtime-failure-drills.test.ts",
         "npm test",
@@ -85,7 +85,7 @@
         "docs/evidence/RUNTIME_FAILURE_DRILLS.md"
       ],
       "sharedResources": [],
-      "baseCommit": "23607f5ab2adcc58f18f30c4c3ed20b35c715171",
+      "baseCommit": "03671a44310924f8052871ac9311e166ba9dec7a",
       "verifyCommands": [
         "npx tsx src/cli.ts runtime-drill --out \".cliyard/runtime-drills/doc-check-$(date +%s)-$$\" --port-base 22710 --json",
         "npx tsx --test tests/runtime-failure-drills.test.ts",
