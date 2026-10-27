@@ -1135,11 +1135,13 @@ Task Architect **never freezes contracts or dispatches automatically** — the
 Plan is an artifact for human review, and the later compiler/freeze and
 Supervisor start remain manual, explicit actions. The **foreground
 orchestration queue** (the Orchestration queue section) is now implemented over those explicit runs;
-it is still explicit-approval, sequential and not a daemon. The **next step is
-a supervised foreground long-run controller/daemon decision** after Plan-backed
-chain semantics are accepted. Daemon/background service, cross-host recovery,
-SQLite manifests, browser evidence, parallel admission and automatic `main`
-merge remain non-goals.
+it is still explicit-approval, sequential and not a daemon. Before a
+supervised foreground long-run controller, the control plane needs a unified
+read-only queue status projection, queue-level event journal, bounded provider
+failure taxonomy and audited attempt-policy changes. The ordered plan is
+[NEXT_STEP_CONTROLLER.md](NEXT_STEP_CONTROLLER.md). Daemon/background service,
+cross-host recovery, SQLite manifests, browser evidence, parallel admission
+and automatic `main` merge remain non-goals.
 
 ## 12. Related documents
 

@@ -1,4 +1,4 @@
-# 下一迭代：受监督的前台长时控制器/daemon 决策（Plan-backed chain 已完成）
+# 下一迭代：观测底座 → 前台长时控制器（Plan-backed chain 已完成）
 
 > 日期：2026-10-27（更新）
 >
@@ -25,6 +25,12 @@
 > 下一步：在 **Plan-backed chain 语义被实测证明并接受后**，对 **受监督的
 > 前台长时运行控制器/daemon 做出决策**。本轮不实现 daemon，也不声称 24
 > 小时无人值守。
+>
+> **2026-10-27 后续记录：** 自举运行暴露了 progress/status 聚合、provider
+> 失败分类、预算可见性和 attempts 变更审计缺口。执行顺序调整为
+> **`queue status` 观测底座 → failure taxonomy → audited retry policy →
+> foreground controller → bounded soak → daemon 决策**。详细记录见
+> [NEXT_STEP_CONTROLLER.md](NEXT_STEP_CONTROLLER.md)。
 >
 > 明确非目标保持不变：daemon/后台服务、跨主机回收、浏览器证据、SQLite、
 > 并行准入调度、多父 integration/merge queue、自动 push 或自动合入 main。
@@ -635,14 +641,22 @@ Architect v0、**Foreground Orchestration Queue v0**、
 下一具体步骤是在 **Plan-backed chain 语义被实测证明并接受后**，对
 **受监督的前台长时运行控制器/daemon 做出决策**：
 
-1. **受监督的前台长时控制器/daemon（下一步决策，未实现）**
+1. **先补运行观测与失败分类（下一步 P0，未实现）**
+   - 自举运行需要人工拼接 `queue.json`、RunManifest、worker-events、ledger
+     和 Git refs，才能判断当前 item、task、worker session 和失败阶段；
+   - 因此先实现只读 `queue status` 聚合、queue-level event journal、bounded
+     provider failure taxonomy 与可审计的 attempts 变更；
+   - progress/heartbeat/controller state 仍然只是观察信息，不是验收权威。
+2. **受监督的前台长时控制器（观测底座之后，未实现）**
    - queue v0 已证明前台、显式批准、顺序、可恢复的队列语义，Plan-backed
      v0 已证明单条线性 base 串联语义；Chained Read Context v0 已证明
      downstream 显式 `readPaths` 按同一 pinned base 验证；
-   - 下一步先做独立的设计与验收决策：是否需要、以及如何做一个受监督的
-     前台长时控制器/daemon；
+   - controller 每轮从磁盘 rehydrate，不依赖 LLM 长上下文；空闲时释放
+     queue lock，并等待新批准 item 或显式 retry；
+   - 先证明 foreground watch、controller lock/heartbeat、clean shutdown 和
+     bounded soak，再做 daemon/launchd/systemd 决策；
    - 本轮不把它写成已完成能力，也不声称 24 小时无人值守。
-2. **显式批准的人类门禁保持不变**
+3. **显式批准的人类门禁保持不变**
    - Task Architect 只产出 human-reviewable Plan，不自动冻结契约、不自动
      派发、不 merge、不 push；
    - 路径仍是 review/edit Plan → 既有 plan compiler/freeze → 显式
@@ -650,7 +664,7 @@ Architect v0、**Foreground Orchestration Queue v0**、
    - queue 只接受显式加入的 frozen contracts 或显式加入的已批准 Plan；
      不自动批准、冻结或创建契约/Plan；
    - Task Architect 和 queue 都不是 contract/run authority。
-3. **queue v0 的前台限制不扩展**
+4. **queue v0 的前台限制不扩展**
    - 一次一个 item；不新增并行准入；
    - **contract-backed** 依赖仍只决定派发/失败传播，不串联 integration
      branch/base；**Plan-backed** 已实现单条线性依赖的 base 串联，但本迭代
@@ -841,6 +855,13 @@ Chained Read Context v0（已完成）：
 
 56. [未完成] 在 **Plan-backed chain 语义被接受后**，对受监督的前台长时运行
     控制器/daemon 做出决策（独立设计与验收）。
+57. [未完成] 先实现只读 `queue status` 聚合与 queue event journal，避免继续
+    人工拼接 queue、RunManifest、worker events、ledger 和 Git refs。
+58. [未完成] 对 provider 失败做 bounded taxonomy（budget、timeout、transient、
+    auth、protocol、worker exit、verifier rejection、policy block、unknown），
+    保留 machine-readable reason。
+59. [未完成] 增加 audited attempt-policy 操作，禁止依赖手工修改
+    `.cliyard/queue.json` 扩大 attempts。
 
 ## 5. 下一步顺序
 
@@ -887,9 +908,11 @@ Chained Read Context v0（已完成）：
             design/chained-read-context-v0.md /
             docs/evidence/PLAN_BACKED_CHAIN.md /
             docs/evidence/CHAINED_READ_CONTEXT.md
-16. 下一步：在 Plan-backed chain 语义被接受后，对受监督的前台长时运行
-            控制器/daemon 做出决策（独立设计与验收）
-17. 不重复已完成切片；不新增 daemon、跨主机、浏览器证据、SQLite、准入调度、
+16. 下一步 P0：queue status/event journal、worker failure taxonomy、
+            audited attempt-policy；见 docs/NEXT_STEP_CONTROLLER.md
+17. 观测底座之后再实现 foreground controller、bounded soak，最后才决策
+            daemon/launchd/systemd
+18. 不重复已完成切片；不新增 daemon、跨主机、浏览器证据、SQLite、准入调度、
     provider 会话续跑、自动 worktree GC、自动契约冻结/自动派发或 24 小时声明
 ```
 
