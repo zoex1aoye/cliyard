@@ -652,11 +652,11 @@ sequentially in this worktree:
 
 | Run | Result | Test-runner duration |
 |-----|--------|----------------------|
-| 1 | 164/164 pass | 8.44 s |
-| 2 | 164/164 pass | 8.45 s |
-| 3 | 164/164 pass | 8.17 s |
-| 4 | 164/164 pass | 8.29 s |
-| 5 | 164/164 pass | 8.16 s |
+| 1 | 164/164 pass | 8.39 s |
+| 2 | 164/164 pass | 8.16 s |
+| 3 | 164/164 pass | 8.04 s |
+| 4 | 164/164 pass | 8.14 s |
+| 5 | 164/164 pass | 8.25 s |
 
 No flakes were observed in these five runs. This is local macOS evidence, not a
 long-term flake rate or CI claim.

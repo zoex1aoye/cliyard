@@ -525,8 +525,8 @@ npm test        → 164/164 pass, five consecutive runs
 ```
 
 Each of the five runs was a separate `npm test` process, run sequentially in
-this worktree. Test-runner durations were 8.44 s, 8.45 s, 8.17 s, 8.29 s, and
-8.16 s; no flakes were observed. This is local evidence, not a long-term flake
+this worktree. Test-runner durations were 8.39 s, 8.16 s, 8.04 s, 8.14 s, and
+8.25 s; no flakes were observed. This is local evidence, not a long-term flake
 rate or CI claim.
 
 Runtime and recovery-focused suites (78 tests across 12 files):
