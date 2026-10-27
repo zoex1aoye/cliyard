@@ -1,0 +1,42 @@
+{
+  "taskId": "runtime-verifier-smoke",
+  "version": 1,
+  "frozen": true,
+  "goals": [
+    "Serve a finite /health endpoint from the task worktree using the port leased by RuntimeManager",
+    "Gate acceptance on the leased URL: verifyCommands fetch CLIYARD_WEB_URL/health and require HTTP 200 with { ok: true }"
+  ],
+  "nonGoals": [
+    "Do not start a long-lived dev server; the Verifier owns the service lifecycle",
+    "Do not add browser, screenshot, or accessibility checks",
+    "Do not commit or push"
+  ],
+  "dependsOn": [],
+  "readPaths": ["."],
+  "writePaths": ["runtime-smoke.txt"],
+  "sharedResources": [],
+  "baseCommit": "HEAD",
+  "verifyCommands": [
+    "node -e \"const assert=require('node:assert/strict');const base=process.env.CLIYARD_WEB_URL;assert.ok(base,'CLIYARD_WEB_URL was not injected');assert.equal(base,process.env.WEB_URL,'WEB_URL alias mismatch');fetch(base+'/health').then(async (res)=>{assert.equal(res.status,200);const body=await res.json();assert.equal(body.ok,true);assert.equal(body.cwd,process.cwd(),'service cwd is not the task worktree');console.log('runtime verifier OK: '+base);}).catch((error)=>{console.error(error);process.exit(1);});\""
+  ],
+  "runtime": {
+    "services": [
+      {
+        "name": "web",
+        "command": [
+          "node",
+          "-e",
+          "const http=require('node:http');const port=Number(process.env.PORT);const server=http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({ok:true,pid:process.pid,cwd:process.cwd()}));return;}res.writeHead(404,{'content-type':'text/plain'});res.end('not found');});server.listen(port,'127.0.0.1');"
+        ],
+        "portEnv": "PORT",
+        "urlEnv": "WEB_URL",
+        "readiness": {
+          "path": "/health",
+          "expectedStatus": 200,
+          "timeoutMs": 10000
+        }
+      }
+    ]
+  },
+  "maxRepairs": 0
+}
