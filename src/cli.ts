@@ -51,6 +51,9 @@ Usage:
   cliyard queue add <contracts.json> --repo <path> --id <queue-id>
                     [--depends-on <id>]... [--worker claude|codex]
                     [--model id] [--max-attempts n] [--plan-id id] [--json]
+  cliyard queue add-plan <plan.json> --repo <path> --id <queue-id>
+                    [--depends-on <id>] [--worker claude|codex]
+                    [--model id] [--max-attempts n] [--json]
   cliyard queue list --repo <path> [--json]
   cliyard queue retry <queue-id> --repo <path> [--json]
   cliyard queue cancel <queue-id> --repo <path> [--json]
