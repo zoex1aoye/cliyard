@@ -197,7 +197,7 @@ async function startCommand(
   const contractsPath = resolve(repoRoot, contractsArg);
   const contracts = loadContractsInput(contractsPath);
   const baseCommit = resolveSharedBaseCommit(repoRoot, contracts);
-  const runId = randomUUID();
+  const runId = arg("--run-id", rest) ?? randomUUID();
   const planId =
     arg("--plan-id", rest) ?? basename(contractsPath, extname(contractsPath));
   const integrationBranch = `cliyard/integration/${runId}`;
@@ -1193,6 +1193,7 @@ function has(flag: string, argv: string[]): boolean {
 const VALUE_FLAGS = new Set([
   "--repo",
   "--run",
+  "--run-id",
   "--worker",
   "--model",
   "--ledger",
@@ -1215,9 +1216,10 @@ function printUsage(log: (line: string) => void): void {
   log(`cliyard supervisor — durable foreground supervisor (V0)
 
 Usage:
-  cliyard supervisor start <contracts.json> --repo <path> [--worker claude|codex]
-                                [--model id] [--plan-id id] [--ledger path]
-                                [--dry-run] [--keep-worktrees] [--verbose]
+  cliyard supervisor start <contracts.json> --repo <path> [--run-id id]
+                                [--worker claude|codex] [--model id]
+                                [--plan-id id] [--ledger path] [--dry-run]
+                                [--keep-worktrees] [--verbose]
   cliyard supervisor status --repo <path> [--run id] [--json]
   cliyard supervisor resume --repo <path> [--run id] [--worker claude|codex]
                             [--model id] [--dry-run] [--keep-worktrees]

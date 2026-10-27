@@ -5,9 +5,11 @@ import type {
   AgentStartInput,
   WorkerProgressEvent,
 } from "../agents/types.js";
+import { auditPathScope } from "../agents/path-scope.js";
 import type { Verifier } from "../verification/verifier.js";
 import {
   aggregateCostTruth,
+  boundFailureText,
   createFailureRecord,
   parseCostTruth,
   parseFailureRecord,
@@ -20,6 +22,12 @@ import {
   type LedgerTaskRecord,
   defaultLedgerPath,
 } from "../persistence/ledger.js";
+import {
+  MAX_PATH_AUDITS,
+  MAX_PATH_AUDIT_ERROR_LENGTH,
+  MAX_PATH_AUDIT_PATHS,
+  type PathAuditRecord,
+} from "../supervisor/types.js";
 
 export interface LoopOptions {
   contract: TaskContract;
@@ -50,6 +58,11 @@ export interface LoopResult {
    * including repairs. Never an authoritative run total.
    */
   cost?: CostTruth;
+  /**
+   * Bounded path evidence for every worker exit observed by this loop.
+   * These records are observational and never grant acceptance.
+   */
+  pathAudits: PathAuditRecord[];
 }
 
 function setStatus(
@@ -99,6 +112,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
    * observations stay missing rather than becoming zero.
    */
   const attemptCosts: CostTruth[] = [];
+  const pathAudits: PathAuditRecord[] = [];
 
   while (true) {
     await updateLedger(ledgerPath, (ledger) => {
@@ -123,6 +137,30 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
     const parsedFailure = agentResult.failure
       ? parseFailureRecord(agentResult.failure)
       : null;
+    const pathScope = auditPathScope(
+      contract.writePaths,
+      agentResult.touchedPaths,
+      { maxPaths: MAX_PATH_AUDIT_PATHS },
+    );
+    const changedPathsError =
+      typeof agentResult.changedPathsError === "string"
+        ? boundFailureText(
+            agentResult.changedPathsError,
+            MAX_PATH_AUDIT_ERROR_LENGTH,
+          )
+        : "";
+    const pathAudit: PathAuditRecord = {
+      attempt,
+      observedAt: new Date().toISOString(),
+      exitCode: agentResult.exitCode,
+      changedPaths: pathScope.changedPaths,
+      outsideWritePaths: pathScope.outsideWritePaths,
+      ...(changedPathsError ? { changedPathsError } : {}),
+    };
+    pathAudits.push(pathAudit);
+    if (pathAudits.length > MAX_PATH_AUDITS) {
+      pathAudits.splice(0, pathAudits.length - MAX_PATH_AUDITS);
+    }
 
     await updateLedger(ledgerPath, (ledger) => {
       record = ledger.tasks[contract.taskId]!;
@@ -132,6 +170,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         "implement.done",
         `exitCode=${agentResult.exitCode}; ${agentResult.logTail.split("\n").pop() ?? ""}`,
       );
+      appendEvent(record, "path.audit", describePathAudit(pathAudit));
     });
     log(`  implement: exit=${agentResult.exitCode}`);
     log(agentResult.logTail.split("\n").map((l) => `    ${l}`).join("\n"));
@@ -160,7 +199,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         record.cost = aggregateCostTruth(attemptCosts);
         appendEvent(record, "verdict", record.reason);
       });
-      return finish(record, ledgerPath);
+      return finish(record, ledgerPath, pathAudits);
     }
 
     await updateLedger(ledgerPath, (ledger) => {
@@ -185,7 +224,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         delete record.failure;
         appendEvent(record, "verdict", record.reason);
       });
-      return finish(record, ledgerPath);
+      return finish(record, ledgerPath, pathAudits);
     }
 
     const exhausted = await updateLedger(ledgerPath, (ledger) => {
@@ -220,7 +259,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
     });
 
     if (exhausted) {
-      return finish(record, ledgerPath);
+      return finish(record, ledgerPath, pathAudits);
     }
     priorFailure = {
       attempt,
@@ -230,7 +269,11 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
   }
 }
 
-function finish(record: LedgerTaskRecord, ledgerPath: string): LoopResult {
+function finish(
+  record: LedgerTaskRecord,
+  ledgerPath: string,
+  pathAudits: PathAuditRecord[],
+): LoopResult {
   return {
     taskId: record.taskId,
     status: record.status,
@@ -245,5 +288,27 @@ function finish(record: LedgerTaskRecord, ledgerPath: string): LoopResult {
     })),
     ...(record.failure !== undefined ? { failure: record.failure } : {}),
     ...(record.cost !== undefined ? { cost: record.cost } : {}),
+    pathAudits: pathAudits.map((audit) => ({
+      ...audit,
+      changedPaths: [...audit.changedPaths],
+      outsideWritePaths: [...audit.outsideWritePaths],
+    })),
   };
+}
+
+function describePathAudit(audit: PathAuditRecord): string {
+  const changed =
+    audit.changedPaths.length > 0 ? audit.changedPaths.join(", ") : "(none)";
+  const outside =
+    audit.outsideWritePaths.length > 0
+      ? audit.outsideWritePaths.join(", ")
+      : "(none)";
+  return boundFailureText(
+    `attempt=${audit.attempt}; exitCode=${audit.exitCode}; ` +
+      `changed=${changed}; outside=${outside}` +
+      (audit.changedPathsError
+        ? `; changedPathsError=${audit.changedPathsError}`
+        : ""),
+    1_200,
+  );
 }
