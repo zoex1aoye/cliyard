@@ -28,7 +28,7 @@
         "docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md"
       ],
       "sharedResources": [],
-      "baseCommit": "139038af8ec96f0c6cac4872a4aadb7af396a9ac",
+      "baseCommit": "98ccf2d32211927f8a7f07e8cc70d1d14554953a",
       "verifyCommands": [
         "npx tsx --test tests/claude-progress.test.ts tests/supervisor-worker-progress.test.ts",
         "npm test",
