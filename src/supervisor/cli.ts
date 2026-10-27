@@ -20,6 +20,12 @@ import {
   isWorkerProgressEvent,
   type WorkerProgressEvent,
 } from "../agents/types.js";
+import {
+  DEFAULT_DEADLINE_EXTENSION_POLICY,
+  MAX_DEADLINE_TIMEOUT_MS,
+  parseDeadlineExtensionPolicy,
+  type DeadlineExtensionPolicy,
+} from "../agents/continuation.js";
 import type { TaskContract } from "../contracts/schema.js";
 import type { CostTruth, FailureRecord } from "../failures.js";
 import { RUNTIME_MANIFEST_FILE } from "../runtime/manager.js";
@@ -193,6 +199,7 @@ async function startCommand(
     printUsage(log);
     return 1;
   }
+  const deadlinePolicy = deadlinePolicyFromArgs(rest);
 
   const contractsPath = resolve(repoRoot, contractsArg);
   const contracts = loadContractsInput(contractsPath);
@@ -231,6 +238,7 @@ async function startCommand(
     options,
     log,
     resumed: false,
+    deadlinePolicy,
     // A new run never has a draft; always start a clean worktree.
     reuseAttempts: false,
   });
@@ -245,6 +253,7 @@ async function resumeCommand(
   options: SupervisorCliOptions,
   log: (line: string) => void,
 ): Promise<number> {
+  const deadlinePolicy = deadlinePolicyFromArgs(rest);
   const reuseAttempt = has("--reuse-attempt", rest);
   const freshAttempt = has("--fresh-attempt", rest);
   if (reuseAttempt && freshAttempt) {
@@ -320,6 +329,7 @@ async function resumeCommand(
     options,
     log,
     resumed: true,
+    deadlinePolicy,
     // Reuse is the default for rejected attempts. --fresh-attempt is the
     // explicit recovery path for a missing, invalid or unwanted draft.
     reuseAttempts: !freshAttempt,
@@ -508,13 +518,22 @@ function printStatus(
   // One line per task that carries durable failure/cost truth. Amounts are
   // printed only when observed; unavailable cost is never shown as $0.
   for (const task of status.tasks) {
-    if (!task.failure && !task.cost) continue;
+    const extensions = task.extensions ?? [];
+    if (!task.failure && !task.cost && extensions.length === 0) continue;
     const parts = [`task ${task.taskId}: ${task.status}`];
     if (task.failure) {
       parts.push(`failure=${formatFailureObservation(task.failure)}`);
     }
     if (task.cost) {
       parts.push(`cost=${formatCostObservation(task.cost)}`);
+    }
+    if (extensions.length > 0) {
+      const last = extensions.at(-1)!;
+      parts.push(
+        `extensions=${extensions.length}`,
+        `last deadline extension=${last.grantedAt} ` +
+          `+${last.extensionMs}ms cumulative=${last.cumulativeTimeoutMs}ms`,
+      );
     }
     log(parts.join(" "));
   }
@@ -993,10 +1012,20 @@ interface ExecuteRunInput {
   resumed: boolean;
   /** Reuse validated rejected attempt worktrees instead of fresh ones. */
   reuseAttempts: boolean;
+  deadlinePolicy?: DeadlineExtensionPolicy;
 }
 
 async function executeRun(input: ExecuteRunInput): Promise<number> {
-  const { repoRoot, manifest, lock, rest, options, log, resumed } = input;
+  const {
+    repoRoot,
+    manifest,
+    lock,
+    rest,
+    options,
+    log,
+    resumed,
+    deadlinePolicy,
+  } = input;
   const removeSignals = installSignalHandlers(
     repoRoot,
     manifest.runId,
@@ -1017,6 +1046,7 @@ async function executeRun(input: ExecuteRunInput): Promise<number> {
       verbose: has("--verbose", rest),
       runManifest: manifest,
       reuseAttempts: input.reuseAttempts,
+      ...(deadlinePolicy ? { deadlinePolicy } : {}),
       workerFactory: options.workerFactory,
     });
     const finalManifest =
@@ -1113,6 +1143,126 @@ function markInterrupted(repoRoot: string, runId: string): void {
 // Argument / git helpers
 // ---------------------------------------------------------------------------
 
+const DEADLINE_VALUE_FLAGS = [
+  "--timeout-ms",
+  "--deadline-extension-ms",
+  "--max-deadline-extensions",
+  "--max-total-timeout-ms",
+  "--healthy-activity-window-ms",
+] as const;
+
+function deadlinePolicyFromArgs(
+  argv: string[],
+): DeadlineExtensionPolicy | undefined {
+  const autoFlags = flagOccurrences("--auto-extend-deadline", argv);
+  if (autoFlags.length > 1) {
+    throw new Error(
+      "supervisor: --auto-extend-deadline may be specified only once",
+    );
+  }
+  if (
+    autoFlags.some((value) =>
+      value.startsWith("--auto-extend-deadline="),
+    )
+  ) {
+    throw new Error(
+      "supervisor: --auto-extend-deadline does not accept a value",
+    );
+  }
+  const autoExtend = autoFlags.length === 1;
+  const present = DEADLINE_VALUE_FLAGS.some((flag) =>
+    flagOccurrences(flag, argv).length > 0,
+  );
+  if (!present && !autoExtend) return undefined;
+
+  const baseTimeoutMs =
+    integerFlag("--timeout-ms", argv) ??
+    DEFAULT_DEADLINE_EXTENSION_POLICY.baseTimeoutMs;
+  const extensionStepMs =
+    integerFlag("--deadline-extension-ms", argv) ??
+    DEFAULT_DEADLINE_EXTENSION_POLICY.extensionStepMs;
+  const maxExtensions =
+    integerFlag("--max-deadline-extensions", argv) ??
+    DEFAULT_DEADLINE_EXTENSION_POLICY.maxExtensions;
+  const healthyActivityWindowMs =
+    integerFlag("--healthy-activity-window-ms", argv) ??
+    DEFAULT_DEADLINE_EXTENSION_POLICY.healthyActivityWindowMs;
+  const requestedMaxTotal = integerFlag("--max-total-timeout-ms", argv);
+  const maxTotalTimeoutMs =
+    requestedMaxTotal ??
+    (maxExtensions > 0
+      ? baseTimeoutMs + extensionStepMs * maxExtensions
+      : baseTimeoutMs);
+
+  if (
+    !Number.isSafeInteger(maxTotalTimeoutMs) ||
+    maxTotalTimeoutMs > MAX_DEADLINE_TIMEOUT_MS
+  ) {
+    throw new Error(
+      `supervisor: deadline policy maxTotalTimeoutMs must be at most ` +
+        `${MAX_DEADLINE_TIMEOUT_MS}`,
+    );
+  }
+  if (maxTotalTimeoutMs < baseTimeoutMs) {
+    throw new Error(
+      "supervisor: deadline policy maxTotalTimeoutMs must be at least base timeout",
+    );
+  }
+  if (
+    maxExtensions > 0 &&
+    baseTimeoutMs + extensionStepMs > maxTotalTimeoutMs
+  ) {
+    throw new Error(
+      "supervisor: deadline extension step cannot fit within maxTotalTimeoutMs",
+    );
+  }
+  if (autoExtend && maxExtensions === 0) {
+    throw new Error(
+      "supervisor: --auto-extend-deadline requires --max-deadline-extensions > 0",
+    );
+  }
+
+  const policy = parseDeadlineExtensionPolicy({
+    version: 1,
+    baseTimeoutMs,
+    extensionStepMs,
+    maxExtensions,
+    maxTotalTimeoutMs,
+    healthyActivityWindowMs,
+    autoExtend,
+  });
+  if (!policy) {
+    throw new Error(
+      "supervisor: invalid deadline policy; positive timer bounds and " +
+        "non-negative max extensions are required",
+    );
+  }
+  return policy;
+}
+
+function integerFlag(flag: string, argv: string[]): number | undefined {
+  const occurrences = flagOccurrences(flag, argv);
+  if (occurrences.length === 0) return undefined;
+  if (occurrences.length > 1) {
+    throw new Error(`supervisor: ${flag} may be specified only once`);
+  }
+  const raw = arg(flag, argv);
+  if (raw === undefined || !/^(?:0|[1-9]\d*)$/.test(raw)) {
+    throw new Error(`supervisor: ${flag} requires a non-negative integer`);
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(`supervisor: ${flag} is too large`);
+  }
+  return value;
+}
+
+function flagOccurrences(flag: string, argv: string[]): string[] {
+  return argv.filter(
+    (value) => value === flag || value.startsWith(`${flag}=`),
+  );
+}
+
 function repoFrom(argv: string[]): string {
   return resolve(arg("--repo", argv) ?? process.cwd());
 }
@@ -1198,6 +1348,7 @@ const VALUE_FLAGS = new Set([
   "--model",
   "--ledger",
   "--plan-id",
+  ...DEADLINE_VALUE_FLAGS,
 ]);
 
 function positionalArg(argv: string[]): string | undefined {
@@ -1220,11 +1371,22 @@ Usage:
                                 [--worker claude|codex] [--model id]
                                 [--plan-id id] [--ledger path] [--dry-run]
                                 [--keep-worktrees] [--verbose]
+                                [--timeout-ms n]
+                                [--auto-extend-deadline]
+                                [--deadline-extension-ms n]
+                                [--max-deadline-extensions n]
+                                [--max-total-timeout-ms n]
+                                [--healthy-activity-window-ms n]
   cliyard supervisor status --repo <path> [--run id] [--json]
   cliyard supervisor resume --repo <path> [--run id] [--worker claude|codex]
                             [--model id] [--dry-run] [--keep-worktrees]
                             [--retry-rejected] [--reuse-attempt | --fresh-attempt]
-                            [--force] [--verbose]
+                            [--force] [--verbose] [--timeout-ms n]
+                            [--auto-extend-deadline]
+                            [--deadline-extension-ms n]
+                            [--max-deadline-extensions n]
+                            [--max-total-timeout-ms n]
+                            [--healthy-activity-window-ms n]
   cliyard supervisor reap --repo <path> [--json]
   cliyard supervisor stop --repo <path> [--run id] [--force]
 
@@ -1235,5 +1397,7 @@ A rejected attempt keeps its dirty worktree. Resume reuses a valid recorded
 attempt by default; --fresh-attempt discards it for a clean worktree.
 Start/resume reap proven orphaned runtimes after acquiring the lock and fail
 closed when any runtime needs human review. Status only reads persisted
-recovery records; it never reconciles.`);
+recovery records; it never reconciles. Automatic deadline extension is off by
+default and is available only with Claude's mapped assistant/tool progress.
+Codex remains fail-closed at its base timeout.`);
 }

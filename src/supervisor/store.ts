@@ -28,6 +28,11 @@ import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { parseCostTruth, parseFailureRecord } from "../failures.js";
 import {
+  MAX_TASK_EXTENSIONS,
+  parseTaskExtensionRecord,
+  type TaskExtensionRecord,
+} from "../agents/continuation.js";
+import {
   ACTIVE_RUN_VERSION,
   MAX_PATH_AUDITS,
   MAX_PATH_AUDIT_ERROR_LENGTH,
@@ -818,9 +823,47 @@ function parseRunManifest(raw: unknown, source: string): RunManifest {
         `${source}: task ${key}.pathAudits`,
       );
     }
+    if (task.extensions !== undefined) {
+      task.extensions = parseTaskExtensions(
+        task.extensions,
+        `${source}: task ${key}.extensions`,
+      );
+    }
   }
 
   return raw as unknown as RunManifest;
+}
+
+function parseTaskExtensions(
+  raw: unknown,
+  source: string,
+): TaskExtensionRecord[] {
+  if (!Array.isArray(raw)) {
+    throw new RunManifestError(`${source} must be an array`);
+  }
+  if (raw.length > MAX_TASK_EXTENSIONS) {
+    throw new RunManifestError(
+      `${source} must contain at most ${MAX_TASK_EXTENSIONS} records`,
+    );
+  }
+
+  const seen = new Set<string>();
+  return raw.map((value, index) => {
+    const path = `${source}[${index}]`;
+    const extension = parseTaskExtensionRecord(value);
+    if (!extension) {
+      throw new RunManifestError(
+        `${path} is not a valid deadline extension record`,
+      );
+    }
+    if (seen.has(extension.extensionId)) {
+      throw new RunManifestError(
+        `${path}.extensionId duplicates ${extension.extensionId}`,
+      );
+    }
+    seen.add(extension.extensionId);
+    return extension;
+  });
 }
 
 function parsePathAudits(raw: unknown, source: string): PathAuditRecord[] {

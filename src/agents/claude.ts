@@ -23,6 +23,12 @@ import {
   type FailureRecord,
   type TokenUsage,
 } from "../failures.js";
+import {
+  parseDeadlineExtensionPolicy,
+  TASK_EXTENSION_RECORD_VERSION,
+  type DeadlineExtensionPolicy,
+  type TaskExtensionRecord,
+} from "./continuation.js";
 import type {
   AgentAdapter,
   AgentCapability,
@@ -53,6 +59,11 @@ export interface ClaudeWorkerOptions {
   timeoutMs?: number;
   maxBudgetUsd?: number;
   maxTransientRetries?: number;
+  /**
+   * Opt-in deadline extension policy. When omitted, the existing fixed timeout
+   * remains in force and automatic extension stays disabled.
+   */
+  deadlinePolicy?: DeadlineExtensionPolicy;
   /**
    * Emit one heartbeat per this interval while the child is alive.
    * Default: CLIYARD_CLAUDE_HEARTBEAT_MS or 15000ms.
@@ -98,7 +109,24 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
     "deepseek-flash[1m]";
   const permissionMode = opts.permissionMode ?? "acceptEdits";
   const allowedTools = opts.allowedTools ?? DEFAULT_TOOLS;
-  const timeoutMs = opts.timeoutMs ?? 20 * 60_000;
+  const deadlinePolicy =
+    opts.deadlinePolicy === undefined
+      ? undefined
+      : parseDeadlineExtensionPolicy(opts.deadlinePolicy);
+  if (opts.deadlinePolicy !== undefined && !deadlinePolicy) {
+    throw new Error("invalid Claude deadline extension policy");
+  }
+  if (
+    deadlinePolicy &&
+    opts.timeoutMs !== undefined &&
+    opts.timeoutMs !== deadlinePolicy.baseTimeoutMs
+  ) {
+    throw new Error(
+      "Claude timeoutMs contradicts deadlinePolicy.baseTimeoutMs",
+    );
+  }
+  const timeoutMs =
+    deadlinePolicy?.baseTimeoutMs ?? opts.timeoutMs ?? 20 * 60_000;
   const configuredBudget = Number(
     process.env.CLIYARD_CLAUDE_MAX_BUDGET_USD,
   );
@@ -201,6 +229,11 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
           const retryNotes: string[] = [];
           /** Every provider session started by this attempt, including retries. */
           const observations: CostObservation[] = [];
+          const extensionState: DeadlineGrantState = {
+            extensionCount: 0,
+            cumulativeTimeoutMs: timeoutMs,
+            records: [],
+          };
           let res!: ClaudeRunResult;
           let parsed: ClaudeResult | undefined;
           for (let retry = 0; ; retry += 1) {
@@ -214,6 +247,12 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
                 allowedTools,
                 extraArgs: opts.extraArgs ?? [],
                 timeoutMs,
+                attempt: input.attempt,
+                ...(deadlinePolicy ? { deadlinePolicy } : {}),
+                ...(input.onExtension
+                  ? { onExtension: input.onExtension }
+                  : {}),
+                extensionState,
                 maxBudgetUsd,
                 heartbeatMs,
                 sessionId: runSessionId,
@@ -282,7 +321,7 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
                 res,
                 ...(parsed ? { parsed } : {}),
                 ...(changed.error ? { changedError: changed.error } : {}),
-                timeoutMs,
+                timeoutMs: res.deadlineTimeoutMs,
               })
             : undefined;
           return {
@@ -299,6 +338,14 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
               ? { finalText: parsed.result }
               : {}),
             ...(failure ? { failure } : {}),
+            ...(extensionState.records.length > 0
+              ? {
+                  extensions: extensionState.records.map((record) => ({
+                    ...record,
+                    healthyEvidence: [...record.healthyEvidence],
+                  })),
+                }
+              : {}),
             cost: createCostTruth({
               observations,
               guardBudgetUsd: maxBudgetUsd,
@@ -543,6 +590,14 @@ interface ClaudeRunResult {
   signal: NodeJS.Signals | null;
   /** Bounded text from provider `error` records, when any. */
   errorText?: string;
+  /** Deadline in force when this invocation stopped. */
+  deadlineTimeoutMs: number;
+}
+
+interface DeadlineGrantState {
+  extensionCount: number;
+  cumulativeTimeoutMs: number;
+  records: TaskExtensionRecord[];
 }
 
 type ProgressEmitter = (draft: {
@@ -569,6 +624,12 @@ function runClaude(opts: {
   allowedTools: string[];
   extraArgs: string[];
   timeoutMs: number;
+  attempt: number;
+  deadlinePolicy?: DeadlineExtensionPolicy;
+  onExtension?: (
+    extension: TaskExtensionRecord,
+  ) => void | Promise<void>;
+  extensionState: DeadlineGrantState;
   maxBudgetUsd: number;
   heartbeatMs: number;
   sessionId: string;
@@ -609,8 +670,12 @@ function runClaude(opts: {
     let pending = "";
     let result: ClaudeResult | undefined;
     let resultEmitted = false;
+    let resultEmittedAtMs: number | undefined;
     let timedOut = false;
     let settled = false;
+    let childClosed = false;
+    /** The invocation may not finish while a grant is being persisted. */
+    let deadlineEvaluation: Promise<void> | undefined;
     /**
      * Provider JSON records since the previous heartbeat, including records
      * (`system/thinking_tokens`, etc.) that map to no progress event. A
@@ -620,13 +685,40 @@ function runClaude(opts: {
     let lastProviderRecordAt = Date.now();
     let lastRecordLabel = "";
     let providerErrorText = "";
+    let lastMeaningful:
+      | {
+          type: "assistant" | "tool.start" | "tool.result";
+          at: string;
+          atMs: number;
+        }
+      | undefined;
+    let unresolvedError = false;
+    const trackedEmit: ProgressEmitter = (draft) => {
+      if (
+        draft.type === "assistant" ||
+        draft.type === "tool.start" ||
+        draft.type === "tool.result"
+      ) {
+        const atMs = Date.now();
+        lastMeaningful = {
+          type: draft.type,
+          at: new Date(atMs).toISOString(),
+          atMs,
+        };
+        unresolvedError = false;
+      } else if (draft.type === "error" || draft.type === "retry") {
+        unresolvedError = true;
+      }
+      opts.emit(draft);
+    };
     const context: StreamContext = {
-      emit: opts.emit,
+      emit: trackedEmit,
       toolNames: new Map(),
       onResult: (record) => {
         result = record;
         if (resultEmitted) return;
         resultEmitted = true;
+        resultEmittedAtMs = Date.now();
         const failed = record.is_error === true;
         const text = typeof record.result === "string" ? record.result : "";
         opts.emit({
@@ -690,20 +782,144 @@ function runClaude(opts: {
     }, Math.max(25, Math.floor(opts.heartbeatMs)));
     heartbeatTimer.unref?.();
 
-    const timeoutTimer = setTimeout(() => {
+    let deadlineTimeoutMs = opts.extensionState.cumulativeTimeoutMs;
+    let deadlineAtMs = 0;
+    let timeoutTimer: NodeJS.Timeout | undefined;
+    const killForTimeout = (): void => {
+      if (settled || childClosed) return;
       timedOut = true;
       opts.emit({
         type: "error",
         phase: "ending",
-        message: `worker timed out after ${opts.timeoutMs}ms`,
+        message: `worker timed out after ${deadlineTimeoutMs}ms`,
       });
       child.kill("SIGTERM");
-    }, opts.timeoutMs);
+    };
+    const armDeadline = (
+      delayMs: number,
+      cumulativeMs: number,
+      targetAtMs = Date.now() + delayMs,
+    ): void => {
+      deadlineTimeoutMs = cumulativeMs;
+      deadlineAtMs = targetAtMs;
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      timeoutTimer = setTimeout(() => {
+        deadlineEvaluation = evaluateDeadline();
+      }, delayMs);
+    };
+    const evaluateDeadline = async (): Promise<void> => {
+      // A close that beat the deadline callback is terminal. An error result
+      // or a result emitted after the deadline still loses to the explicit
+      // wall-clock timeout; a successful in-time result may finish closing.
+      if (settled || childClosed) return;
+      if (resultEmitted) {
+        if (
+          result?.is_error !== true &&
+          resultEmittedAtMs !== undefined &&
+          resultEmittedAtMs <= deadlineAtMs
+        ) {
+          return;
+        }
+        killForTimeout();
+        return;
+      }
+      const now = Date.now();
+      const policy = opts.deadlinePolicy;
+      const childAlive =
+        child.exitCode === null &&
+        child.signalCode === null &&
+        child.killed === false;
+      const evidenceFresh =
+        policy !== undefined &&
+        lastMeaningful !== undefined &&
+        now >= lastMeaningful.atMs &&
+        now - lastMeaningful.atMs <= policy.healthyActivityWindowMs;
+      const withinCount =
+        policy !== undefined &&
+        opts.extensionState.extensionCount < policy.maxExtensions;
+      const withinTotal =
+        policy !== undefined &&
+        opts.extensionState.cumulativeTimeoutMs + policy.extensionStepMs <=
+          policy.maxTotalTimeoutMs;
+      if (
+        policy?.autoExtend !== true ||
+        !opts.onExtension ||
+        !childAlive ||
+        !evidenceFresh ||
+        unresolvedError ||
+        !withinCount ||
+        !withinTotal
+      ) {
+        killForTimeout();
+        return;
+      }
+
+      const requestedAt = new Date(now).toISOString();
+      const extendedDeadlineAtMs = deadlineAtMs + policy.extensionStepMs;
+      const cumulativeTimeoutMs =
+        opts.extensionState.cumulativeTimeoutMs + policy.extensionStepMs;
+      const extension: TaskExtensionRecord = {
+        version: TASK_EXTENSION_RECORD_VERSION,
+        extensionId: randomUUID(),
+        attempt: opts.attempt,
+        kind: "deadline",
+        source: "auto",
+        requestedAt,
+        grantedAt: new Date().toISOString(),
+        reason:
+          `mapped ${lastMeaningful!.type} activity within ` +
+          `${policy.healthyActivityWindowMs}ms at wall-clock deadline`,
+        healthyEvidence: [
+          `${lastMeaningful!.type}@${lastMeaningful!.at}`,
+        ],
+        providerSessionId: opts.sessionId,
+        extensionMs: policy.extensionStepMs,
+        cumulativeTimeoutMs,
+      };
+
+      try {
+        await opts.onExtension(extension);
+      } catch (error) {
+        // A completed child does not turn failed persistence into a grant.
+        // Keep the invocation fail-closed even if the child exited while the
+        // checkpoint was pending.
+        timedOut = true;
+        if (settled) return;
+        const detail = error instanceof Error ? error.message : String(error);
+        opts.emit({
+          type: "error",
+          phase: "ending",
+          message: "deadline extension persistence failed",
+          detail: boundProgressText(detail, MAX_PROGRESS_DETAIL),
+        });
+        if (childClosed) return;
+        killForTimeout();
+        return;
+      }
+
+      // Persistence completed before the live child receives a new deadline.
+      opts.extensionState.extensionCount += 1;
+      opts.extensionState.cumulativeTimeoutMs = cumulativeTimeoutMs;
+      opts.extensionState.records.push(extension);
+      if (settled || childClosed) return;
+      const remainingMs = extendedDeadlineAtMs - Date.now();
+      if (remainingMs <= 0) {
+        deadlineAtMs = extendedDeadlineAtMs;
+        killForTimeout();
+        return;
+      }
+      armDeadline(
+        remainingMs,
+        cumulativeTimeoutMs,
+        extendedDeadlineAtMs,
+      );
+    };
 
     const cleanup = (): void => {
       clearInterval(heartbeatTimer);
-      clearTimeout(timeoutTimer);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
     };
+    armDeadline(opts.timeoutMs, opts.extensionState.cumulativeTimeoutMs);
 
     child.stdout?.on("data", (data) => {
       const text = String(data);
@@ -727,39 +943,48 @@ function runClaude(opts: {
     });
     child.on("error", (error) => {
       if (settled) return;
+      childClosed = true;
       settled = true;
       cleanup();
       reject(error);
     });
     child.on("close", (code, signal) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (pending.trim()) handleLine(pending);
-      pending = "";
-      if (!result) {
-        // Plain single-JSON compatibility: one complete result object with no
-        // JSONL framing (and possibly no `type`) still counts as the result.
-        const fallback = parseClaudeJson(stdout);
-        if (fallback) context.onResult(fallback);
-      }
-      const exitCode = timedOut ? 124 : (code ?? 1);
-      if (!result && !timedOut && exitCode !== 0) {
-        opts.emit({
-          type: "error",
-          phase: "ending",
-          message: `provider exited with code ${exitCode}`,
+      void (async () => {
+        if (settled) return;
+        childClosed = true;
+        if (pending.trim()) handleLine(pending);
+        pending = "";
+        if (!result) {
+          // Plain single-JSON compatibility: one complete result object with
+          // no JSONL framing (and possibly no `type`) still counts as result.
+          const fallback = parseClaudeJson(stdout);
+          if (fallback) context.onResult(fallback);
+        }
+        // A deadline may have fired just before close. Keep collect() pending
+        // until the exact grant is durably checkpointed or denied.
+        if (deadlineEvaluation) await deadlineEvaluation;
+        if (settled) return;
+        settled = true;
+        cleanup();
+        const exitCode = timedOut ? 124 : (code ?? 1);
+        if (!result && !timedOut && exitCode !== 0) {
+          opts.emit({
+            type: "error",
+            phase: "ending",
+            message: `provider exited with code ${exitCode}`,
+          });
+        }
+        resolvePromise({
+          code: exitCode,
+          stdout,
+          stderr,
+          result,
+          timedOut,
+          signal,
+          deadlineTimeoutMs,
+          ...(providerErrorText ? { errorText: providerErrorText } : {}),
         });
-      }
-      resolvePromise({
-        code: exitCode,
-        stdout,
-        stderr,
-        result,
-        timedOut,
-        signal,
-        ...(providerErrorText ? { errorText: providerErrorText } : {}),
-      });
+      })();
     });
   });
 }
@@ -858,6 +1083,18 @@ function handleClaudeRecord(
       ...(detail ? { detail } : {}),
     });
     if (detail) context.onProviderError(detail);
+    return;
+  }
+
+  if (type === "retry") {
+    const subtype =
+      typeof record.subtype === "string" ? record.subtype.trim() : "";
+    context.emit({
+      type: "retry",
+      phase: "waiting",
+      message: "provider requested a retry",
+      ...(subtype ? { detail: subtype.slice(0, MAX_PROGRESS_DETAIL) } : {}),
+    });
   }
 }
 

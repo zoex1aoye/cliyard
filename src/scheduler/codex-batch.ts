@@ -18,6 +18,13 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
 import { createClaudeAdapter } from "../agents/claude.js";
 import { createCodexAdapter } from "../agents/codex.js";
+import {
+  appendTaskExtensionRecord,
+  mergeTaskExtensionRecords,
+  parseDeadlineExtensionPolicy,
+  type DeadlineExtensionPolicy,
+  type TaskExtensionRecord,
+} from "../agents/continuation.js";
 import { collectChangedPaths } from "../agents/git-paths.js";
 import { auditPathScope } from "../agents/path-scope.js";
 import {
@@ -64,6 +71,12 @@ export interface CodexBatchOptions {
   dryRun?: boolean;
   keepWorktrees?: boolean;
   verbose?: boolean;
+  /**
+   * Opt-in wall-clock extension policy. Claude may extend a live child after a
+   * durable callback. Codex remains fail-closed and only receives the base
+   * timeout because it has no mapped meaningful-progress stream.
+   */
+  deadlinePolicy?: DeadlineExtensionPolicy;
   /** Test/integration seam: replace the real CLI adapter for one worktree. */
   workerFactory?: (
     worker: "codex" | "claude",
@@ -504,6 +517,13 @@ function isPathInside(parent: string, child: string): boolean {
 export async function runCodexBatch(
   opts: CodexBatchOptions,
 ): Promise<CodexBatchResult> {
+  const deadlinePolicy =
+    opts.deadlinePolicy === undefined
+      ? undefined
+      : parseDeadlineExtensionPolicy(opts.deadlinePolicy);
+  if (opts.deadlinePolicy !== undefined && !deadlinePolicy) {
+    throw new Error("worker-batch: invalid deadline extension policy");
+  }
   const repoRoot = resolve(opts.repoRoot ?? process.cwd());
   const contractsPath = resolveContractsPath(repoRoot, opts.contractsPath);
   const ledgerPath = opts.ledgerPath ?? defaultLedgerPath(repoRoot);
@@ -763,11 +783,15 @@ export async function runCodexBatch(
                   cwd: wt.worktreePath,
                   model: opts.model,
                   dryRun,
+                  ...(deadlinePolicy ? { deadlinePolicy } : {}),
                 })
               : createCodexAdapter({
                   cwd: wt.worktreePath,
                   model: opts.model,
                   dryRun,
+                  ...(deadlinePolicy
+                    ? { timeoutMs: deadlinePolicy.baseTimeoutMs }
+                    : {}),
                 }));
           // Dry-run stays on the mock verifier, so it never starts a runtime.
           // Real verification gets both the control repository (manifest,
@@ -788,6 +812,31 @@ export async function runCodexBatch(
             verifier,
             ledgerPath,
             verbose: opts.verbose,
+            ...(checkpoint && deadlinePolicy && workerKind === "claude"
+              ? {
+                  onExtension: async (
+                    extension: TaskExtensionRecord,
+                  ): Promise<void> => {
+                    checkpoint = checkpointManifest(
+                      repoRoot,
+                      checkpoint!,
+                      (manifest) => {
+                        const task = manifest.tasks[id];
+                        if (!task || task.status !== "running") {
+                          throw new Error(
+                            `cannot persist deadline extension for ${id}: ` +
+                              "task is not running",
+                          );
+                        }
+                        task.extensions = appendTaskExtensionRecord(
+                          task.extensions,
+                          extension,
+                        );
+                      },
+                    );
+                  },
+                }
+              : {}),
             // Only a manifest-backed Supervisor run has a run-scoped progress
             // log. The event is appended during dispatch, not at checkpoint.
             ...(requestedManifest
@@ -840,6 +889,10 @@ export async function runCodexBatch(
                     manifest.tasks[id]?.pathAudits,
                     result.pathAudits,
                   ),
+                  ...taskExtensionFields(
+                    manifest.tasks[id]?.extensions,
+                    result.extensions,
+                  ),
                   ...(result.cost !== undefined ? { cost: result.cost } : {}),
                 };
                 manifest.integrationHead = integrationHead;
@@ -878,6 +931,10 @@ export async function runCodexBatch(
                   pathAudits: mergePathAudits(
                     manifest.tasks[id]?.pathAudits,
                     result.pathAudits,
+                  ),
+                  ...taskExtensionFields(
+                    manifest.tasks[id]?.extensions,
+                    result.extensions,
                   ),
                 };
                 manifest.tasks[id] = task;
@@ -966,6 +1023,14 @@ function mergePathAudits(
   observed: PathAuditRecord[],
 ): PathAuditRecord[] {
   return [...(existing ?? []), ...observed].slice(-MAX_PATH_AUDITS);
+}
+
+function taskExtensionFields(
+  existing: TaskExtensionRecord[] | undefined,
+  observed: TaskExtensionRecord[],
+): { extensions?: TaskExtensionRecord[] } {
+  const extensions = mergeTaskExtensionRecords(existing, observed);
+  return extensions.length > 0 ? { extensions } : {};
 }
 
 /**
