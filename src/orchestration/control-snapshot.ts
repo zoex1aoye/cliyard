@@ -38,6 +38,17 @@ import type {
   RunStatus,
   RunTaskState,
 } from "../supervisor/types.js";
+import {
+  FAILURE_CATEGORIES,
+  aggregateCostTruth,
+  costCompleteness,
+  type CostCompleteness,
+  type CostState,
+  type CostTruth,
+  type FailureCategory,
+  type FailureRecord,
+  type TokenUsage,
+} from "../failures.js";
 import { resolve } from "node:path";
 
 export const CONTROL_SNAPSHOT_VERSION = 1 as const;
@@ -101,6 +112,24 @@ export interface ControlItemSnapshot extends QueueItem {
   errors: string[];
 }
 
+/** Observed failure categories across queue items and their durable run tasks. */
+export type ControlFailureCounts = Partial<Record<FailureCategory, number>>;
+
+/**
+ * Run-wide cost observation. v0 never claims an authoritative run total:
+ * `authoritative` is always false and a subtotal is shown only when known
+ * amounts share one currency.
+ */
+export interface ControlCostSnapshot {
+  state: CostState;
+  completeness: CostCompleteness;
+  authoritative: false;
+  currency: string | null;
+  amount: number | null;
+  usage: TokenUsage | null;
+  missing: string[];
+}
+
 export interface ControlSnapshot {
   version: typeof CONTROL_SNAPSHOT_VERSION;
   observedAt: string;
@@ -113,6 +142,10 @@ export interface ControlSnapshot {
   journal: QueueEventJournalSummary;
   resources: ResourceSnapshot;
   items: ControlItemSnapshot[];
+  /** Non-zero durable failure-category counts only. */
+  failureCounts: ControlFailureCounts;
+  /** Observed, non-authoritative cost subtotal with completeness/missing. */
+  cost: ControlCostSnapshot;
 }
 
 export interface BuildControlSnapshotOptions {
@@ -275,6 +308,74 @@ export async function buildControlSnapshot(
     journal,
     resources,
     items,
+    failureCounts: collectFailureCounts(items),
+    cost: summarizeCost(items),
+  };
+}
+
+/**
+ * Count durable failures without double-counting one run task referenced by
+ * multiple queue items. A queue-item failure is counted only when that item
+ * has no RunManifest, because dispatched-run failure is manifest authority.
+ */
+function collectFailureCounts(
+  items: ControlItemSnapshot[],
+): ControlFailureCounts {
+  const seen = new Set<string>();
+  const tally = new Map<FailureCategory, number>();
+  const add = (failure: FailureRecord): void => {
+    tally.set(failure.category, (tally.get(failure.category) ?? 0) + 1);
+  };
+  for (const item of items) {
+    if (!item.run && item.failure) {
+      const key = `item:${item.id}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        add(item.failure);
+      }
+    }
+    for (const task of item.run?.tasks ?? []) {
+      if (!task.failure) continue;
+      const key = `run:${item.run!.runId}:${task.taskId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      add(task.failure);
+    }
+  }
+  const counts: ControlFailureCounts = {};
+  for (const category of FAILURE_CATEGORIES) {
+    const value = tally.get(category);
+    if (value !== undefined && value > 0) counts[category] = value;
+  }
+  return counts;
+}
+
+/**
+ * Aggregate known task costs across durable runs. Mixed currencies stay
+ * uncombined (null amount plus missing reasons), and the result is explicitly
+ * non-authoritative even when every observation is provider-reported.
+ */
+function summarizeCost(items: ControlItemSnapshot[]): ControlCostSnapshot {
+  const seen = new Set<string>();
+  const costs: CostTruth[] = [];
+  for (const item of items) {
+    for (const task of item.run?.tasks ?? []) {
+      if (!task.cost) continue;
+      const key = `run:${item.run!.runId}:${task.taskId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      costs.push(task.cost);
+    }
+  }
+  const aggregated = aggregateCostTruth(costs);
+  return {
+    state: aggregated.state,
+    completeness: costCompleteness(aggregated),
+    authoritative: false,
+    currency: aggregated.currency,
+    amount: aggregated.amount,
+    usage: aggregated.usage,
+    missing: aggregated.missing,
   };
 }
 
@@ -367,8 +468,9 @@ function observedNextAction(
 }
 
 /**
- * This is a display classifier until worker-failure-taxonomy-v0 persists a
- * durable reason code. It never changes queue or run authority.
+ * Read-only display classifier. Durable failure categories are the primary
+ * signal; the text heuristics below remain only for legacy records without
+ * structured failure metadata. It never changes queue or run authority.
  */
 function classifyDecision(
   item: QueueItem,
@@ -421,6 +523,15 @@ function classifyDecision(
       reason: reason ?? `attempt limit ${item.attempts}/${item.maxAttempts}`,
     };
   }
+  // Durable category first: a structured failure is authoritative for display.
+  // The queue item's failure is only used when no RunManifest exists.
+  const durableFailure = durableFailureFor(item, run);
+  if (durableFailure) {
+    return {
+      category: decisionCategoryForFailure(durableFailure),
+      reason: reason ?? durableFailure.message,
+    };
+  }
   const lower = (reason ?? "").toLowerCase();
   if (
     lower.includes("dependenc") ||
@@ -448,6 +559,38 @@ function classifyDecision(
     return { category: "infrastructure", reason };
   }
   return { category: "human", reason };
+}
+
+/**
+ * RunManifest authority wins whenever a run exists. A QueueItem failure is
+ * only consulted for a deterministic pre-dispatch block with no run.
+ */
+function durableFailureFor(
+  item: QueueItem,
+  run: ControlRunSnapshot | null,
+): FailureRecord | undefined {
+  if (run) {
+    const task = run.tasks.find(
+      (candidate) => !candidate.accepted && candidate.failure !== undefined,
+    );
+    return task?.failure;
+  }
+  return item.failure;
+}
+
+function decisionCategoryForFailure(
+  failure: FailureRecord,
+): ControlDecisionCategory {
+  switch (failure.category) {
+    case "policy_blocked":
+      return failure.code === "dependency_blocked" ? "dependency" : "policy";
+    case "verifier_rejected":
+      return "verifier";
+    case "unknown":
+      return "human";
+    default:
+      return "infrastructure";
+  }
 }
 
 function cloneQueueItem(item: QueueItem): QueueItem {

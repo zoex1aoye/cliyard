@@ -14,8 +14,18 @@ import {
   readFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import {
+  isCostState,
+  isFailureCategory,
+  isFailureStage,
+  type CostState,
+  type FailureCategory,
+  type FailureStage,
+} from "../failures.js";
 
 export const QUEUE_EVENT_VERSION = 1 as const;
+/** Matches the failure record code bound in src/failures.ts. */
+const MAX_FAILURE_CODE = 64;
 export const QUEUE_EVENTS_DIR = "queue-events";
 export const QUEUE_EVENTS_FILE = "events.jsonl";
 export const DEFAULT_QUEUE_EVENT_LIMIT = 200;
@@ -70,6 +80,14 @@ export interface QueueControlEvent {
   action?: string;
   status?: string;
   reason?: string;
+  /**
+   * Bounded failure/cost observation attached to `run.blocked`. These never
+   * grant acceptance, authorize retry, or replace the RunManifest authority.
+   */
+  failureCategory?: FailureCategory;
+  failureStage?: FailureStage;
+  failureCode?: string;
+  costState?: CostState;
 }
 
 export interface AppendQueueEventInput {
@@ -83,6 +101,10 @@ export interface AppendQueueEventInput {
   action?: string;
   status?: string;
   reason?: string;
+  failureCategory?: FailureCategory;
+  failureStage?: FailureStage;
+  failureCode?: string;
+  costState?: CostState;
 }
 
 export interface QueueEventJournalSummary {
@@ -218,10 +240,30 @@ export function isQueueControlEvent(
     "action",
     "status",
     "reason",
+    "failureCode",
   ] as const) {
     if (record[key] !== undefined && typeof record[key] !== "string") {
       return false;
     }
+  }
+  if (
+    typeof record.failureCode === "string" &&
+    (!record.failureCode.trim() ||
+      record.failureCode.length > MAX_FAILURE_CODE)
+  ) {
+    return false;
+  }
+  if (
+    record.failureCategory !== undefined &&
+    !isFailureCategory(record.failureCategory)
+  ) {
+    return false;
+  }
+  if (record.failureStage !== undefined && !isFailureStage(record.failureStage)) {
+    return false;
+  }
+  if (record.costState !== undefined && !isCostState(record.costState)) {
+    return false;
   }
   return (
     record.attempt === undefined ||
@@ -247,6 +289,24 @@ function normalizeQueueEvent(
   ) {
     throw new Error("queue event attempt must be a non-negative integer");
   }
+  if (
+    input.failureCategory !== undefined &&
+    !isFailureCategory(input.failureCategory)
+  ) {
+    throw new Error(
+      `invalid queue event failureCategory: ${String(input.failureCategory)}`,
+    );
+  }
+  if (input.failureStage !== undefined && !isFailureStage(input.failureStage)) {
+    throw new Error(
+      `invalid queue event failureStage: ${String(input.failureStage)}`,
+    );
+  }
+  if (input.costState !== undefined && !isCostState(input.costState)) {
+    throw new Error(
+      `invalid queue event costState: ${String(input.costState)}`,
+    );
+  }
   return {
     version: QUEUE_EVENT_VERSION,
     eventId: randomUUID(),
@@ -260,6 +320,14 @@ function normalizeQueueEvent(
     ...optionalText("action", input.action, 32),
     ...optionalText("status", input.status, 64),
     ...optionalText("reason", input.reason, 1_000),
+    ...(input.failureCategory !== undefined
+      ? { failureCategory: input.failureCategory }
+      : {}),
+    ...(input.failureStage !== undefined
+      ? { failureStage: input.failureStage }
+      : {}),
+    ...optionalText("failureCode", input.failureCode, MAX_FAILURE_CODE),
+    ...(input.costState !== undefined ? { costState: input.costState } : {}),
   };
 }
 

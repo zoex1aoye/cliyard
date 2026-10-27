@@ -23,6 +23,11 @@ import {
 } from "../supervisor/store.js";
 import type { RunManifest, RunStatus } from "../supervisor/types.js";
 import {
+  createFailureRecord,
+  type CostTruth,
+  type FailureRecord,
+} from "../failures.js";
+import {
   materializePlan,
   type PlanUpstreamEvidence,
 } from "./plan-materializer.js";
@@ -306,7 +311,7 @@ export async function runQueue(
         if (newlyBlocked.length > 0) {
           propagated.push(...newlyBlocked);
           saveQueue(repoRoot, document);
-          journalPropagatedBlocks(repoRoot, newlyBlocked);
+          journalPropagatedBlocks(repoRoot, document, newlyBlocked);
         }
       }
 
@@ -357,7 +362,9 @@ export async function runQueue(
           break;
         }
 
-        let blockedReason = preDispatchBlockReason(candidate);
+        const preDispatch = preDispatchBlockReason(candidate);
+        let blockedReason = preDispatch?.reason;
+        let blockedCode = preDispatch?.code;
         if (!blockedReason && isPlanBackedQueueItem(candidate)) {
           // Plan materialization is queue work, not Supervisor work: it must
           // finish and be durable before any attempt increment or start.
@@ -368,9 +375,15 @@ export async function runQueue(
             byId,
             log,
           );
+          if (blockedReason) blockedCode = "plan_materialization_failed";
         }
         if (blockedReason) {
-          blockItem(document, candidate, blockedReason);
+          blockItem(
+            document,
+            candidate,
+            blockedReason,
+            blockedCode ?? "pre_dispatch_blocked",
+          );
           saveQueue(repoRoot, document);
           tryAppendQueueEvent(repoRoot, {
             type: "run.blocked",
@@ -381,6 +394,8 @@ export async function runQueue(
             attempt: candidate.attempts,
             status: candidate.status,
             reason: blockedReason,
+            // Queue-item failure is authority only because no run exists.
+            ...failureEventFields(candidate.failure),
           });
           log(`blocked ${candidate.id}: ${blockedReason}`);
           if (!continueOnBlocked) {
@@ -388,8 +403,12 @@ export async function runQueue(
             stopReason = `item ${JSON.stringify(candidate.id)} blocked: ${blockedReason}`;
             break;
           }
-          propagated.push(...propagateBlockedDependants(document));
-          saveQueue(repoRoot, document);
+          const newlyBlocked = propagateBlockedDependants(document);
+          if (newlyBlocked.length > 0) {
+            propagated.push(...newlyBlocked);
+            saveQueue(repoRoot, document);
+            journalPropagatedBlocks(repoRoot, document, newlyBlocked);
+          }
           continue;
         }
 
@@ -432,7 +451,7 @@ export async function runQueue(
           if (newlyBlocked.length > 0) {
             propagated.push(...newlyBlocked);
             saveQueue(repoRoot, document);
-            journalPropagatedBlocks(repoRoot, newlyBlocked);
+            journalPropagatedBlocks(repoRoot, document, newlyBlocked);
           }
         }
       }
@@ -513,6 +532,9 @@ async function dispatchItem(
   item.status = "running";
   item.attempts += 1;
   delete item.reason;
+  // From here on the RunManifest is the task authority; the queue never
+  // duplicates or overrides a dispatched run's failure.
+  delete item.failure;
   item.updatedAt = startedAt;
   document.updatedAt = startedAt;
   saveQueue(repoRoot, document);
@@ -565,14 +587,17 @@ async function dispatchItem(
     if (!item.runIds.includes(runId)) item.runIds.push(runId);
   }
 
-  let manifestStatus = result.status;
-  if (manifestStatus === undefined && runId) {
+  // The manifest is read-only evidence for classification and journal
+  // observations; the queue never rewrites it and never becomes its authority.
+  let manifest: RunManifest | undefined;
+  if (runId) {
     try {
-      manifestStatus = loadRunManifest(repoRoot, runId).status;
+      manifest = loadRunManifest(repoRoot, runId);
     } catch {
       /* reported as missing/ambiguous evidence below */
     }
   }
+  const manifestStatus = result.status ?? manifest?.status;
 
   const completed =
     result.exitCode === 0 && manifestStatus === "completed";
@@ -590,6 +615,7 @@ async function dispatchItem(
   item.updatedAt = finishedAt;
   document.updatedAt = finishedAt;
   saveQueue(repoRoot, document);
+  const blockedEvidence = completed ? {} : manifestFailureEvidence(manifest);
   tryAppendQueueEvent(repoRoot, {
     type: completed ? "run.completed" : "run.blocked",
     at: finishedAt,
@@ -599,6 +625,9 @@ async function dispatchItem(
     action,
     status: item.status,
     ...(item.reason !== undefined ? { reason: item.reason } : {}),
+    ...(completed
+      ? {}
+      : failureEventFields(blockedEvidence.failure, blockedEvidence.cost)),
   });
 
   return {
@@ -611,19 +640,35 @@ async function dispatchItem(
   };
 }
 
-function preDispatchBlockReason(item: QueueItem): string | undefined {
+interface PreDispatchBlock {
+  reason: string;
+  code: string;
+}
+
+function preDispatchBlockReason(
+  item: QueueItem,
+): PreDispatchBlock | undefined {
   if (item.nextAction === "resume" && !item.lastRunId) {
-    return "nextAction is resume but no run id is recorded";
+    return {
+      reason: "nextAction is resume but no run id is recorded",
+      code: "resume_without_run_id",
+    };
   }
   if (item.attempts >= item.maxAttempts) {
-    return `attempt limit reached (${item.attempts}/${item.maxAttempts})`;
+    return {
+      reason: `attempt limit reached (${item.attempts}/${item.maxAttempts})`,
+      code: "attempt_limit_reached",
+    };
   }
   // Plan items have no top-level contracts identity; their recorded
   // materialization is verified (or created) by preparePlanDispatch.
   if (isPlanBackedQueueItem(item)) return undefined;
   const contracts = checkQueueContracts(item);
   if (!contracts.ok) {
-    return contracts.reason ?? "frozen contracts check failed";
+    return {
+      reason: contracts.reason ?? "frozen contracts check failed",
+      code: "contracts_mismatch",
+    };
   }
   return undefined;
 }
@@ -638,28 +683,94 @@ function isReady(
   );
 }
 
+/**
+ * Block before any dispatch. Only this deterministic path stores a
+ * QueueItem failure: no RunManifest exists to carry the observation, and the
+ * RunManifest stays the authority for every dispatched run.
+ */
 function blockItem(
   document: QueueDocument,
   item: QueueItem,
   reason: string,
+  failureCode: string,
 ): void {
   const at = now();
   item.status = "blocked";
   item.reason = reason;
+  item.failure = createFailureRecord({
+    policyBlocked: true,
+    stage: "policy",
+    code: failureCode,
+    messageDetail: reason,
+    observedAt: at,
+  });
   item.nextAction = item.lastRunId ? "resume" : "start";
   item.updatedAt = at;
   document.updatedAt = at;
 }
 
+/**
+ * Primary durable failure evidence from a dispatched run's manifest. Tasks are
+ * ordered by id so the observed journal fields are deterministic.
+ */
+function manifestFailureEvidence(manifest: RunManifest | undefined): {
+  failure?: FailureRecord;
+  cost?: CostTruth;
+} {
+  if (!manifest) return {};
+  const tasks = Object.values(manifest.tasks).sort((left, right) =>
+    left.taskId.localeCompare(right.taskId),
+  );
+  const failed = tasks.find(
+    (task) => !task.accepted && task.failure !== undefined,
+  );
+  if (failed?.failure) {
+    return {
+      failure: failed.failure,
+      ...(failed.cost !== undefined ? { cost: failed.cost } : {}),
+    };
+  }
+  const withCost = tasks.find(
+    (task) => !task.accepted && task.cost !== undefined,
+  );
+  return withCost?.cost !== undefined ? { cost: withCost.cost } : {};
+}
+
+/** Bounded observations allowed on a `run.blocked` event. */
+function failureEventFields(
+  failure?: FailureRecord,
+  cost?: CostTruth,
+): {
+  failureCategory?: FailureRecord["category"];
+  failureStage?: FailureRecord["stage"];
+  failureCode?: string;
+  costState?: CostTruth["state"];
+} {
+  return {
+    ...(failure !== undefined
+      ? {
+          failureCategory: failure.category,
+          failureStage: failure.stage,
+          ...(failure.code !== undefined ? { failureCode: failure.code } : {}),
+        }
+      : {}),
+    ...(cost !== undefined ? { costState: cost.state } : {}),
+  };
+}
+
 function journalPropagatedBlocks(
   repoRoot: string,
+  document: QueueDocument,
   records: QueueBlockRecord[],
 ): void {
+  const byId = new Map(document.items.map((item) => [item.id, item]));
   for (const record of records) {
+    // The failure is read from the durable item, never synthesized here.
     tryAppendQueueEvent(repoRoot, {
       type: "run.blocked",
       itemId: record.id,
       reason: record.reason,
+      ...failureEventFields(byId.get(record.id)?.failure),
     });
   }
 }
@@ -685,7 +796,7 @@ function propagateBlockedDependants(
       if (!blocking) continue;
       const target = byId.get(blocking)!;
       const reason = `dependency ${JSON.stringify(blocking)} is ${target.status}`;
-      blockItem(document, item, reason);
+      blockItem(document, item, reason, "dependency_blocked");
       records.push({ id: item.id, reason });
       changed = true;
     }
@@ -1418,6 +1529,8 @@ function reconcileRunningItems(
   const byId = new Map(document.items.map((item) => [item.id, item]));
   for (const item of document.items) {
     if (item.status !== "running") continue;
+    // A running item was dispatched, so the RunManifest owns its failure.
+    delete item.failure;
 
     const runId =
       item.lastRunId ?? item.runIds[item.runIds.length - 1] ?? undefined;

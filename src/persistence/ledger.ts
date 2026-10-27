@@ -12,6 +12,12 @@ import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { TaskStatus } from "../core/status.js";
 import type { TaskContract } from "../contracts/schema.js";
+import {
+  parseCostTruth,
+  parseFailureRecord,
+  type CostTruth,
+  type FailureRecord,
+} from "../failures.js";
 
 export interface LedgerEvent {
   at: string;
@@ -30,6 +36,16 @@ export interface LedgerTaskRecord {
   lastVerifyLog?: string;
   verdict?: "accepted" | "rejected";
   reason?: string;
+  /**
+   * Structured failure observation for a rejected task. Absent on accepted
+   * tasks and on records written before the failure taxonomy.
+   */
+  failure?: FailureRecord;
+  /**
+   * Aggregated cost truth for every worker session this task started,
+   * including repairs. CLI estimates remain non-authoritative.
+   */
+  cost?: CostTruth;
 }
 
 export interface Ledger {
@@ -45,8 +61,65 @@ export function loadLedger(path: string): Ledger {
   if (!existsSync(path)) {
     return { path, tasks: {} };
   }
-  const raw = JSON.parse(readFileSync(path, "utf8")) as Ledger;
-  return { path, tasks: raw.tasks ?? {} };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  } catch (error) {
+    throw new Error(
+      `invalid JSON in ledger ${path}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  return parseLedger(raw, path);
+}
+
+/**
+ * Ledger records written before the failure taxonomy have neither optional
+ * field and stay readable. When either field is present it must be valid:
+ * a malformed structured record fails closed instead of being guessed at.
+ */
+function parseLedger(raw: unknown, path: string): Ledger {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error(`invalid ledger ${path}: root must be an object`);
+  }
+  const record = raw as Record<string, unknown>;
+  const rawTasks = record.tasks ?? {};
+  if (typeof rawTasks !== "object" || rawTasks === null || Array.isArray(rawTasks)) {
+    throw new Error(`invalid ledger ${path}: tasks must be an object`);
+  }
+
+  const tasks: Record<string, LedgerTaskRecord> = {};
+  for (const [taskId, value] of Object.entries(rawTasks)) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new Error(
+        `invalid ledger ${path}: task ${taskId} must be an object`,
+      );
+    }
+    const task = value as Record<string, unknown>;
+    if (task.failure !== undefined) {
+      const failure = parseFailureRecord(task.failure);
+      if (!failure) {
+        throw new Error(
+          `invalid ledger ${path}: task ${taskId}.failure is not a valid ` +
+            "failure record",
+        );
+      }
+      task.failure = failure;
+    }
+    if (task.cost !== undefined) {
+      const cost = parseCostTruth(task.cost);
+      if (!cost) {
+        throw new Error(
+          `invalid ledger ${path}: task ${taskId}.cost is not a valid cost ` +
+            "record",
+        );
+      }
+      task.cost = cost;
+    }
+    tasks[taskId] = task as unknown as LedgerTaskRecord;
+  }
+  return { path, tasks };
 }
 
 export function saveLedger(ledger: Ledger): void {

@@ -21,6 +21,7 @@ import {
   type WorkerProgressEvent,
 } from "../agents/types.js";
 import type { TaskContract } from "../contracts/schema.js";
+import type { CostTruth, FailureRecord } from "../failures.js";
 import { RUNTIME_MANIFEST_FILE } from "../runtime/manager.js";
 import { portAllocatorPaths } from "../runtime/ports.js";
 import {
@@ -297,9 +298,12 @@ async function resumeCommand(
         if (!task.accepted && task.status !== "rejected") {
           // A previous owner may have died mid-task; rebuild it as ready.
           // Rejected attempts keep their status until the batch decides
-          // whether to reuse or discard the recorded draft.
+          // whether to reuse or discard the recorded draft. Structured
+          // observations belong to the abandoned attempt, not the new one.
           task.status = "ready";
           delete task.reason;
+          delete task.failure;
+          delete task.cost;
         }
       }
     });
@@ -501,6 +505,19 @@ function printStatus(
       : "";
     log(`last accepted: ${status.lastAccepted.taskId}${commit}`);
   }
+  // One line per task that carries durable failure/cost truth. Amounts are
+  // printed only when observed; unavailable cost is never shown as $0.
+  for (const task of status.tasks) {
+    if (!task.failure && !task.cost) continue;
+    const parts = [`task ${task.taskId}: ${task.status}`];
+    if (task.failure) {
+      parts.push(`failure=${formatFailureObservation(task.failure)}`);
+    }
+    if (task.cost) {
+      parts.push(`cost=${formatCostObservation(task.cost)}`);
+    }
+    log(parts.join(" "));
+  }
   if (status.workerProgress.length === 0) {
     log("worker progress: none");
   } else {
@@ -531,6 +548,29 @@ function printStatus(
     `contracts: ${status.contractsPath} (sha256 ${status.contractsHash})`,
   );
   log(`repo: ${status.repoRoot}`);
+}
+
+/** `category/stage` plus the bounded code, when one was observed. */
+export function formatFailureObservation(failure: FailureRecord): string {
+  return (
+    `${failure.category}/${failure.stage}` +
+    (failure.code ? ` (${failure.code})` : "")
+  );
+}
+
+/**
+ * Cost state plus an observed amount only. A missing amount stays missing and
+ * a CLI estimate is always labelled non-authoritative.
+ */
+export function formatCostObservation(cost: CostTruth): string {
+  const amount =
+    cost.amount !== null
+      ? ` ${cost.amount} ${cost.currency ?? "<currency unknown>"}` +
+        " (observed, non-authoritative)"
+      : "";
+  const missing =
+    cost.missing.length > 0 ? ` missing=${cost.missing.join(",")}` : "";
+  return `${cost.state}${amount}${missing}`;
 }
 
 /**

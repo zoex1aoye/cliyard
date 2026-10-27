@@ -28,6 +28,7 @@ import {
   createShellVerifier,
 } from "../verification/verifier.js";
 import { defaultLedgerPath } from "../persistence/ledger.js";
+import { createFailureRecord } from "../failures.js";
 import { runClosedLoop, type LoopResult } from "../repair/loop.js";
 import {
   assertContractsHash,
@@ -607,8 +608,11 @@ export async function runCodexBatch(
             // A previous owner may have died mid-task; rebuild it as ready.
             // Rejected status is kept so resume can decide whether to reuse or
             // discard the recorded attempt before this dispatch overwrites it.
+            // The prior attempt's failure/cost do not describe the new attempt.
             task.status = "ready";
             delete task.reason;
+            delete task.failure;
+            delete task.cost;
           }
           manifest.tasks[contract.taskId] = task;
         }
@@ -707,6 +711,9 @@ export async function runCodexBatch(
             task.status = "running";
             task.accepted = false;
             delete task.reason;
+            // A new attempt supersedes the previous structured observation.
+            delete task.failure;
+            delete task.cost;
             task.attemptWorktree = handle.worktreePath;
             task.attemptBranch = handle.branch;
             task.attemptBaseCommit = attemptBaseCommit;
@@ -797,12 +804,15 @@ export async function runCodexBatch(
               checkpoint,
               (manifest) => {
                 // Acceptance clears every attempt field; the snapshot is the
-                // durable result and the worktree has no further value.
+                // durable result and the worktree has no further value. Cost
+                // is checkpointed before cleanup so it survives the removed
+                // worktree. Accepted tasks carry no failure.
                 manifest.tasks[id] = {
                   taskId: id,
                   status: "accepted",
                   accepted: true,
                   resultCommit: snapshot,
+                  ...(result.cost !== undefined ? { cost: result.cost } : {}),
                 };
                 manifest.integrationHead = integrationHead;
               },
@@ -826,6 +836,12 @@ export async function runCodexBatch(
                   status: result.status,
                   accepted: false,
                   reason: result.reason,
+                  // Rejection keeps both the structured failure and the cost
+                  // of every attempt, including repairs, alongside the draft.
+                  ...(result.failure !== undefined
+                    ? { failure: result.failure }
+                    : {}),
+                  ...(result.cost !== undefined ? { cost: result.cost } : {}),
                   attemptWorktree: attempt.worktree,
                   attemptBranch: attempt.branch,
                   attemptBaseCommit: attempt.baseCommit,
@@ -859,6 +875,15 @@ export async function runCodexBatch(
           task.status = "blocked";
           task.accepted = false;
           task.reason = item.reason;
+          // A dependency block never dispatched a worker: persist a
+          // deterministic policy failure, never a fabricated cost.
+          task.failure = createFailureRecord({
+            policyBlocked: true,
+            stage: "policy",
+            code: "dependency_blocked",
+            messageDetail: item.reason,
+          });
+          delete task.cost;
           manifest.tasks[item.taskId] = task;
         }
         manifest.status = allAccepted ? "completed" : "blocked";

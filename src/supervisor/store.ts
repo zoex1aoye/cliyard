@@ -26,6 +26,7 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { parseCostTruth, parseFailureRecord } from "../failures.js";
 import {
   ACTIVE_RUN_VERSION,
   RUN_MANIFEST_VERSION,
@@ -785,6 +786,27 @@ function parseRunManifest(raw: unknown, source: string): RunManifest {
           `${source}: task ${key}.${optional} must be a string`,
         );
       }
+    }
+    // Structured observations are optional so older manifests stay readable,
+    // but a present record must validate completely. Unknown nested fields are
+    // dropped by the parser; nothing is repaired by guessing.
+    if (task.failure !== undefined) {
+      const failure = parseFailureRecord(task.failure);
+      if (!failure) {
+        throw new RunManifestError(
+          `${source}: task ${key}.failure is not a valid failure record`,
+        );
+      }
+      task.failure = failure;
+    }
+    if (task.cost !== undefined) {
+      const cost = parseCostTruth(task.cost);
+      if (!cost) {
+        throw new RunManifestError(
+          `${source}: task ${key}.cost is not a valid cost record`,
+        );
+      }
+      task.cost = cost;
     }
   }
 
