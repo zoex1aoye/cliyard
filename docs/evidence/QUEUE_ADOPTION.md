@@ -2,16 +2,23 @@
 
 > Date: 2026-10-28
 >
-> Environment: macOS (Darwin 27.0.0), Node `v20.20.2`, cliyard HEAD
+> Environment: macOS (Darwin 27.0.0), Node `v20.20.2`.
+>
+> The adoption slice was measured at HEAD
 > `ce1157a43ddf176f4e5aa6f62b554fc8192c34d6` (integration of
 > `manual-queue-adoption` `b7f7d9e` and `deadline-fixture-stability`
-> `c57d591`).
+> `c57d591`). The journal unification was integrated at HEAD
+> `41e5fcd1ece2e0a06333224d074fe66baca16ebe` (`unify-adoption-journal`
+> `2c88012`, per
+> [design/adoption-journal-unification-v1.md](../../design/adoption-journal-unification-v1.md)).
 >
 > Scope: the first `OperatorResolution` slice of
 > [design/execution-authority-v1.md](../../design/execution-authority-v1.md),
-> specified by [design/queue-adoption-v1.md](../../design/queue-adoption-v1.md).
-> This evidence closure changes documentation only. Product behavior and tests
-> were implemented by the two upstream slices and are not modified here.
+> specified by [design/queue-adoption-v1.md](../../design/queue-adoption-v1.md),
+> plus the follow-up unification of its observation event into the single
+> queue journal. This evidence closure changes documentation only. Product
+> behavior and tests were implemented by the upstream slices and are not
+> modified here.
 
 Manual adoption closes one **blocked** queue item whose work an operator has
 already reviewed and integrated by hand. It is the first formal
@@ -28,6 +35,10 @@ Adoption records a **separately versioned queue resolution** in
 
 - the queue item becomes terminally `completed`;
 - `QueueItem.resolution` records what an operator reviewed and why;
+- a successful first adoption appends exactly one bounded
+  `queue.item.adopted` record to the unified queue journal
+  `.cliyard/queue-events/events.jsonl`; no `adoptions.jsonl` is written or
+  read;
 - `queue status` distinguishes this as `completion: "adopted"` while still
   showing the underlying run and its unaccepted tasks;
 - downstream Plan materialization may use the reviewed commit only through an
@@ -305,13 +316,18 @@ The status JSON retains both the adopted completion and the untouched run:
 }
 ```
 
-`queue.adoptionEvents` exposes the bounded adoption stream in the same status
-projection. A malformed line is counted, not treated as success.
+`queue.adoptionEvents` exposes the bounded adoption projection in the same
+status snapshot. After the unification it is derived by filtering the unified
+journal for `queue.item.adopted`: the full valid record set is scanned before
+the display limit is applied, so unrelated recent events cannot hide adoption
+observations. A malformed line or an incomplete/misplaced adoption line is
+counted as malformed, not treated as success.
 
 ### 6.2 Event
 
-Each successful **first** adoption appends one bounded JSON line to
-`<repo>/.cliyard/queue-events/adoptions.jsonl`:
+Each successful **first** adoption appends exactly one bounded JSON line to
+the unified queue journal,
+`<repo>/.cliyard/queue-events/events.jsonl`:
 
 ```json
 {
@@ -333,11 +349,38 @@ Each successful **first** adoption appends one bounded JSON line to
 }
 ```
 
-The stream is append-only and bounded by construction (closed fields plus the
-evidence limits above). A journal write failure is observability-only and
-never turns a successful adoption into a failure; `queue.json` remains
-authoritative for adoption state. Review command text and output are never
-written to this event.
+The record uses the common journal fields (`version`, `eventId`, `at`, `type`)
+plus the complete adoption field set. Event-specific rules are enforced both on
+append and when reading the journal:
+
+- every adoption field is required: `itemId`, `runId`,
+  `status: "completed"`, `sourceManifestStatus` (`blocked` or `interrupted`),
+  `baseCommit`, `reviewedCommit`, `contractsHash`, `reviewEvidencePath`,
+  `reviewEvidenceHash`, `approvedBy` and `reason`;
+- `baseCommit` and `reviewedCommit` are full Git object ids (exactly 40 or 64
+  hex characters); `contractsHash` and `reviewEvidenceHash` are 64-hex SHA-256
+  values;
+- `itemId` and `runId` are at most 128 characters, `approvedBy` at most 128,
+  `reason` at most 1,000 and `reviewEvidencePath` at most 4,096; text fields
+  are non-empty and reject the same obvious credential patterns as
+  `OperatorResolution`;
+- an oversized or secret-bearing value is rejected rather than silently
+  truncated;
+- adoption-only fields (`sourceManifestStatus`, `baseCommit`, `reviewedCommit`,
+  `contractsHash`, `reviewEvidencePath`, `reviewEvidenceHash`, `approvedBy`)
+  are rejected on every other event type;
+- malformed, incomplete or misplaced lines are counted as journal malformed
+  lines and never appear as adoption observations.
+
+Exactly one record is appended per successful first adoption. An idempotent
+repeat returns the existing resolution before the append path, so it does not
+add another record. The journal is append-only and bounded by construction
+(closed fields plus the evidence limits in section 3). A journal write failure
+is observability-only and never turns a successful adoption into a failure;
+`queue.json` remains authoritative for adoption state. Review command text and
+output are never written to this event. `queue status` derives its bounded
+`adoptionEvents` projection by filtering these records from the same journal;
+there is no `adoptions.jsonl` writer or reader.
 
 ## 7. Fail-closed behavior measured by focused tests
 
@@ -358,15 +401,57 @@ written to this event.
 | `--artifact` is a branch, `HEAD`, abbreviated, unknown, outside `HEAD` lineage, or not a descendant of the pinned base | rejected |
 | Evidence path, evidence bytes, `approvedBy` or `reason` differ on re-adoption | rejected as a different resolution identity |
 | Persisted resolution is wrong-version, item-mismatched, wrong source status, malformed commit/date, or attached to a non-completed item | queue parse fails closed; document is not rewritten |
+| `queue.item.adopted` is missing a required field, has a non-`completed` status, wrong source status, abbreviated commit or malformed hash | append rejected; a persisted line with the same defect is counted as malformed and never surfaces as an adoption observation |
+| `queue.item.adopted` carries an oversized or secret-bearing field | append rejected; the value is not truncated or redacted into a valid event |
+| An adoption-only field appears on an unrelated event type | append rejected; on read the line is malformed |
+| The unified journal path is unwritable | adoption still succeeds; `queue.json` remains authoritative; status reports the journal read error and zero adoption observations |
 | Recorded adopted lineage is tampered after a dependent already materialized | dependent blocks before dispatch; runner calls `0`; recorded materialization unchanged |
 
-Observability exceptions are deliberately narrow: only the adoption event
-append is best-effort. All authority-bearing changes above are fail-closed.
+Observability exceptions are deliberately narrow: only the unified-journal
+adoption append is best-effort. All authority-bearing changes above are
+fail-closed.
 
 ## 8. Measured verification
 
 All commands were run from this worktree on 2026-10-28. Durations are local
 single-run test-runner values; they are not a CI, flake-rate or cost claim.
+
+### Integrated HEAD `41e5fcd` (journal unification)
+
+| Command | Result | Test-runner duration |
+| --- | --- | --- |
+| `npm run build` | exit `0` | — |
+| `npx tsx --test tests/queue-adoption.test.ts` | 11/11 pass | 3006.48 ms |
+| `npx tsx --test tests/queue-control-snapshot.test.ts` | 8/8 pass | 832.59 ms |
+| `npx tsx --test tests/deadline-extension.test.ts` | 13/13 pass | 23591.57 ms |
+| `npm test` (full suite, run 1) | 373/375 pass, 2 fail | 25983.47 ms |
+| `npm test` (full suite, run 2) | 375/375 pass, 0 fail | 24814.49 ms |
+
+The two run-1 failures were in `tests/deadline-extension.test.ts`:
+
+- `the same child timer is re-armed only after async persistence resolves`:
+  assertion `1 !== 0` after the worker reported
+  `worker timed out after 2700ms` even though one 2000 ms extension had been
+  granted (`cumulativeTimeoutMs 2700`);
+- `collect waits for an in-flight grant checkpoint past child exit`:
+  assertion `false !== true`.
+
+Both passed in the isolated 13/13 deadline-extension run above and in the
+second captured complete run. The unification slice changes only
+`src/orchestration/control-snapshot.ts`, `src/orchestration/event-journal.ts`,
+`src/orchestration/queue-store.ts`, `tests/queue-adoption.test.ts` and
+`tests/queue-control-snapshot.test.ts`; it does not touch deadline code. An
+earlier complete-suite invocation in the same session also exited non-zero,
+but its output was truncated before the summary, so no count from it is used.
+The captured two-run observation does not establish a flake rate or a stable
+green gate.
+
+The suite grew from the recorded 371 to 375: queue-adoption went from 8 to 11
+tests (+3) and queue-control-snapshot from 7 to 8 (+1). The full suite includes
+the adoption, Supervisor, queue, Plan-backed, read-context, failure/cost,
+runtime and drill groups.
+
+### Adoption slice at `ce1157a` (historical baseline)
 
 | Command | Result | Test-runner duration |
 | --- | --- | --- |
@@ -375,12 +460,11 @@ single-run test-runner values; they are not a CI, flake-rate or cost claim.
 | `npx tsx --test tests/deadline-extension.test.ts` | 13/13 pass | 23601.98 ms |
 | `npm test` (full suite) | 371/371 pass, 0 fail | 24411.1 ms |
 
-The full suite includes both upstream slices and all prior Supervisor, queue,
-Plan-backed, read-context, failure/cost, runtime and drill groups. Before the
-two slices the recorded baseline was 361/362 with the deadline fixture red.
-This integration closes the fixture and adds 8 adoption tests plus 1 new
-deadline test, yielding the measured 371/371. Counts were not re-run a second
-time in this closure; the single local run is the evidence.
+Before the two adoption-slice commits the recorded baseline was 361/362 with
+the deadline fixture red. That integration closed the fixture and added 8
+adoption tests plus 1 new deadline test, yielding the measured 371/371. Those
+counts were not re-run a second time at that slice; the single local run is the
+historical evidence.
 
 ### Deadline-fixture stability
 
@@ -401,8 +485,8 @@ Focused result: 13/13 pass, including the new late-result test.
 
 ## 9. Remaining gaps and next order
 
-This slice closes manual adoption only. The execution-authority chain still
-lacks, in required order:
+These slices close manual adoption and its adoption-event split-brain; they do
+not close the execution-authority chain, which still lacks, in required order:
 
 1. **WorkerLease persisted at spawn and owner-death recovery.** The controller
    must persist exact worker identity as soon as it exists, not after
@@ -435,6 +519,11 @@ Upstream `manual-queue-adoption` (`b7f7d9e`):
 Upstream `deadline-fixture-stability` (`c57d591`):
 `tests/deadline-extension.test.ts` only.
 
+Upstream `unify-adoption-journal` (`2c88012`):
+`src/orchestration/control-snapshot.ts`, `src/orchestration/event-journal.ts`,
+`src/orchestration/queue-store.ts`, `tests/queue-adoption.test.ts` and
+`tests/queue-control-snapshot.test.ts`.
+
 This documentation closure changes only:
-`docs/evidence/QUEUE_ADOPTION.md`, `README.md`,
-`docs/NEXT_ITERATION.md` and `docs/NEXT_STEP_CONTROLLER.md`.
+`design/queue-adoption-v1.md`, `README.md`, `docs/NEXT_ITERATION.md`,
+`docs/NEXT_STEP_CONTROLLER.md` and `docs/evidence/QUEUE_ADOPTION.md`.

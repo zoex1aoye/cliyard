@@ -6,10 +6,13 @@
 >
 > Implementation update (2026-10-28): `queue status`, the queue event journal,
 > the read-only resource/provider snapshot, worker failure taxonomy/cost
-> truth, **queue manual adoption v1**, run binding, worker path audit,
-> health-gated budget continuation/deadline extension, and deadline-fixture
-> stability are implemented. The next P0 slice is **WorkerLease persisted at
-> spawn plus controller owner-death recovery**. Only after that: secret-free
+> truth, **queue manual adoption v1**, **adoption journal unification**
+> (`queue.item.adopted` lives only in `.cliyard/queue-events/events.jsonl`;
+> the status adoption projection filters that journal and there is no
+> `adoptions.jsonl`), run binding, worker path audit, health-gated budget
+> continuation/deadline extension, and deadline-fixture stability are
+> implemented. The next P0 slice is **WorkerLease persisted at spawn plus
+> controller owner-death recovery**. Only after that: secret-free
 > `ProfileCatalog` with real binding activation, per-run Supervisor ownership,
 > and fixed hierarchical admission. Windows Job Object ownership and dynamic
 > routing scores stay behind those prerequisites. Evidence:
@@ -39,6 +42,7 @@ queue observe / status (implemented)
   -> healthy budget continuation + deadline extension (implemented)
   -> queue manual adoption / OperatorResolution (implemented)
   -> deadline fixture stability (implemented)
+  -> adoption journal unification (implemented)
   -> telemetry-backed task estimates (design only)
   -> WorkerLease persisted at spawn + controller owner-death recovery (NEXT)
   -> secret-free ProfileCatalog + real endpoint/account binding activation
@@ -54,9 +58,10 @@ queue observe / status (implemented)
   -> daemon/launchd/systemd decision
 ```
 
-Adoption and the deadline fixture are closed. They do **not** authorize
-parallel dispatch, profile activation, admission, Windows parity or dynamic
-scoring; those remain separate prerequisites in the order above.
+Adoption, its journal unification and the deadline fixture are closed. They
+do **not** authorize parallel dispatch, profile activation, admission, Windows
+parity or dynamic scoring; those remain separate prerequisites in the order
+above.
 
 The controller is an event-loop over durable files. It must rehydrate from
 disk on every cycle and must not depend on an LLM's context staying alive.
@@ -77,9 +82,9 @@ entry selection are specified in
 <text>` closes one blocked item after a human reviewed and integrated its
 work. The source blocked/interrupted `RunManifest` remains historical truth;
 the queue stores a separately versioned `OperatorResolution` in `queue.json`
-and appends a bounded `queue.item.adopted` event. `queue status` reports
-`completion: "adopted"` while retaining the blocked run and its unaccepted
-tasks.
+and appends exactly one bounded `queue.item.adopted` record to the unified
+queue journal. `queue status` reports `completion: "adopted"` while retaining
+the blocked run and its unaccepted tasks.
 
 Preconditions are fail-closed: exact `lastRunId`, unchanged frozen contracts
 (and approved Plan for Plan-backed items), a full reviewed commit that
@@ -90,12 +95,46 @@ rejected. Plan-backed dependants record `upstreamAdoptedCommit` and use the
 reviewed commit as their base unless a valid completed upstream integration
 head contains it.
 
-Measured on integration HEAD `ce1157a`: build exit `0`; queue-adoption focused
-**8/8** (2539.7 ms); deadline-extension focused **13/13** (23601.98 ms); full
-suite **371/371** (24411.1 ms, 0 fail). Evidence:
+Measured for the adoption slice on integration HEAD `ce1157a`: build exit `0`;
+queue-adoption focused **8/8** (2539.7 ms); deadline-extension focused
+**13/13** (23601.98 ms); full suite **371/371** (24411.1 ms, 0 fail). Evidence:
 [evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md).
 
-This slice does **not** implement WorkerLease at spawn, owner-death recovery,
+#### Adoption journal unification (2026-10-28)
+
+`unify-adoption-journal` (`2c88012`) moved the adoption observation into the
+existing journal. New `queue.item.adopted` records are written only to
+`<repo>/.cliyard/queue-events/events.jsonl`; no `adoptions.jsonl` is created or
+read. `queue status.queue.adoptionEvents` is derived by filtering the unified
+journal: the full valid record set is scanned before the bounded display window
+is applied, so unrelated recent events cannot hide adoption observations.
+`queue.json` remains the authority for `OperatorResolution`; a failed journal
+append is observability-only.
+
+The event-specific contract requires the complete adoption field set:
+`itemId`/`runId` ≤128 characters, `status` must be `completed`,
+`sourceManifestStatus` is `blocked|interrupted`, `baseCommit`/`reviewedCommit`
+are full 40- or 64-hex Git object ids, `contractsHash`/`reviewEvidenceHash`
+are 64-hex SHA-256, `approvedBy` ≤128, `reason` ≤1,000 and
+`reviewEvidencePath` ≤4,096. Text is non-empty and rejects obvious
+credentials. Adoption-only fields on any other event type fail closed;
+malformed, incomplete or misplaced lines are counted as malformed and never
+appear as adoption observations. Oversized or secret-bearing input is
+rejected, not truncated.
+
+Measured on integrated HEAD `41e5fcd`: build exit `0`; queue-adoption focused
+**11/11** (3006.48 ms); queue-control-snapshot focused **8/8** (832.59 ms);
+deadline-extension focused **13/13** (23591.57 ms). Two captured complete-suite
+runs measured **373/375** (25983.47 ms, two deadline-extension
+async-persistence failures) and then **375/375** (24814.49 ms, 0 fail); an
+earlier invocation also exited non-zero but its output was truncated before
+the summary, so no count from it is used. The two counted failures did not
+reproduce in the focused run or the second captured full run; the unification
+slice does not touch deadline code, and this is not a flake-rate or
+stable-green-gate claim. Evidence:
+[evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md).
+
+These slices do **not** implement WorkerLease at spawn, owner-death recovery,
 profile activation, admission, parallel dispatch, Windows parity or a daemon.
 
 ## Immediate next slices
@@ -154,11 +193,14 @@ run.started | run.resumed
 provider.session.started | provider.session.ended
 run.completed | run.blocked | run.interrupted
 queue.retry | queue.cancel
+queue.item.adopted
 controller.started | controller.heartbeat | controller.stopped
 ```
 
 The journal is audit/observation only. It is not contract authority, not
-acceptance evidence and not a replacement for RunManifest.
+acceptance evidence and not a replacement for RunManifest. Since the
+adoption-journal unification, `queue.item.adopted` is the only adoption
+observation and `queue status.queue.adoptionEvents` filters this journal.
 
 ### 3. `worker-failure-taxonomy-v0` (P0)
 
@@ -204,8 +246,11 @@ introduced. The Claude adapter's pre-existing bounded transient retry is
 unchanged; after exhaustion it returns the final structured failure.
 
 Measured at that slice: focused failure/cost 50/50, full suite 290/290,
-`npm run build` exit 0. The current integrated suite is **371/371**
-(2026-10-28, HEAD `ce1157a`). Evidence:
+`npm run build` exit 0. On integrated HEAD `41e5fcd` (2026-10-28) the complete
+suite was captured twice: **373/375** then **375/375** (24814.49 ms, 0 fail);
+an earlier invocation also exited non-zero before its summary was captured and
+is not counted; see [evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md)
+for the two first-run deadline-extension failures. Evidence:
 [evidence/FAILURE_COST_TRUTH.md](evidence/FAILURE_COST_TRUTH.md).
 
 ### 4. Audited attempt-policy recovery (P1)
@@ -418,8 +463,12 @@ The controller slice is ready to start when:
 3. Operator-driven attempt extension is audited and does not dispatch by
    itself. **Not implemented.**
 4. The monitoring projection is demonstrably read-only. **Implemented.**
-5. The existing suite remains green. **Implemented** at **371/371**
-   (2026-10-28, HEAD `ce1157a`).
+5. The existing suite remains green. **Measured** at **375/375** on the second
+   captured complete run (2026-10-28, integrated HEAD `41e5fcd`); the first
+   captured run was **373/375** with two deadline-extension failures that did
+   not reproduce in the focused run or the second captured full run. An earlier
+   invocation also exited non-zero before its summary was captured and is not
+   counted. This is a local observation, not a stable-green-gate claim.
 6. A durable `WorkerLease` is persisted at spawn, and exact-identity
    owner-death recovery is measured, including `needs_human` for ambiguous
    ownership. **Not implemented; next prerequisite.**
@@ -434,7 +483,8 @@ The controller slice is ready to start when:
     limit; the warm-start value 3 is not hardcoded as a permanent cap.
     **Not implemented.**
 11. Queue manual adoption closes a reviewed blocked item without rewriting the
-    source RunManifest or accepting its tasks. **Implemented.**
+    source RunManifest or accepting its tasks. **Implemented**; the adoption
+    observation is recorded only in the unified queue journal.
 12. Windows Job Object parity and dynamic scoring are not controller-start
     prerequisites, but neither may be represented as done. **Not implemented.**
 

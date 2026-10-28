@@ -118,6 +118,31 @@
 > Job Object → telemetry-backed dynamic scoring**。证据见
 > [evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md)。
 >
+> **2026-10-28 adoption journal unification closure：** `unify-adoption-journal`
+> (`2c88012`) 已合入 integration HEAD `41e5fcd`。新的 `queue.item.adopted`
+> 只写入统一的 `.cliyard/queue-events/events.jsonl`，不再创建或读取
+> `adoptions.jsonl`；`queue status.queue.adoptionEvents` 由过滤统一 journal
+> 派生（先扫描完整有效记录，再应用显示上限），journal 写失败仍只影响观测，
+> `queue.json` 的 `OperatorResolution` 仍是 adoption authority。事件契约要求
+> adoption 字段完整集合：`itemId`/`runId` ≤128、`status` 必须
+> `completed`、`sourceManifestStatus` 为 `blocked|interrupted`、
+> `baseCommit`/`reviewedCommit` 为 40 或 64 位 full commit id、
+> `contractsHash`/`reviewEvidenceHash` 为 64 位 SHA-256、`approvedBy` ≤128、
+> `reason` ≤1,000、`reviewEvidencePath` ≤4,096；文本拒绝明显凭据，
+> adoption-only 字段出现在其他事件类型即 fail closed，malformed/misplaced
+> 行只计入 malformed 计数。实测（2026-10-28，integrated HEAD `41e5fcd`，
+> macOS，Node `v20.20.2`）：`npm run build` exit 0；queue-adoption focused
+> **11/11**（3006.48 ms）、queue-control-snapshot focused **8/8**
+> （832.59 ms）、deadline-extension focused **13/13**（23591.57 ms）；两次
+> 捕获的完整套件运行：第一次 **373/375**（25983.47 ms，2 个
+> deadline-extension async persistence 测试失败），第二次 **375/375**
+> （24814.49 ms，0 fail）；更早一次完整运行退出非零但输出在汇总前被截断，
+> 未采用其计数。该 unification 切片未修改 deadline 代码；两次失败在单独
+> focused 运行和第二次捕获的完整运行中未复现，本轮不据此声明 flake 率或
+> 稳定绿色门禁。adoption、RunManifest 与 lineage 语义不变。下一步仍是
+> **WorkerLease at spawn + controller owner-death recovery**。证据见
+> [evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md)。
+>
 > 当前已完成能力仍不包含 daemon/后台服务、跨主机回收、浏览器证据、SQLite、
 > 有界并行准入和多父 integration/merge queue；其中 **CLI + 模型路由、有界
 > 并行派发和 EvidenceBundle 已升级为下一阶段目标**，不代表当前已经实现。
@@ -269,14 +294,18 @@
   - 重复 adopt 仅在同一 resolution identity 的全部字段 byte-equal 时幂等
     （`approvedAt` 除外）；任何差异 fail closed；原 RunManifest 与 task
     acceptance 均不改变，retry/cancel 仍拒绝 completed item；
-  - 首次成功 append 一条 bounded `queue.item.adopted` 到
-    `.cliyard/queue-events/adoptions.jsonl`；journal 写失败只影响观测，
-    `queue.json` 仍是 adoption authority；`queue status` 暴露
-    `completion: "adopted"` 与 bounded adoption events；
+  - 首次成功 append 一条 bounded `queue.item.adopted` 到统一的
+    `.cliyard/queue-events/events.jsonl`；不再创建或读取
+    `adoptions.jsonl`；journal 写失败只影响观测，`queue.json` 仍是 adoption
+    authority；`queue status.queue.adoptionEvents` 由过滤该 journal 派生，
+    并暴露 `completion: "adopted"`；
   - Plan-backed dependant 的 materialization 记录 `upstreamAdoptedCommit`；
     source manifest 未 completed 时以 reviewed commit 为 base，只有合法
     completed `integrationHead` 包含 reviewed commit 时才使用该 head；
-  - 实测 focused 8/8（2539.7 ms）、full 371/371（24411.1 ms）、
+  - 实测（adoption 切片 HEAD `ce1157a`）focused 8/8（2539.7 ms）、full
+    371/371（24411.1 ms）；统一 journal 后 integrated HEAD `41e5fcd`
+    focused 11/11（3006.48 ms）、queue-control focused 8/8（832.59 ms）、
+    两次捕获的完整套件分别为 373/375 与 375/375（24814.49 ms）、
     `npm run build` exit 0；见
     [evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md)。
 - **Chained Read Context v0（pinned base）**
@@ -682,6 +711,30 @@ deadline 竞速，并断言 late result 仍然 timeout。以上为单次本机�
 CI、长期 flake 率或跨主机结论。测试通过方式与证据边界见
 [evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md)。
 
+### 2026-10-28 Adoption journal unification（integrated HEAD `41e5fcd`）
+
+集成 HEAD `41e5fcd`（`unify-adoption-journal` `2c88012`，macOS，Node
+`v20.20.2`）：
+
+```text
+npm run build                                          → exit 0
+focused queue adoption                                 → 11/11 通过（3006.48 ms）
+focused queue control snapshot                         → 8/8 通过（832.59 ms）
+focused deadline extension                             → 13/13 通过（23591.57 ms）
+npm test（完整套件，第一次）                           → 373/375 通过（25983.47 ms，2 fail）
+npm test（完整套件，第二次）                           → 375/375 通过（24814.49 ms，0 fail）
+```
+
+第一次完整运行的 2 个失败都在 `tests/deadline-extension.test.ts`：
+`the same child timer is re-armed only after async persistence resolves`
+（`1 !== 0`）与 `collect waits for an in-flight grant checkpoint past child
+exit`（`false !== true`）。两者在单独 focused 运行和第二次捕获的完整运行中
+通过；更早一次完整运行退出非零但输出在汇总前被截断，未采用其计数。该
+unification 切片未修改 deadline 代码，两-run 观察不构成 flake 率或稳定绿色
+门禁结论。375 由此前 371 加上 queue-adoption 8→11（+3）与
+queue-control 7→8（+1）组成。证据见
+[evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md)。
+
 ### 2026-10-27 历史基线（failure/cost 工作树）
 
 当前套件（包含 failure/cost、chained read context、Plan-backed chain、queue、
@@ -855,8 +908,9 @@ Worker 验收演练，因此不把它们当作 drill、reaper 或跨主机证据
 已完成的 RuntimeManager v0、Orphan Reaper v0、hardening、failure drills v0、
 attempt continuity / worker progress / drill abnormal recovery v0、Task
 Architect v0、**Foreground Orchestration Queue v0**、
-**Plan-backed Chained Queue Base v0**、**Queue Manual Adoption v1**、
-**Chained Read Context v0**、**ControlSnapshot/event/resource v0**，以及
+**Plan-backed Chained Queue Base v0**、**Queue Manual Adoption v1（含统一
+adoption journal）**、**Chained Read Context v0**、**ControlSnapshot/event/resource v0**，
+以及
 **Worker Failure Taxonomy / Cost Truth v0**，加上 deadline fixture
 stability，不在下一迭代重复。
 下一具体步骤严格按执行权威链，而不是同时铺开：
@@ -1174,8 +1228,13 @@ Chained Read Context v0（已完成）：
     `OperatorResolution`，原 RunManifest 保持历史真相、task 不标记 accepted；
     bounded secret-free evidence、identity 幂等、adoption event 与
     `completion: "adopted"` status；Plan-backed dependant 记录
-    `upstreamAdoptedCommit`。focused 8/8（2539.7 ms）、full 371/371
-    （24411.1 ms）、build exit 0；见
+    `upstreamAdoptedCommit`。adoption 切片 focused 8/8（2539.7 ms）、full
+    371/371（24411.1 ms）、build exit 0。后续 `unify-adoption-journal`
+    (`2c88012`) 将 `queue.item.adopted` 统一到
+    `.cliyard/queue-events/events.jsonl`，不再写/读 `adoptions.jsonl`；
+    integrated HEAD `41e5fcd` 实测 queue-adoption focused 11/11
+    （3006.48 ms）、queue-control focused 8/8（832.59 ms）、两次捕获的
+    full 分别为 373/375 与 375/375（24814.49 ms）、build exit 0；见
     [evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md)。
 65. [已完成] Deadline fixture stability：test-only marker 握手替代固定
     sleep，拓宽 fixture 窗口，并新增 late-result 仍 timeout 的负例；
@@ -1253,7 +1312,10 @@ Chained Read Context v0（已完成）：
             focused 50/50、full 290/290、build exit 0
 18. [已完成] Queue Manual Adoption v1 + deadline fixture stability：
             OperatorResolution/evidence/lineage/status/event；focused 8/8、
-            deadline focused 13/13、full 371/371、build exit 0
+            deadline focused 13/13、full 371/371、build exit 0；随后
+            adoption journal unification：`queue.item.adopted` 只写
+            events.jsonl，queue-adoption focused 11/11、queue-control 8/8、
+            integrated full 两次捕获为 373/375、375/375、build exit 0
 19. 下一步 P0：WorkerLease persisted at spawn + controller owner-death
             recovery（精确身份、保留证据、模糊身份 needs_human）
 20. 然后：secret-free ProfileCatalog + 真实 endpoint/account binding
@@ -1274,9 +1336,12 @@ Chained Read Context v0（已完成）：
 Supervisor v0（前台、原子 JSON RunManifest、进程级 SIGKILL 恢复）已完成，
 其操作语义与自举手册见 [docs/SUPERVISOR_V0.md](SUPERVISOR_V0.md)。当前完整套件
 包含 failure/cost、chained read context、Plan-backed chain、queue manual
-adoption、queue、Task Architect、supervisor、attempt
+adoption（统一 journal）、queue、Task Architect、supervisor、attempt
 continuity/progress、ControlSnapshot、deadline extension 与
-runtime/drill 测试（**371/371** 通过，2026-10-28，HEAD `ce1157a`）。
+runtime/drill 测试（2026-10-28 integrated HEAD `41e5fcd`：两次捕获的本机运行
+分别为 **373/375** 与 **375/375**；第一次 2 个 deadline-extension async
+persistence 测试失败，第二次 0 fail；另一次完整运行的输出在汇总前被截断，
+未采用其计数；focused queue-adoption 11/11、queue-control 8/8）。
 本轮没有引入 daemon 或 SQLite，也没有把 supervisor 或 queue 的后台化列入
 计划。attempt reuse 是 worktree 连续性，worker progress 是观察信息；
 failure/cost 也是观察信息，不授权自动 retry；Task Architect 只产出 Plan；
@@ -1286,7 +1351,7 @@ queue 消费显式加入的 frozen contracts 或已批准 Plan，但不生成、
 不标记 accepted。RuntimeManager、Orphan Reaper、hardening、failure drills、
 attempt continuity/progress/异常 drill 回收、Task Architect、Foreground
 Orchestration Queue、Plan-backed Chained Queue Base、Queue Manual Adoption
-v1、Chained Read Context、ControlSnapshot/event 与 Worker Failure
+v1（含统一 adoption journal）、Chained Read Context、ControlSnapshot/event 与 Worker Failure
 Taxonomy/Cost Truth 均已收口；下一阶段严格先做 **WorkerLease at spawn +
 owner-death recovery**，再做 **ProfileCatalog/真实 binding activation**、
 per-run ownership 和 **fixed hierarchical admission**，然后才是有界并行、
