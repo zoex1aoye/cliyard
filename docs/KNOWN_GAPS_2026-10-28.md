@@ -178,6 +178,30 @@ It starts from reviewed draft `af76d3a`, not from an accepted integration.
 That provenance must remain explicit; the draft is not silently promoted to
 accepted code.
 
+## Second self-host attempt and cutover
+
+The nested-group Plan run
+`e2e4825c-a9d7-4b0b-9cb1-e8c25ad075c5` produced the group-compaction
+implementation and passed independent focused **62/62**, build and complete
+suite **461/461** in **25.89 s**, including real 512-member live and
+controller-death fixtures. It was nevertheless rejected by the same 256-PID
+failure because the outer Worker was still launched by accepted `9a38174`
+code, not by the implementation in its own worktree.
+
+The reviewed v1.1 draft is preserved at
+`a9d6e00` on
+`cliyard/mvsbxg7y-nested-process-group-compaction-core`. It is a reviewed
+cutover base, not an accepted integration.
+
+The next Plan is documentation-only and must run with Supervisor loaded from
+that reviewed draft:
+
+- [nested-process-group-cutover-v1.md](../design/nested-process-group-cutover-v1.md);
+- [nested-process-group-cutover-v1.plan.json](../design/nested-process-group-cutover-v1.plan.json).
+
+This is required to prove the new outer manager can own a high-fan-out Worker
+lifecycle. It does not retroactively accept the two blocked RunManifests.
+
 ## Next-run execution rule
 
 For subsequent self-host runs:
