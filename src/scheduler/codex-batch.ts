@@ -34,6 +34,7 @@ import {
 } from "../agents/continuation.js";
 import { collectChangedPaths } from "../agents/git-paths.js";
 import { auditPathScope } from "../agents/path-scope.js";
+import type { WorkerProcessRecord } from "../agents/process-tree.js";
 import {
   isWorkerProgressEvent,
   type AgentAdapter,
@@ -54,6 +55,7 @@ import {
 } from "../supervisor/store.js";
 import {
   MAX_PATH_AUDITS,
+  MAX_PROCESS_TREES,
   type PathAuditRecord,
   type ReusableAttempt,
   type RunManifest,
@@ -940,6 +942,10 @@ export async function runCodexBatch(
                     manifest.tasks[id]?.pathAudits,
                     result.pathAudits,
                   ),
+                  ...processTreeFields(
+                    manifest.tasks[id]?.processTrees,
+                    result.processTrees,
+                  ),
                   ...taskExtensionFields(
                     manifest.tasks[id]?.extensions,
                     result.extensions,
@@ -973,6 +979,9 @@ export async function runCodexBatch(
                   ...(result.failure !== undefined
                     ? { failure: result.failure }
                     : {}),
+                  ...(result.cleanupFailure !== undefined
+                    ? { cleanupFailure: result.cleanupFailure }
+                    : {}),
                   ...(result.cost !== undefined ? { cost: result.cost } : {}),
                   attemptWorktree: attempt.worktree,
                   attemptBranch: attempt.branch,
@@ -982,6 +991,10 @@ export async function runCodexBatch(
                   pathAudits: mergePathAudits(
                     manifest.tasks[id]?.pathAudits,
                     result.pathAudits,
+                  ),
+                  ...processTreeFields(
+                    manifest.tasks[id]?.processTrees,
+                    result.processTrees,
                   ),
                   ...taskExtensionFields(
                     manifest.tasks[id]?.extensions,
@@ -1074,6 +1087,17 @@ function mergePathAudits(
   observed: PathAuditRecord[],
 ): PathAuditRecord[] {
   return [...(existing ?? []), ...observed].slice(-MAX_PATH_AUDITS);
+}
+
+/** Bounded cumulative process-tree evidence, newest last. */
+function processTreeFields(
+  existing: WorkerProcessRecord[] | undefined,
+  observed: WorkerProcessRecord[] | undefined,
+): { processTrees?: WorkerProcessRecord[] } {
+  const merged = [...(existing ?? []), ...(observed ?? [])].slice(
+    -MAX_PROCESS_TREES,
+  );
+  return merged.length > 0 ? { processTrees: merged } : {};
 }
 
 function taskExtensionFields(
