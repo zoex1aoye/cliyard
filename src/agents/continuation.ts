@@ -7,6 +7,7 @@
 
 export const DEADLINE_EXTENSION_POLICY_VERSION = 1 as const;
 export const BUDGET_CONTINUATION_POLICY_VERSION = 1 as const;
+export const QUEUE_CONTINUATION_POLICY_VERSION = 1 as const;
 export const TASK_EXTENSION_RECORD_VERSION = 1 as const;
 
 /** Node timers do not reliably support delays beyond signed 32-bit ints. */
@@ -77,6 +78,43 @@ export const DEFAULT_BUDGET_CONTINUATION_POLICY: Readonly<BudgetContinuationPoli
     autoContinue: false,
     overshootReserveUsd: 0,
   });
+
+/**
+ * A queue-owned envelope. Values are parsed once at add time and are never
+ * recomputed from environment variables or mutable source policy files.
+ */
+export interface QueueContinuationPolicy {
+  version: typeof QUEUE_CONTINUATION_POLICY_VERSION;
+  deadlineExtension?: DeadlineExtensionPolicy;
+  budgetContinuation?: BudgetContinuationPolicy;
+  /** Accepted input alias; normalized to `deadlineExtension` when persisted. */
+  deadline?: DeadlineExtensionPolicy;
+  /** Accepted input alias; normalized to `budgetContinuation` when persisted. */
+  budget?: BudgetContinuationPolicy;
+  /** Accepted input alias; normalized to `deadlineExtension` when persisted. */
+  deadlinePolicy?: DeadlineExtensionPolicy;
+  /** Accepted input alias; normalized to `budgetContinuation` when persisted. */
+  budgetPolicy?: BudgetContinuationPolicy;
+}
+
+export interface QueueContinuationPolicySummary {
+  deadlineExtension: {
+    baseTimeoutMs: number;
+    extensionStepMs: number;
+    maxExtensions: number;
+    maxTotalTimeoutMs: number;
+    healthyActivityWindowMs: number;
+    autoExtend: boolean;
+  } | null;
+  budgetContinuation: {
+    baseGuardUsd: number;
+    continuationGuardUsd: number;
+    maxContinuations: number;
+    maxCumulativeGuardUsd: number;
+    autoContinue: boolean;
+    overshootReserveUsd: number;
+  } | null;
+}
 
 interface TaskExtensionRecordBase {
   version: typeof TASK_EXTENSION_RECORD_VERSION;
@@ -224,6 +262,178 @@ export function parseBudgetContinuationPolicy(
     autoContinue,
     overshootReserveUsd,
   };
+}
+
+/**
+ * Parse the queue envelope after rejecting secret-bearing or unknown fields.
+ * The canonical persisted names are `deadlineExtension` and
+ * `budgetContinuation`; legacy field aliases are normalized on read.
+ */
+export function parseQueueContinuationPolicy(
+  value: unknown,
+): QueueContinuationPolicy | undefined {
+  if (!isRecord(value) || value.version !== QUEUE_CONTINUATION_POLICY_VERSION) {
+    return undefined;
+  }
+  if (
+    !hasOnlyKeys(value, [
+      "version",
+      "deadlineExtension",
+      "budgetContinuation",
+      "deadline",
+      "budget",
+      "deadlinePolicy",
+      "budgetPolicy",
+    ])
+  ) {
+    return undefined;
+  }
+
+  const deadlineRaw = selectPolicyField(value, [
+    "deadlineExtension",
+    "deadline",
+    "deadlinePolicy",
+  ]);
+  const budgetRaw = selectPolicyField(value, [
+    "budgetContinuation",
+    "budget",
+    "budgetPolicy",
+  ]);
+  if (!deadlineRaw.ok || !budgetRaw.ok) return undefined;
+  if (deadlineRaw.value === undefined && budgetRaw.value === undefined) {
+    return undefined;
+  }
+  if (
+    deadlineRaw.value !== undefined &&
+    (!isRecord(deadlineRaw.value) ||
+      !hasOnlyKeys(deadlineRaw.value, [
+        "version",
+        "baseTimeoutMs",
+        "extensionStepMs",
+        "maxExtensions",
+        "maxTotalTimeoutMs",
+        "healthyActivityWindowMs",
+        "autoExtend",
+      ]))
+  ) {
+    return undefined;
+  }
+  if (
+    budgetRaw.value !== undefined &&
+    (!isRecord(budgetRaw.value) ||
+      !hasOnlyKeys(budgetRaw.value, [
+        "version",
+        "baseGuardUsd",
+        "continuationGuardUsd",
+        "maxContinuations",
+        "maxCumulativeGuardUsd",
+        "autoContinue",
+        "overshootReserveUsd",
+      ]))
+  ) {
+    return undefined;
+  }
+
+  const deadlineExtension =
+    deadlineRaw.value === undefined
+      ? undefined
+      : parseDeadlineExtensionPolicy(deadlineRaw.value);
+  const budgetContinuation =
+    budgetRaw.value === undefined
+      ? undefined
+      : parseBudgetContinuationPolicy(budgetRaw.value);
+  if (
+    (deadlineRaw.value !== undefined && deadlineExtension === undefined) ||
+    (budgetRaw.value !== undefined && budgetContinuation === undefined)
+  ) {
+    return undefined;
+  }
+
+  return Object.freeze({
+    version: QUEUE_CONTINUATION_POLICY_VERSION,
+    ...(deadlineExtension !== undefined
+      ? { deadlineExtension: Object.freeze(deadlineExtension) }
+      : {}),
+    ...(budgetContinuation !== undefined
+      ? { budgetContinuation: Object.freeze(budgetContinuation) }
+      : {}),
+  });
+}
+
+/** Parse one queue policy JSON document, returning undefined on any drift. */
+export function parseQueueContinuationPolicyJson(
+  text: string,
+): QueueContinuationPolicy | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
+  return parseQueueContinuationPolicy(value);
+}
+
+/**
+ * Map a frozen queue policy to the complete Supervisor value flags. Boolean
+ * opt-ins are emitted only when true because the Supervisor has no explicit
+ * false flag.
+ */
+export function continuationPolicyToSupervisorArgs(
+  value: QueueContinuationPolicy,
+): string[] {
+  const policy = parseQueueContinuationPolicy(value);
+  if (!policy) throw new Error("invalid queue continuation policy");
+  const args: string[] = [];
+  const deadline = policy.deadlineExtension;
+  if (deadline) {
+    args.push(
+      "--timeout-ms",
+      String(deadline.baseTimeoutMs),
+      "--deadline-extension-ms",
+      String(deadline.extensionStepMs),
+      "--max-deadline-extensions",
+      String(deadline.maxExtensions),
+      "--max-total-timeout-ms",
+      String(deadline.maxTotalTimeoutMs),
+      "--healthy-activity-window-ms",
+      String(deadline.healthyActivityWindowMs),
+    );
+    if (deadline.autoExtend) args.push("--auto-extend-deadline");
+  }
+
+  const budget = policy.budgetContinuation;
+  if (budget) {
+    args.push(
+      "--max-budget-usd",
+      formatUsd(budget.baseGuardUsd),
+      "--continuation-guard-usd",
+      formatUsd(budget.continuationGuardUsd),
+      "--max-budget-continuations",
+      String(budget.maxContinuations),
+      "--max-cumulative-budget-guard-usd",
+      formatUsd(budget.maxCumulativeGuardUsd),
+      "--budget-overshoot-reserve-usd",
+      formatUsd(budget.overshootReserveUsd),
+    );
+    if (budget.autoContinue) args.push("--auto-continue-budget");
+  }
+  return args;
+}
+
+export function summarizeQueueContinuationPolicy(
+  value: QueueContinuationPolicy | undefined,
+): QueueContinuationPolicySummary | null {
+  if (value === undefined) return null;
+  const policy = parseQueueContinuationPolicy(value);
+  if (!policy) throw new Error("invalid queue continuation policy");
+  return Object.freeze({
+    deadlineExtension: policy.deadlineExtension
+      ? Object.freeze({ ...policy.deadlineExtension })
+      : null,
+    budgetContinuation: policy.budgetContinuation
+      ? Object.freeze({ ...policy.budgetContinuation })
+      : null,
+  });
 }
 
 /** Parse a positive, bounded CLI budget guard. */
@@ -453,6 +663,32 @@ function normalizeTaskExtensions(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasOnlyKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+): boolean {
+  const allowedSet = new Set(allowed);
+  return Object.keys(value).every((key) => allowedSet.has(key));
+}
+
+function selectPolicyField(
+  value: Record<string, unknown>,
+  names: readonly string[],
+):
+  | { ok: true; value: unknown }
+  | { ok: false } {
+  const present = names.filter((name) => value[name] !== undefined);
+  if (present.length > 1) return { ok: false };
+  return {
+    ok: true,
+    value: present.length === 0 ? undefined : value[present[0]!],
+  };
+}
+
+function formatUsd(value: number): string {
+  return String(roundBudgetUsd(value));
 }
 
 function isPositiveTimerMs(value: unknown): value is number {

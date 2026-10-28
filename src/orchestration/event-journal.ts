@@ -22,6 +22,7 @@ import {
   type FailureCategory,
   type FailureStage,
 } from "../failures.js";
+import type { ExecutionRuntimeId } from "../execution/profile.js";
 
 export const QUEUE_EVENT_VERSION = 1 as const;
 /** Matches the failure record code bound in src/failures.ts. */
@@ -88,6 +89,17 @@ export interface QueueControlEvent {
   failureStage?: FailureStage;
   failureCode?: string;
   costState?: CostState;
+  /** Bounded frozen execution/continuation summary. */
+  executionProfileId?: string;
+  runtimeId?: ExecutionRuntimeId;
+  modelId?: string;
+  providerId?: string;
+  mappedProgress?: boolean;
+  providerSessionResume?: boolean;
+  deadlineAutoExtend?: boolean;
+  deadlineMaxExtensions?: number;
+  budgetAutoContinue?: boolean;
+  budgetMaxContinuations?: number;
 }
 
 export interface AppendQueueEventInput {
@@ -105,6 +117,16 @@ export interface AppendQueueEventInput {
   failureStage?: FailureStage;
   failureCode?: string;
   costState?: CostState;
+  executionProfileId?: string;
+  runtimeId?: ExecutionRuntimeId;
+  modelId?: string;
+  providerId?: string;
+  mappedProgress?: boolean;
+  providerSessionResume?: boolean;
+  deadlineAutoExtend?: boolean;
+  deadlineMaxExtensions?: number;
+  budgetAutoContinue?: boolean;
+  budgetMaxContinuations?: number;
 }
 
 export interface QueueEventJournalSummary {
@@ -241,6 +263,9 @@ export function isQueueControlEvent(
     "status",
     "reason",
     "failureCode",
+    "executionProfileId",
+    "modelId",
+    "providerId",
   ] as const) {
     if (record[key] !== undefined && typeof record[key] !== "string") {
       return false;
@@ -253,6 +278,18 @@ export function isQueueControlEvent(
   ) {
     return false;
   }
+  for (const [key, max] of [
+    ["executionProfileId", 128],
+    ["modelId", 128],
+    ["providerId", 128],
+  ] as const) {
+    if (
+      typeof record[key] === "string" &&
+      (!record[key].trim() || record[key].length > max)
+    ) {
+      return false;
+    }
+  }
   if (
     record.failureCategory !== undefined &&
     !isFailureCategory(record.failureCategory)
@@ -264,6 +301,36 @@ export function isQueueControlEvent(
   }
   if (record.costState !== undefined && !isCostState(record.costState)) {
     return false;
+  }
+  if (
+    record.runtimeId !== undefined &&
+    record.runtimeId !== "claude" &&
+    record.runtimeId !== "codex"
+  ) {
+    return false;
+  }
+  for (const key of [
+    "mappedProgress",
+    "providerSessionResume",
+    "deadlineAutoExtend",
+    "budgetAutoContinue",
+  ] as const) {
+    if (record[key] !== undefined && typeof record[key] !== "boolean") {
+      return false;
+    }
+  }
+  for (const key of [
+    "deadlineMaxExtensions",
+    "budgetMaxContinuations",
+  ] as const) {
+    if (
+      record[key] !== undefined &&
+      (!Number.isInteger(record[key]) ||
+        (record[key] as number) < 0 ||
+        (record[key] as number) > 64)
+    ) {
+      return false;
+    }
   }
   return (
     record.attempt === undefined ||
@@ -307,6 +374,34 @@ function normalizeQueueEvent(
       `invalid queue event costState: ${String(input.costState)}`,
     );
   }
+  if (
+    input.runtimeId !== undefined &&
+    input.runtimeId !== "claude" &&
+    input.runtimeId !== "codex"
+  ) {
+    throw new Error(`invalid queue event runtimeId: ${input.runtimeId}`);
+  }
+  for (const [label, value] of [
+    ["deadlineMaxExtensions", input.deadlineMaxExtensions],
+    ["budgetMaxContinuations", input.budgetMaxContinuations],
+  ] as const) {
+    if (
+      value !== undefined &&
+      (!Number.isInteger(value) || value < 0 || value > 64)
+    ) {
+      throw new Error(`queue event ${label} must be an integer from 0 to 64`);
+    }
+  }
+  for (const [label, value] of [
+    ["mappedProgress", input.mappedProgress],
+    ["providerSessionResume", input.providerSessionResume],
+    ["deadlineAutoExtend", input.deadlineAutoExtend],
+    ["budgetAutoContinue", input.budgetAutoContinue],
+  ] as const) {
+    if (value !== undefined && typeof value !== "boolean") {
+      throw new Error(`queue event ${label} must be a boolean`);
+    }
+  }
   return {
     version: QUEUE_EVENT_VERSION,
     eventId: randomUUID(),
@@ -328,6 +423,28 @@ function normalizeQueueEvent(
       : {}),
     ...optionalText("failureCode", input.failureCode, MAX_FAILURE_CODE),
     ...(input.costState !== undefined ? { costState: input.costState } : {}),
+    ...optionalText("executionProfileId", input.executionProfileId, 128),
+    ...(input.runtimeId !== undefined ? { runtimeId: input.runtimeId } : {}),
+    ...optionalText("modelId", input.modelId, 128),
+    ...optionalText("providerId", input.providerId, 128),
+    ...(input.mappedProgress !== undefined
+      ? { mappedProgress: input.mappedProgress }
+      : {}),
+    ...(input.providerSessionResume !== undefined
+      ? { providerSessionResume: input.providerSessionResume }
+      : {}),
+    ...(input.deadlineAutoExtend !== undefined
+      ? { deadlineAutoExtend: input.deadlineAutoExtend }
+      : {}),
+    ...(input.deadlineMaxExtensions !== undefined
+      ? { deadlineMaxExtensions: input.deadlineMaxExtensions }
+      : {}),
+    ...(input.budgetAutoContinue !== undefined
+      ? { budgetAutoContinue: input.budgetAutoContinue }
+      : {}),
+    ...(input.budgetMaxContinuations !== undefined
+      ? { budgetMaxContinuations: input.budgetMaxContinuations }
+      : {}),
   };
 }
 

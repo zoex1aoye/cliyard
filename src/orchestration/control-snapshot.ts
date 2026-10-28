@@ -50,6 +50,16 @@ import {
   type TokenUsage,
 } from "../failures.js";
 import { resolve } from "node:path";
+import {
+  checkExecutionPolicyCompatibility,
+  type ExecutionCapabilities,
+  type ExecutionPolicyCompatibility,
+  type ExecutionRuntimeId,
+} from "../execution/profile.js";
+import {
+  summarizeQueueContinuationPolicy,
+  type QueueContinuationPolicySummary,
+} from "../agents/continuation.js";
 
 export const CONTROL_SNAPSHOT_VERSION = 1 as const;
 
@@ -108,8 +118,23 @@ export interface ControlItemSnapshot extends QueueItem {
     hash: string;
   } | null;
   run: ControlRunSnapshot | null;
+  execution: ControlExecutionSnapshot;
   journalEvents: QueueControlEvent[];
   errors: string[];
+}
+
+/** Read-only projection of the frozen queue execution identity. */
+export interface ControlExecutionSnapshot {
+  frozen: boolean;
+  profileId: string | null;
+  runtimeId: ExecutionRuntimeId | "unknown";
+  modelId: string | null;
+  providerId: string | null;
+  endpointRef: string | null;
+  accountBindingId: string | null;
+  capabilities: ExecutionCapabilities | null;
+  continuation: QueueContinuationPolicySummary | null;
+  policyCheck: ExecutionPolicyCompatibility;
 }
 
 /** Observed failure categories across queue items and their durable run tasks. */
@@ -223,6 +248,10 @@ export async function buildControlSnapshot(
         (event.runId !== undefined && runIds.has(event.runId)),
     );
     const ready = itemIsReady(item, byId);
+    const execution = controlExecution(item);
+    if (!execution.policyCheck.ok && execution.policyCheck.reason) {
+      errors.push(execution.policyCheck.reason);
+    }
     const retryable =
       item.status === "blocked" && item.attempts < item.maxAttempts;
 
@@ -238,6 +267,7 @@ export async function buildControlSnapshot(
       decision: classifyDecision(item, run, ready, queueLock.state),
       contracts,
       run,
+      execution,
       journalEvents,
       errors,
     });
@@ -593,11 +623,65 @@ function decisionCategoryForFailure(
   }
 }
 
+function controlExecution(item: QueueItem): ControlExecutionSnapshot {
+  const profile = item.executionProfile;
+  return {
+    frozen: profile !== undefined,
+    profileId: profile?.profileId ?? null,
+    runtimeId: profile?.runtimeId ?? item.worker,
+    modelId: profile?.modelId ?? item.model ?? null,
+    providerId: profile?.providerId ?? null,
+    endpointRef: profile?.endpointRef ?? null,
+    accountBindingId: profile?.accountBindingId ?? null,
+    capabilities: profile?.capabilities
+      ? Object.freeze({ ...profile.capabilities })
+      : null,
+    continuation: summarizeQueueContinuationPolicy(
+      item.continuationPolicy,
+    ),
+    policyCheck: checkExecutionPolicyCompatibility(
+      profile,
+      item.continuationPolicy,
+    ),
+  };
+}
+
 function cloneQueueItem(item: QueueItem): QueueItem {
   return {
     ...item,
     dependsOn: [...item.dependsOn],
     runIds: [...item.runIds],
+    ...(item.executionProfile !== undefined
+      ? {
+          executionProfile: Object.freeze({
+            ...item.executionProfile,
+            capabilities: Object.freeze({
+              ...item.executionProfile.capabilities,
+            }),
+          }),
+        }
+      : {}),
+    ...(item.continuationPolicy !== undefined
+      ? {
+          continuationPolicy: Object.freeze({
+            version: item.continuationPolicy.version,
+            ...(item.continuationPolicy.deadlineExtension
+              ? {
+                  deadlineExtension: Object.freeze({
+                    ...item.continuationPolicy.deadlineExtension,
+                  }),
+                }
+              : {}),
+            ...(item.continuationPolicy.budgetContinuation
+              ? {
+                  budgetContinuation: Object.freeze({
+                    ...item.continuationPolicy.budgetContinuation,
+                  }),
+                }
+              : {}),
+          }),
+        }
+      : {}),
     ...(item.materialization !== undefined
       ? { materialization: { ...item.materialization } }
       : {}),

@@ -34,6 +34,14 @@ import {
   formatCostObservation,
   formatFailureObservation,
 } from "../supervisor/cli.js";
+import {
+  summarizeExecutionProfile,
+  type ExecutionProfile,
+} from "../execution/profile.js";
+import {
+  summarizeQueueContinuationPolicy,
+  type QueueContinuationPolicy,
+} from "../agents/continuation.js";
 
 export interface QueueCliOptions {
   /** Output sink; defaults to console.log. */
@@ -51,6 +59,8 @@ const VALUE_FLAGS = new Set([
   "--depends-on",
   "--worker",
   "--model",
+  "--execution-profile",
+  "--continuation-policy",
   "--max-attempts",
   "--plan-id",
   "--max-dispatches",
@@ -108,8 +118,12 @@ function addCommand(rest: string[], log: (line: string) => void): number {
     throw new Error("queue add: missing --id <queue-id>");
   }
 
-  const workerRaw = arg("--worker", rest) ?? "claude";
-  if (workerRaw !== "claude" && workerRaw !== "codex") {
+  const workerRaw = arg("--worker", rest);
+  if (
+    workerRaw !== undefined &&
+    workerRaw !== "claude" &&
+    workerRaw !== "codex"
+  ) {
     throw new Error(
       `queue add: --worker must be claude or codex (got ${workerRaw})`,
     );
@@ -119,13 +133,21 @@ function addCommand(rest: string[], log: (line: string) => void): number {
     maxAttemptsRaw === undefined
       ? undefined
       : parsePositiveInt(maxAttemptsRaw, "--max-attempts");
+  const model = arg("--model", rest);
+  if (model !== undefined && !model.trim()) {
+    throw new Error("queue add: --model must be non-empty");
+  }
 
   const item = addQueueItem(repoRoot, {
     id,
     contractsPath: contractsArg,
     dependsOn: values("--depends-on", rest),
-    worker: workerRaw as QueueWorker,
-    model: arg("--model", rest),
+    ...(workerRaw !== undefined
+      ? { worker: workerRaw as QueueWorker }
+      : {}),
+    model,
+    executionProfilePath: arg("--execution-profile", rest),
+    continuationPolicyPath: arg("--continuation-policy", rest),
     planId: arg("--plan-id", rest),
     maxAttempts,
   });
@@ -155,8 +177,12 @@ function addPlanCommand(rest: string[], log: (line: string) => void): number {
     throw new Error("queue add-plan: missing --id <queue-id>");
   }
 
-  const workerRaw = arg("--worker", rest) ?? "claude";
-  if (workerRaw !== "claude" && workerRaw !== "codex") {
+  const workerRaw = arg("--worker", rest);
+  if (
+    workerRaw !== undefined &&
+    workerRaw !== "claude" &&
+    workerRaw !== "codex"
+  ) {
     throw new Error(
       `queue add-plan: --worker must be claude or codex (got ${workerRaw})`,
     );
@@ -166,13 +192,21 @@ function addPlanCommand(rest: string[], log: (line: string) => void): number {
     maxAttemptsRaw === undefined
       ? undefined
       : parsePositiveInt(maxAttemptsRaw, "--max-attempts");
+  const model = arg("--model", rest);
+  if (model !== undefined && !model.trim()) {
+    throw new Error("queue add-plan: --model must be non-empty");
+  }
 
   const item = addPlanQueueItem(repoRoot, {
     id,
     planPath: planArg,
     dependsOn: values("--depends-on", rest),
-    worker: workerRaw as QueueWorker,
-    model: arg("--model", rest),
+    ...(workerRaw !== undefined
+      ? { worker: workerRaw as QueueWorker }
+      : {}),
+    model,
+    executionProfilePath: arg("--execution-profile", rest),
+    continuationPolicyPath: arg("--continuation-policy", rest),
     maxAttempts,
   });
 
@@ -319,6 +353,11 @@ function printItemDetail(
   item: QueueItem,
   log: (line: string) => void,
 ): void {
+  printExecutionDetail(
+    item.executionProfile,
+    item.continuationPolicy,
+    log,
+  );
   if (item.failure) {
     log(`  failure: ${formatFailureObservation(item.failure)}`);
   }
@@ -332,6 +371,43 @@ function printItemDetail(
     `  contracts: ${item.contractsPath} (sha256 ${item.contractsHash})`,
   );
   if (item.reason) log(`  reason: ${item.reason}`);
+}
+
+function printExecutionDetail(
+  profile: ExecutionProfile | undefined,
+  policy: QueueContinuationPolicy | undefined,
+  log: (line: string) => void,
+): void {
+  log(`  execution: ${summarizeExecutionProfile(profile)}`);
+  if (profile?.endpointRef) {
+    log(`  endpointRef: ${profile.endpointRef}`);
+  }
+  if (profile?.accountBindingId) {
+    log(`  accountBindingId: ${profile.accountBindingId}`);
+  }
+  const summary = summarizeQueueContinuationPolicy(policy);
+  if (!summary) {
+    log("  continuation: none");
+    return;
+  }
+  if (summary.deadlineExtension) {
+    const deadline = summary.deadlineExtension;
+    log(
+      `  continuation deadline: auto=${String(deadline.autoExtend)} ` +
+        `maxExtensions=${deadline.maxExtensions} ` +
+        `base=${deadline.baseTimeoutMs}ms ` +
+        `maxTotal=${deadline.maxTotalTimeoutMs}ms`,
+    );
+  }
+  if (summary.budgetContinuation) {
+    const budget = summary.budgetContinuation;
+    log(
+      `  continuation budget: auto=${String(budget.autoContinue)} ` +
+        `maxContinuations=${budget.maxContinuations} ` +
+        `base=$${budget.baseGuardUsd} ` +
+        `maxCumulative=$${budget.maxCumulativeGuardUsd}`,
+    );
+  }
 }
 
 function printPlanDetail(
@@ -495,6 +571,11 @@ function printControlItem(
       `ready=${item.ready ? "yes" : "no"}  ` +
       `worker=${item.worker}${item.model ? `/${item.model}` : ""}  ` +
       `attempts=${item.attempts}/${item.maxAttempts}`,
+  );
+  printExecutionDetail(
+    item.executionProfile,
+    item.continuationPolicy,
+    log,
   );
   if (item.run) {
     log(
@@ -665,10 +746,14 @@ function printUsage(log: (line: string) => void): void {
 Usage:
   cliyard queue add <contracts.json> --repo <path> --id <queue-id>
                     [--depends-on <id>]... [--worker claude|codex]
-                    [--model id] [--max-attempts n] [--plan-id id] [--json]
+                    [--model id] [--execution-profile <profile.json>]
+                    [--continuation-policy <policy.json>]
+                    [--max-attempts n] [--plan-id id] [--json]
   cliyard queue add-plan <plan.json> --repo <path> --id <queue-id>
                     [--depends-on <id>] [--worker claude|codex]
-                    [--model id] [--max-attempts n] [--json]
+                    [--model id] [--execution-profile <profile.json>]
+                    [--continuation-policy <policy.json>]
+                    [--max-attempts n] [--json]
   cliyard queue list --repo <path> [--json]
   cliyard queue status --repo <path> [--json]
   cliyard queue retry <queue-id> --repo <path> [--json]
