@@ -58,6 +58,16 @@ const DEFAULT_GIT_STATE_PATHS: readonly string[] = Object.freeze([
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
 const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/;
 
+/**
+ * Global variant of `CONTROL_CHARACTER_PATTERN`. `String.replace` with a
+ * non-global pattern replaces only the first match, leaving later control
+ * characters in persisted diagnostics.
+ */
+const CONTROL_CHARACTER_PATTERN_GLOBAL = new RegExp(
+  CONTROL_CHARACTER_PATTERN.source,
+  "g",
+);
+
 export const DEFAULT_WORKSPACE_BOUNDARY_CAPS: Required<WorkspaceBoundaryCaps> =
   Object.freeze({
     maxEntriesPerRoot: DEFAULT_MAX_ENTRIES_PER_ROOT,
@@ -175,7 +185,7 @@ export function normalizeEvidencePath(value: string): string | undefined {
  */
 export function sanitizeDiagnosticText(value: unknown, maxLength: number): string {
   const text = typeof value === "string" ? value : String(value);
-  const cleaned = text.replace(CONTROL_CHARACTER_PATTERN, "\uFFFD");
+  const cleaned = text.replace(CONTROL_CHARACTER_PATTERN_GLOBAL, "\uFFFD");
   return cleaned.length <= maxLength ? cleaned : cleaned.slice(0, maxLength);
 }
 
@@ -764,6 +774,12 @@ function sameRoots(a: readonly string[], b: readonly string[]): boolean {
 function validateSnapshot(snapshot: WorkspaceBoundarySnapshot): string | undefined {
   const rootCount = snapshot.roots.length;
   for (const [key, entry] of snapshot.entries) {
+    // A caller-supplied Map can contain anything at runtime; malformed values
+    // must produce bounded evidence, never an uncontrolled TypeError.
+    if (typeof key !== "string") return "unsafe snapshot entry key";
+    if (entry === null || typeof entry !== "object") {
+      return "invalid snapshot entry value";
+    }
     const separator = key.indexOf("\u0000");
     if (separator <= 0) return "unsafe snapshot entry key";
     const rootIndex = Number(key.slice(0, separator));

@@ -447,6 +447,25 @@ test("diagnostics are sanitized and capped", () => {
   assert.equal(sanitizeDiagnosticText(42, 5), "42");
 });
 
+test("every control character is replaced, not only the first", () => {
+  const replacement = String.fromCharCode(0xfffd);
+  const input =
+    "a\nb\tc" +
+    String.fromCharCode(0) +
+    "d" +
+    String.fromCharCode(0x7f) +
+    "e" +
+    String.fromCharCode(0x9f);
+  const expected =
+    `a${replacement}b${replacement}c${replacement}d${replacement}e${replacement}`;
+  assert.equal(sanitizeDiagnosticText(input, 100), expected);
+  // Replacement happens before truncation, so the cap still applies.
+  assert.equal(
+    sanitizeDiagnosticText("a\nb\nc", 3),
+    `a${replacement}b`,
+  );
+});
+
 test("duplicate and overlapping roots are deduplicated", async (t) => {
   const fx = fixture(t);
   fx.write("authority.txt", "a");
@@ -653,6 +672,47 @@ test("comparison rejects unsafe snapshot evidence", async (t) => {
   assert.equal(result.status, "inspection_failed");
   if (result.status !== "inspection_failed") return;
   assert.match(result.error, /unsafe snapshot entry path/);
+});
+
+test("comparison fails closed on null, undefined and non-object snapshot entries", async (t) => {
+  const fx = fixture(t);
+  fx.write("a.txt", "x");
+  const clean = await capture(fx);
+  const key = `000000${String.fromCharCode(0)}a.txt`;
+
+  for (const malformed of [null, undefined, "text", 42, true]) {
+    const unsafe = {
+      roots: [...clean.roots],
+      entries: new Map([[key, malformed]]),
+    } as unknown as WorkspaceBoundarySnapshot;
+
+    // A runtime-malformed map value must produce bounded evidence, never an
+    // uncontrolled TypeError from reading `entry.path`.
+    const result = compareWorkspaceBoundary(clean, unsafe);
+    assert.equal(result.status, "inspection_failed", String(malformed));
+    if (result.status !== "inspection_failed") continue;
+    assert.equal(result.error, "invalid snapshot entry value");
+    assert.deepEqual(result.changes, []);
+
+    // The same malformed snapshot on the before side fails closed too.
+    const reverse = compareWorkspaceBoundary(unsafe, clean);
+    assert.equal(reverse.status, "inspection_failed", String(malformed));
+  }
+
+  // A non-string key is bounded evidence too.
+  const badKey = {
+    roots: [...clean.roots],
+    entries: new Map([
+      [
+        123 as unknown as string,
+        { kind: "file", path: "a.txt", digest: sha256("x") },
+      ],
+    ]),
+  } as unknown as WorkspaceBoundarySnapshot;
+  const keyResult = compareWorkspaceBoundary(clean, badKey);
+  assert.equal(keyResult.status, "inspection_failed");
+  if (keyResult.status !== "inspection_failed") return;
+  assert.equal(keyResult.error, "unsafe snapshot entry key");
 });
 
 test("snapshots and evidence retain digests only, never file contents", async (t) => {

@@ -5,6 +5,7 @@ import { once } from "node:events";
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -578,8 +579,13 @@ if (
       );
       chmodSync(fakeClaude, 0o755);
 
-      const marker = join(repo, "upper-started");
-      const workerLog = join(repo, "worker-calls.log");
+      // Boundary fixtures: marker and call log live in the excluded
+      // `.cliyard/logs` control-plane path, not the authority checkout root.
+      // Writing them at the root would correctly dirty the protected tree.
+      const logsDir = join(repo, ".cliyard", "logs");
+      mkdirSync(logsDir, { recursive: true });
+      const marker = join(logsDir, "upper-started");
+      const workerLog = join(logsDir, "worker-calls.log");
       const env = {
         ...process.env,
         CLIYARD_CLAUDE_BINARY: fakeClaude,
