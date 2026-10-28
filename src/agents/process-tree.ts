@@ -142,6 +142,24 @@ export interface WorkerProcessSignalRecord {
  */
 export type WorkerNestedCleanupState = "none" | "clean" | "terminated" | "failed";
 
+/**
+ * Bounded, credential-free snapshot of descendants that left the managed
+ * group. It is evidence only: no snapshot ever authorizes a signal by itself.
+ *
+ * `observedCount` is the true observed external-descendant count and may be
+ * larger than the persisted `identities` list. `truncated` is `true` once the
+ * bound is exceeded or a snapshot could not prove a complete relationship
+ * graph; a truncated snapshot must never authorize recovery.
+ */
+export interface WorkerNestedProcesses {
+  version: 1;
+  host: string;
+  observedCount: number;
+  truncated: boolean;
+  lastObservedAt: string;
+  identities: RuntimeProcessIdentity[];
+}
+
 /** Bounded outcome of cleaning descendants that left the managed group. */
 export interface WorkerNestedCleanupEvidence {
   state: WorkerNestedCleanupState;
@@ -256,6 +274,18 @@ export interface ManagedWorkerProcess {
    * and later calls resolve with the same outcome. Never rejects.
    */
   cleanup(reason: WorkerCleanupReason): Promise<WorkerProcessCleanupOutcome>;
+  /**
+   * Read-only bounded observer for descendants that left the managed group.
+   *
+   * The current snapshot is replayed synchronously to a new subscriber, and
+   * only changed snapshots from validated process-table samples are emitted
+   * afterwards. This observer never signals a process. Optional so a custom
+   * ManagedWorkerProcess (for example a test fake) keeps compiling; without
+   * it no durable nested evidence can be observed.
+   */
+  observeExternalDescendants?(
+    listener: (snapshot: WorkerNestedProcesses) => void,
+  ): () => void;
 }
 
 interface CaptureResult {
@@ -448,6 +478,14 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
   private readonly observedExternal = new Map<number, RuntimeProcessIdentity>();
   private readonly observedExternalGroupIds = new Set<number>();
   private readonly signalledDescendantPids = new Set<number>();
+  private readonly nestedSnapshotListeners = new Set<
+    (snapshot: WorkerNestedProcesses) => void
+  >();
+  private nestedSnapshot: WorkerNestedProcesses | undefined;
+  private nestedSnapshotKey: string | undefined;
+  private nestedObservedAt: string | undefined;
+  /** A relationship walk hit a bound; the snapshot is evidence only. */
+  private nestedIncomplete = false;
   private nestedCleanup: WorkerNestedCleanupEvidence | undefined;
   private samplerLeader: RuntimeProcessIdentity | undefined;
   private samplerTimer: NodeJS.Timeout | undefined;
@@ -521,6 +559,31 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
         ? { error: boundDetail(capture.error) }
         : {}),
     }));
+  }
+
+  /**
+   * Subscribe to the bounded external-descendant snapshot. The current
+   * snapshot is replayed immediately; later emissions happen only when the
+   * validated snapshot content changes. This path is observational and never
+   * signals a process.
+   */
+  observeExternalDescendants(
+    listener: (snapshot: WorkerNestedProcesses) => void,
+  ): () => void {
+    if (typeof listener !== "function") {
+      throw new Error("nested descendant observer requires a listener function");
+    }
+    this.nestedSnapshotListeners.add(listener);
+    if (this.nestedSnapshot) {
+      try {
+        listener(copyNestedProcesses(this.nestedSnapshot));
+      } catch {
+        // A subscriber failure must never break cleanup or the sampler.
+      }
+    }
+    return () => {
+      this.nestedSnapshotListeners.delete(listener);
+    };
   }
 
   cleanup(reason: WorkerCleanupReason): Promise<WorkerProcessCleanupOutcome> {
@@ -661,12 +724,65 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
         if (seen.has(child.pid)) continue;
         seen.add(child.pid);
         visited += 1;
-        if (visited > MAX_SAMPLED_DESCENDANTS) return "incomplete";
+        if (visited > MAX_SAMPLED_DESCENDANTS) {
+          // The relationship graph is incomplete. Persisted evidence is
+          // marked truncated and must never authorize recovery.
+          this.nestedIncomplete = true;
+          this.publishNestedSnapshot();
+          return "incomplete";
+        }
         this.noteDescendant(child, managedPgid);
         queue.push(child.pid);
       }
     }
+    this.publishNestedSnapshot();
     return "ok";
+  }
+
+  /**
+   * Build the bounded snapshot from tracked external observations. Returns
+   * `undefined` until something external was observed or a walk was
+   * incomplete (an empty snapshot is not evidence).
+   */
+  private buildNestedSnapshot(): WorkerNestedProcesses | undefined {
+    const observedCount = this.observedExternalPids.size;
+    if (observedCount === 0 && !this.nestedIncomplete) return undefined;
+    return {
+      version: 1,
+      host: this.manager.inspector.host,
+      observedCount,
+      truncated:
+        this.nestedIncomplete ||
+        observedCount > MAX_PERSISTED_EXTERNAL_DESCENDANTS,
+      lastObservedAt: this.nestedObservedAt ?? this.startedAt,
+      identities: [...this.observedExternal.values()]
+        .sort((first, second) => first.pid - second.pid)
+        .slice(0, MAX_PERSISTED_EXTERNAL_DESCENDANTS)
+        .map(copyIdentity),
+    };
+  }
+
+  /** Emit only when the bounded snapshot content actually changed. */
+  private publishNestedSnapshot(): void {
+    const candidate = this.buildNestedSnapshot();
+    if (!candidate) return;
+    const key = nestedSnapshotKey(candidate);
+    if (key === this.nestedSnapshotKey) return;
+    const observedAt = new Date().toISOString();
+    const snapshot: WorkerNestedProcesses = {
+      ...candidate,
+      lastObservedAt: observedAt,
+    };
+    this.nestedObservedAt = observedAt;
+    this.nestedSnapshotKey = key;
+    this.nestedSnapshot = snapshot;
+    for (const listener of [...this.nestedSnapshotListeners]) {
+      try {
+        listener(copyNestedProcesses(snapshot));
+      } catch {
+        // A subscriber failure must never break cleanup or the sampler.
+      }
+    }
   }
 
   private noteDescendant(
@@ -2072,6 +2188,32 @@ function copyIdentity(identity: RuntimeProcessIdentity): RuntimeProcessIdentity 
     pgid: identity.pgid,
     startedAt: identity.startedAt,
   };
+}
+
+function copyNestedProcesses(
+  snapshot: WorkerNestedProcesses,
+): WorkerNestedProcesses {
+  return {
+    version: 1,
+    host: snapshot.host,
+    observedCount: snapshot.observedCount,
+    truncated: snapshot.truncated,
+    lastObservedAt: snapshot.lastObservedAt,
+    identities: snapshot.identities.map(copyIdentity),
+  };
+}
+
+function nestedSnapshotKey(snapshot: WorkerNestedProcesses): string {
+  return JSON.stringify([
+    snapshot.host,
+    snapshot.observedCount,
+    snapshot.truncated,
+    snapshot.identities.map((identity) => [
+      identity.pid,
+      identity.pgid,
+      identity.startedAt,
+    ]),
+  ]);
 }
 
 function isTimestamp(value: unknown): value is string {

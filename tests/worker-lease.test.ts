@@ -16,18 +16,24 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { ProcessInspector, type ProcessGroupMember } from "../src/runtime/process.js";
+import {
+  ProcessInspector,
+  type ProcessGroupMember,
+  type ProcessTableEntry,
+} from "../src/runtime/process.js";
 import type { RuntimeProcessIdentity } from "../src/runtime/types.js";
 import { createClaudeAdapter } from "../src/agents/claude.js";
 import { createCodexAdapter } from "../src/agents/codex.js";
 import type {
   ManagedWorkerProcess,
+  WorkerNestedProcesses,
   WorkerProcessCleanupOutcome,
   WorkerProcessTreeInspector,
 } from "../src/agents/process-tree.js";
@@ -134,6 +140,7 @@ class FakeInspector implements WorkerProcessTreeInspector {
   readonly host = "host-a";
   readonly supported = true;
   readonly identities = new Map<number, RuntimeProcessIdentity>();
+  readonly parents = new Map<number, number>();
 
   add(identity: RuntimeProcessIdentity): void {
     this.identities.set(identity.pid, { ...identity });
@@ -141,6 +148,11 @@ class FakeInspector implements WorkerProcessTreeInspector {
 
   remove(pid: number): void {
     this.identities.delete(pid);
+    this.parents.delete(pid);
+  }
+
+  setParent(pid: number, ppid: number): void {
+    this.parents.set(pid, ppid);
   }
 
   isAlive(pid: number | undefined): boolean {
@@ -163,6 +175,17 @@ class FakeInspector implements WorkerProcessTreeInspector {
       .filter((identity) => identity.pgid === pgid)
       .sort((left, right) => left.pid - right.pid)
       .map((identity) => ({ ...identity }));
+  }
+
+  async snapshotProcessTable(): Promise<ProcessTableEntry[]> {
+    return [...this.identities.values()]
+      .map((identity) => ({
+        pid: identity.pid,
+        ppid: this.parents.get(identity.pid) ?? 0,
+        pgid: identity.pgid,
+        startedAt: identity.startedAt,
+      }))
+      .sort((left, right) => left.pid - right.pid);
   }
 
   snapshot(): Record<number, RuntimeProcessIdentity> {
@@ -211,13 +234,17 @@ function fakeManaged(options: {
   identity?: RuntimeProcessIdentity;
   captureError?: string;
   outcome?: WorkerProcessCleanupOutcome;
+  observable?: boolean;
 }): {
   managed: ManagedWorkerProcess;
   cleanupReasons: Array<WorkerProcessCleanupOutcome["record"]["cleanupReason"]>;
+  emitNested(snapshot: WorkerNestedProcesses): void;
 } {
   const cleanupReasons: Array<
     WorkerProcessCleanupOutcome["record"]["cleanupReason"]
   > = [];
+  const nestedListeners = new Set<(snapshot: WorkerNestedProcesses) => void>();
+  let currentNested: WorkerNestedProcesses | undefined;
   const managed: ManagedWorkerProcess = {
     child: { pid: options.pid } as unknown as ChildProcess,
     pid: options.pid,
@@ -239,7 +266,40 @@ function fakeManaged(options: {
       );
     },
   };
-  return { managed, cleanupReasons };
+  if (options.observable) {
+    managed.observeExternalDescendants = (listener) => {
+      nestedListeners.add(listener);
+      if (currentNested) listener(structuredClone(currentNested));
+      return () => {
+        nestedListeners.delete(listener);
+      };
+    };
+  }
+  return {
+    managed,
+    cleanupReasons,
+    emitNested(snapshot) {
+      currentNested = structuredClone(snapshot);
+      for (const listener of [...nestedListeners]) {
+        listener(structuredClone(snapshot));
+      }
+    },
+  };
+}
+
+function nestedSnapshot(
+  identities: RuntimeProcessIdentity[],
+  overrides: Partial<WorkerNestedProcesses> = {},
+): WorkerNestedProcesses {
+  return {
+    version: 1,
+    host: "host-a",
+    observedCount: identities.length,
+    truncated: false,
+    lastObservedAt: "2026-01-01T00:00:02.000Z",
+    identities: identities.map((value) => ({ ...value })),
+    ...overrides,
+  };
 }
 
 function identity(
@@ -679,10 +739,15 @@ function writeLease(repo: string, lease: WorkerLease): string {
 async function recoverWith(
   repo: string,
   fake: FakeInspector,
-  options: { ignoreTerm?: boolean; runId?: string } = {},
+  options: {
+    ignoreTerm?: boolean;
+    runId?: string;
+    pidIgnoreTerm?: boolean;
+  } = {},
 ) {
   if (!fake.isAlive(process.pid)) fake.add(identity(process.pid));
   const calls: Array<{ pgid: number; signal: NodeJS.Signals }> = [];
+  const pidCalls: Array<{ pid: number; signal: NodeJS.Signals }> = [];
   const report = await recoverWorkerLeases({
     repoRoot: repo,
     ...(options.runId ? { runId: options.runId } : {}),
@@ -698,8 +763,12 @@ async function recoverWith(
         }
       }
     },
+    killPid: (pid, signal) => {
+      pidCalls.push({ pid, signal });
+      if (!options.pidIgnoreTerm || signal === "SIGKILL") fake.remove(pid);
+    },
   });
-  return { report, calls };
+  return { report, calls, pidCalls };
 }
 
 test("recovery skips a live matching controller and preserves the lease", async () => {
@@ -1171,6 +1240,214 @@ setInterval(() => {}, 1000);
   },
 );
 
+posixTest(
+  "recover-workers kills only a controller-death fixture's exact nested helper",
+  async () => {
+    const repo = tempDir("real-nested-recovery");
+    const readyPath = join(repo, "ready.json");
+    const workerReady = join(repo, "worker-ready.json");
+    const helperFixture = join(repo, "nested-helper.mjs");
+    writeFileSync(helperFixture, "setInterval(() => {}, 1000);\n", "utf8");
+    const workerScript = join(repo, "nested-worker.mjs");
+    writeFileSync(
+      workerScript,
+      `import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const helper = spawn(process.execPath, [process.argv[2]], {
+  detached: true,
+  stdio: "ignore",
+});
+helper.unref();
+writeFileSync(process.argv[3], JSON.stringify({ helperPid: helper.pid }));
+setInterval(() => {}, 1000);
+`,
+      "utf8",
+    );
+    const controllerScript = join(repo, "nested-controller.mts");
+    const workerLeaseModule = pathToFileURL(
+      fileURLToPath(new URL("../src/agents/worker-lease.ts", import.meta.url)),
+    ).href;
+    const processTreeModule = pathToFileURL(
+      fileURLToPath(new URL("../src/agents/process-tree.ts", import.meta.url)),
+    ).href;
+    writeFileSync(
+      controllerScript,
+      `import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { WorkerProcessTreeManager } from ${JSON.stringify(processTreeModule)};
+import { createWorkerLeaseAttacher, readLeaseFile } from ${JSON.stringify(workerLeaseModule)};
+
+const [repo, workerScript, helperFixture, workerReady, readyPath] =
+  process.argv.slice(2);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const tree = new WorkerProcessTreeManager();
+const worker = tree.spawn(
+  process.execPath,
+  [workerScript, helperFixture, workerReady],
+  { stdio: ["ignore", "ignore", "ignore"] },
+);
+const attach = createWorkerLeaseAttacher({
+  repoRoot: repo,
+  runId: "run-real-nested",
+});
+const handle = await attach({
+  taskId: "task-real-nested",
+  attempt: 0,
+  invocationId: "invocation-real-nested",
+  workspace: repo,
+  managed: worker,
+});
+while (!existsSync(workerReady)) await sleep(20);
+const { helperPid } = JSON.parse(readFileSync(workerReady, "utf8"));
+const deadline = Date.now() + 15000;
+let observed = false;
+while (Date.now() < deadline) {
+  const lease = readLeaseFile(handle.path);
+  if (lease?.nestedProcesses?.identities.some((entry) => entry.pid === helperPid)) {
+    observed = true;
+    break;
+  }
+  await sleep(50);
+}
+if (!observed) throw new Error("nested helper evidence was not persisted");
+writeFileSync(
+  readyPath,
+  JSON.stringify({
+    controllerPid: process.pid,
+    workerPid: worker.pid,
+    helperPid,
+    leasePath: handle.path,
+  }),
+);
+setInterval(() => {}, 1000);
+`,
+      "utf8",
+    );
+
+    let controller: ChildProcess | undefined;
+    try {
+      controller = spawn(
+        process.execPath,
+        ["--import", "tsx", controllerScript, repo, workerScript, helperFixture, workerReady, readyPath],
+        {
+          cwd: ROOT,
+          env: process.env,
+          stdio: ["ignore", "ignore", "pipe"],
+        },
+      );
+      let stderr = "";
+      controller.stderr?.on("data", (chunk) => {
+        stderr = (stderr + String(chunk)).slice(-4_000);
+      });
+      await waitFor(
+        () => existsSync(readyPath),
+        `nested controller ready (${stderr})`,
+      );
+      const ready = JSON.parse(readFileSync(readyPath, "utf8")) as {
+        controllerPid: number;
+        workerPid: number;
+        helperPid: number;
+        leasePath: string;
+      };
+      liveFixturePids.add(ready.workerPid);
+      liveFixturePids.add(ready.helperPid);
+      assert.ok(realInspector.isAlive(ready.workerPid));
+      assert.ok(realInspector.isAlive(ready.helperPid));
+      const leaseBefore = readLeaseFile(ready.leasePath);
+      assert.equal(leaseBefore?.state, "active");
+      assert.equal(leaseBefore?.nestedProcesses?.truncated, false);
+      assert.ok(
+        leaseBefore?.nestedProcesses?.identities.some(
+          (entry) => entry.pid === ready.helperPid,
+        ),
+        "nested helper identity is durable before controller death",
+      );
+
+      // Kill the controller and then the top-level leader. Only the detached
+      // nested helper remains; the lease is the only durable evidence for it.
+      process.kill(ready.controllerPid, "SIGKILL");
+      await waitFor(
+        () => !realInspector.isAlive(ready.controllerPid),
+        "controller death",
+      );
+      process.kill(ready.workerPid, "SIGKILL");
+      await waitFor(
+        () => !realInspector.isAlive(ready.workerPid),
+        "worker leader death",
+      );
+      assert.equal(realInspector.isAlive(ready.helperPid), true);
+
+      const cli = spawnSync(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          CLI_PATH,
+          "supervisor",
+          "recover-workers",
+          "--repo",
+          repo,
+          "--run",
+          "run-real-nested",
+          "--json",
+        ],
+        { cwd: ROOT, encoding: "utf8", timeout: 30_000 },
+      );
+      assert.equal(cli.status, 0, `${cli.stdout}\n${cli.stderr}`);
+      const report = JSON.parse(cli.stdout) as {
+        recovered: number;
+        needsHuman: number;
+        entries: Array<{
+          outcome: string;
+          action: string;
+          signals: Array<{
+            scope: string;
+            pid?: number;
+            signal: string;
+          }>;
+        }>;
+      };
+      assert.equal(report.recovered, 1);
+      assert.equal(report.needsHuman, 0);
+      assert.equal(report.entries[0]?.action, "terminated");
+      const signals = report.entries[0]?.signals ?? [];
+      assert.ok(signals.length > 0);
+      assert.ok(
+        signals.every(
+          (signal) =>
+            signal.scope === "descendant-pid" &&
+            signal.pid === ready.helperPid,
+        ),
+        "only the exact nested pid was signalled",
+      );
+      await waitFor(
+        () => !realInspector.isAlive(ready.helperPid),
+        "nested helper death",
+      );
+      const leaseAfter = readLeaseFile(ready.leasePath);
+      assert.equal(leaseAfter?.state, "released");
+      assert.equal(leaseAfter?.cleanupReason, "recovery");
+      assert.equal(leaseAfter?.recovery?.[0]?.outcome, "recovered");
+      assert.ok(
+        leaseAfter?.nestedProcesses?.identities.some(
+          (entry) => entry.pid === ready.helperPid,
+        ),
+        "refreshed target set remains durable",
+      );
+      assert.equal(existsSync(join(repo, ".cliyard", "runs")), false);
+      liveFixturePids.delete(ready.workerPid);
+      liveFixturePids.delete(ready.helperPid);
+    } finally {
+      if (controller && controller.exitCode === null) {
+        try {
+          controller.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+      }
+    }
+  },
+);
+
 // The fixture parser itself must fail closed rather than accept a guessed or
 // partially valid record.
 test("strict parser rejects missing or fabricated lease identity", () => {
@@ -1190,3 +1467,524 @@ test("strict parser rejects missing or fabricated lease identity", () => {
     assert.equal(parseWorkerLease(value), undefined);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Durable nested evidence: attacher, parsing and status
+// ---------------------------------------------------------------------------
+
+test("attacher persists nested evidence atomically and never regresses", async () => {
+  const repo = tempDir("nested-attach");
+  const workerIdentity = identity(70_000);
+  const { managed, emitNested } = fakeManaged({
+    pid: workerIdentity.pid,
+    identity: workerIdentity,
+    observable: true,
+  });
+  const attach = createWorkerLeaseAttacher({
+    repoRoot: repo,
+    runId: "run-nested-attach",
+    controller: {
+      pid: 70_500,
+      host: "host-a",
+      identity: identity(70_500),
+    },
+  });
+  const handle = await attach(attachInput(managed, "nested"));
+  assert.equal(readLeaseFile(handle.path)?.nestedProcesses, undefined);
+  assert.equal(statSync(handle.path).mode & 0o777, 0o600);
+
+  const first = identity(70_101);
+  emitNested(
+    nestedSnapshot([first], { lastObservedAt: "2026-01-01T00:00:02.000Z" }),
+  );
+  await waitFor(
+    () => readLeaseFile(handle.path)?.nestedProcesses !== undefined,
+    "durable nested evidence",
+  );
+  const persisted = readLeaseFile(handle.path)!;
+  assert.equal(persisted.state, "active");
+  assert.equal(persisted.nestedProcesses?.observedCount, 1);
+  assert.equal(persisted.nestedProcesses?.identities[0]?.pid, first.pid);
+  assert.equal(persisted.nestedProcesses?.truncated, false);
+  assert.equal(statSync(handle.path).mode & 0o777, 0o600);
+
+  // An older observation must never replace newer durable evidence.
+  emitNested(
+    nestedSnapshot([identity(70_199)], {
+      lastObservedAt: "2026-01-01T00:00:01.000Z",
+    }),
+  );
+  await delay(60);
+  const afterStale = readLeaseFile(handle.path)!;
+  assert.deepEqual(
+    afterStale.nestedProcesses?.identities.map((identity) => identity.pid),
+    [first.pid],
+  );
+
+  // Newer changed snapshots merge monotonically and stay bounded.
+  emitNested(
+    nestedSnapshot([identity(70_102)], {
+      lastObservedAt: "2026-01-01T00:00:03.000Z",
+    }),
+  );
+  await waitFor(
+    () =>
+      (readLeaseFile(handle.path)?.nestedProcesses?.identities.length ?? 0) ===
+      2,
+    "merged nested evidence",
+  );
+  const merged = readLeaseFile(handle.path)!;
+  assert.equal(merged.nestedProcesses?.lastObservedAt, "2026-01-01T00:00:03.000Z");
+  assert.equal(merged.nestedProcesses?.observedCount, 2);
+  assert.equal(statSync(handle.path).mode & 0o777, 0o600);
+
+  await handle.update(
+    cleanupOutcome("child-close", {
+      pid: workerIdentity.pid,
+      identity: workerIdentity,
+    }),
+  );
+  const released = readLeaseFile(handle.path)!;
+  assert.equal(released.state, "released");
+  assert.equal(released.nestedProcesses?.identities.length, 2);
+});
+
+test("attacher persists a snapshot replayed synchronously at subscription", async () => {
+  const repo = tempDir("nested-replay");
+  const workerIdentity = identity(70_020);
+  const helper = identity(70_120);
+  const { managed, cleanupReasons, emitNested } = fakeManaged({
+    pid: workerIdentity.pid,
+    identity: workerIdentity,
+    observable: true,
+  });
+  // The observer retains its latest bounded snapshot and replays it during
+  // subscribe. The attacher must accept that replay instead of failing closed.
+  emitNested(nestedSnapshot([helper]));
+  const attach = createWorkerLeaseAttacher({
+    repoRoot: repo,
+    runId: "run-nested-replay",
+    controller: {
+      pid: 70_520,
+      host: "host-a",
+      identity: identity(70_520),
+    },
+  });
+  const handle = await attach(attachInput(managed, "nested-replay"));
+  const persisted = readLeaseFile(handle.path)!;
+  assert.equal(persisted.state, "active");
+  assert.equal(persisted.nestedProcesses?.observedCount, 1);
+  assert.equal(persisted.nestedProcesses?.identities[0]?.pid, helper.pid);
+  assert.equal(handle.current.nestedProcesses?.identities[0]?.pid, helper.pid);
+  assert.deepEqual(cleanupReasons, []);
+  await handle.update(
+    cleanupOutcome("child-close", {
+      pid: workerIdentity.pid,
+      identity: workerIdentity,
+    }),
+  );
+  assert.equal(readLeaseFile(handle.path)?.state, "released");
+});
+
+test("a nested-evidence write failure stops the worker and rejects the update", async () => {
+  const repo = tempDir("nested-write-failure");
+  const workerIdentity = identity(70_010);
+  const { managed, cleanupReasons, emitNested } = fakeManaged({
+    pid: workerIdentity.pid,
+    identity: workerIdentity,
+    observable: true,
+  });
+  const attach = createWorkerLeaseAttacher({
+    repoRoot: repo,
+    runId: "run-nested-write-failure",
+    controller: {
+      pid: 70_510,
+      host: "host-a",
+      identity: identity(70_510),
+    },
+  });
+  const handle = await attach(attachInput(managed, "nested-write-failure"));
+  // Removing the lease makes the nested write path fail closed.
+  rmSync(handle.path);
+  emitNested(nestedSnapshot([identity(70_110)]));
+  await waitFor(
+    () => cleanupReasons.includes("spawn-error"),
+    "fail-closed worker cleanup",
+  );
+  await assert.rejects(
+    handle.update(
+      cleanupOutcome("child-close", {
+        pid: workerIdentity.pid,
+        identity: workerIdentity,
+      }),
+    ),
+    /nested descendant evidence/i,
+  );
+});
+
+test("a malformed observer snapshot fails closed instead of being persisted", async () => {
+  const repo = tempDir("nested-malformed-snapshot");
+  const workerIdentity = identity(70_030);
+  const { managed, cleanupReasons, emitNested } = fakeManaged({
+    pid: workerIdentity.pid,
+    identity: workerIdentity,
+    observable: true,
+  });
+  const attach = createWorkerLeaseAttacher({
+    repoRoot: repo,
+    runId: "run-nested-malformed-snapshot",
+    controller: {
+      pid: 70_530,
+      host: "host-a",
+      identity: identity(70_530),
+    },
+  });
+  const handle = await attach(attachInput(managed, "nested-malformed"));
+  emitNested(
+    nestedSnapshot([identity(70_130)], { lastObservedAt: "not-a-timestamp" }),
+  );
+  await waitFor(
+    () => cleanupReasons.includes("spawn-error"),
+    "fail-closed worker cleanup",
+  );
+  assert.equal(readLeaseFile(handle.path)?.nestedProcesses, undefined);
+  await assert.rejects(
+    handle.update(
+      cleanupOutcome("child-close", {
+        pid: workerIdentity.pid,
+        identity: workerIdentity,
+      }),
+    ),
+    /nested descendant evidence/i,
+  );
+});
+
+test("nested lease evidence is all-or-nothing and backward compatible", () => {
+  const valid = baseLease({
+    nestedProcesses: nestedSnapshot([identity(73_001)]),
+  });
+  const parsed = parseWorkerLease(valid);
+  assert.ok(parsed);
+  assert.equal(parsed.nestedProcesses?.identities[0]?.pid, 73_001);
+  const legacy = parseWorkerLease(baseLease());
+  assert.ok(legacy);
+  assert.equal(legacy.nestedProcesses, undefined);
+
+  const base = nestedSnapshot([identity(73_001)]);
+  const thirtyThree = Array.from({ length: 33 }, (_, index) =>
+    identity(74_000 + index),
+  );
+  const bad: unknown[] = [
+    { ...valid, nestedProcesses: { ...base, version: 2 } },
+    {
+      ...valid,
+      nestedProcesses: {
+        version: 1,
+        host: "host-a",
+        identities: [identity(73_001)],
+      },
+    },
+    { ...valid, nestedProcesses: { ...base, host: "other-host" } },
+    { ...valid, nestedProcesses: { ...base, lastObservedAt: "not-a-time" } },
+    { ...valid, nestedProcesses: { ...base, observedCount: 2 } },
+    {
+      ...valid,
+      nestedProcesses: {
+        ...base,
+        observedCount: 2,
+        identities: [identity(73_001), identity(73_001)],
+      },
+    },
+    {
+      ...valid,
+      nestedProcesses: {
+        ...base,
+        observedCount: 1,
+        identities: [identity(73_001), identity(73_002)],
+      },
+    },
+    {
+      ...valid,
+      nestedProcesses: { ...base, observedCount: 33, identities: thirtyThree },
+    },
+    {
+      ...valid,
+      nestedProcesses: {
+        ...base,
+        identities: [{ pid: 0, pgid: 1, startedAt: "Mon Jan  1 00:00:00 2024" }],
+      },
+    },
+    {
+      ...valid,
+      nestedProcesses: {
+        ...base,
+        identities: [{ pid: 1, pgid: 1, startedAt: "Mon Jan  1 00:00:00 2024" }],
+      },
+    },
+  ];
+  for (const value of bad) assert.equal(parseWorkerLease(value), undefined);
+  // Truncation is explicit, and a truncated count may exceed the identity list.
+  const truncated = parseWorkerLease({
+    ...valid,
+    nestedProcesses: {
+      ...base,
+      observedCount: 33,
+      truncated: true,
+      identities: [identity(73_001)],
+    },
+  });
+  assert.ok(truncated);
+  assert.equal(truncated.nestedProcesses?.truncated, true);
+});
+
+test("status exposes bounded nested registry presence and exact liveness", async () => {
+  const repo = tempDir("nested-status");
+  const fake = new FakeInspector();
+  const live = identity(72_001);
+  const reused: RuntimeProcessIdentity = {
+    pid: 72_002,
+    pgid: 72_002,
+    startedAt: "Mon Jan  1 00:00:00 2024",
+  };
+  const gone = identity(72_003);
+  fake.add(live);
+  fake.add({
+    pid: reused.pid,
+    pgid: reused.pgid,
+    startedAt: "Tue Jan  2 00:00:00 2024",
+  });
+  const lease = baseLease({
+    leaseId: "lease-nested",
+    taskId: "task-nested",
+    nestedProcesses: nestedSnapshot([live, reused, gone], {
+      observedCount: 3,
+      lastObservedAt: "2026-01-01T00:00:02.000Z",
+    }),
+  });
+  const legacy = baseLease({
+    leaseId: "lease-legacy",
+    taskId: "task-legacy",
+  });
+  writeLease(repo, lease);
+  writeLease(repo, legacy);
+  const status = await buildWorkerLeaseStatus(
+    repo,
+    "run-recovery",
+    [{ taskId: "task-nested" }, { taskId: "task-legacy" }],
+    { inspector: fake },
+  );
+  const nested = status.tasks.find((task) => task.taskId === "task-nested")
+    ?.latest?.nestedProcesses;
+  assert.deepEqual(nested, {
+    present: true,
+    observedCount: 3,
+    identityCount: 3,
+    truncated: false,
+    lastObservedAt: "2026-01-01T00:00:02.000Z",
+    live: 1,
+    gone: 1,
+    reused: 1,
+    unknown: 0,
+  });
+  const legacyEntry = status.tasks.find(
+    (task) => task.taskId === "task-legacy",
+  )?.latest?.nestedProcesses;
+  assert.equal(legacyEntry?.present, false);
+  assert.equal(legacyEntry?.observedCount, 0);
+  // Status is advisory and never rewrites the lease.
+  assert.equal(
+    readLeaseFile(
+      workerLeasePath(repo, "run-recovery", "task-nested", lease.leaseId),
+    )?.nestedProcesses?.identities.length,
+    3,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Nested controller-death recovery
+// ---------------------------------------------------------------------------
+
+test("recovery rejects a truncated nested registry without any signal", async () => {
+  const repo = tempDir("nested-truncated");
+  const fake = new FakeInspector();
+  const helper = identity(61_200);
+  fake.add(identity(61_000));
+  fake.add(helper);
+  const lease = baseLease({
+    taskId: "task-truncated",
+    nestedProcesses: {
+      ...nestedSnapshot([helper]),
+      observedCount: 33,
+      truncated: true,
+    },
+  });
+  const path = writeLease(repo, lease);
+  const { report, calls, pidCalls } = await recoverWith(repo, fake);
+  assert.equal(report.needsHuman, 1);
+  assert.equal(report.recovered, 0);
+  assert.equal(calls.length, 0);
+  assert.equal(pidCalls.length, 0);
+  assert.equal(fake.isAlive(helper.pid), true);
+  assert.equal(fake.isAlive(61_000), true);
+  assert.equal(report.entries[0]?.action, "preserved");
+  assert.equal(report.entries[0]?.nested?.truncated, true);
+  const updated = readLeaseFile(path)!;
+  assert.equal(updated.state, "active");
+  assert.equal(updated.recovery?.[0]?.outcome, "needs_human");
+});
+
+test("an absent top-level leader recovers only the exact nested identity", async () => {
+  const repo = tempDir("nested-leader-absent");
+  const fake = new FakeInspector();
+  const helper = identity(61_100);
+  fake.add(helper);
+  const lease = baseLease({
+    taskId: "task-nested-absent",
+    nestedProcesses: nestedSnapshot([helper]),
+  });
+  const path = writeLease(repo, lease);
+  const { report, calls, pidCalls } = await recoverWith(repo, fake);
+  assert.equal(calls.length, 0);
+  assert.deepEqual(pidCalls, [{ pid: helper.pid, signal: "SIGTERM" }]);
+  assert.equal(report.recovered, 1);
+  assert.equal(report.entries[0]?.action, "terminated");
+  assert.deepEqual(
+    report.entries[0]?.signals.map((signal) => ({
+      scope: signal.scope,
+      pid: signal.pid,
+      signal: signal.signal,
+    })),
+    [{ scope: "descendant-pid", pid: helper.pid, signal: "SIGTERM" }],
+  );
+  assert.equal(report.entries[0]?.nested?.observedCount, 1);
+  assert.equal(report.entries[0]?.nested?.targetCount, 1);
+  assert.equal(fake.isAlive(helper.pid), false);
+  const updated = readLeaseFile(path)!;
+  assert.equal(updated.state, "released");
+  assert.equal(updated.cleanupReason, "recovery");
+  assert.equal(updated.nestedProcesses?.observedCount, 1);
+  assert.equal(updated.nestedProcesses?.identities[0]?.pid, helper.pid);
+  assert.equal(updated.recovery?.[0]?.outcome, "recovered");
+});
+
+test("nested recovery continues past residual group members without a group signal", async () => {
+  const repo = tempDir("nested-leader-absent-residual");
+  const fake = new FakeInspector();
+  const helper = identity(61_103);
+  // A member of the vanished leader's dedicated group: it must never turn the
+  // absent leader into authorization for a negative-pgid signal.
+  const residual: RuntimeProcessIdentity = { ...identity(61_050), pgid: 61_000 };
+  fake.add(helper);
+  fake.add(residual);
+  const lease = baseLease({
+    taskId: "task-nested-residual",
+    nestedProcesses: nestedSnapshot([helper]),
+  });
+  const path = writeLease(repo, lease);
+  const { report, calls, pidCalls } = await recoverWith(repo, fake);
+  assert.equal(calls.length, 0);
+  assert.deepEqual(pidCalls, [{ pid: helper.pid, signal: "SIGTERM" }]);
+  assert.equal(fake.isAlive(helper.pid), false);
+  assert.equal(fake.isAlive(residual.pid), true);
+  // Exact nested recovery happened, but the lease must not be released while
+  // an untouchable worker-group member remains.
+  assert.equal(report.entries[0]?.action, "preserved");
+  assert.equal(report.entries[0]?.residualCount, 1);
+  const updated = readLeaseFile(path)!;
+  assert.equal(updated.state, "cleanup-failed");
+  assert.equal(updated.nestedProcesses?.identities[0]?.pid, helper.pid);
+});
+
+test("a present leader cleans the guarded group and escalates exact nested pids", async () => {
+  const repo = tempDir("nested-present-leader");
+  const fake = new FakeInspector();
+  const workerIdentity = identity(61_000);
+  const helper = identity(61_101);
+  fake.add(workerIdentity);
+  fake.add(helper);
+  fake.setParent(helper.pid, workerIdentity.pid);
+  const lease = baseLease({
+    taskId: "task-nested-present",
+    nestedProcesses: nestedSnapshot([helper]),
+  });
+  const path = writeLease(repo, lease);
+  const { report, calls, pidCalls } = await recoverWith(repo, fake, {
+    pidIgnoreTerm: true,
+  });
+  assert.deepEqual(calls, [{ pgid: workerIdentity.pgid, signal: "SIGTERM" }]);
+  assert.deepEqual(pidCalls, [
+    { pid: helper.pid, signal: "SIGTERM" },
+    { pid: helper.pid, signal: "SIGKILL" },
+  ]);
+  assert.equal(report.recovered, 1);
+  assert.equal(fake.isAlive(workerIdentity.pid), false);
+  assert.equal(fake.isAlive(helper.pid), false);
+  const updated = readLeaseFile(path)!;
+  assert.equal(updated.state, "released");
+  // The refreshed target set was persisted before the signals.
+  assert.equal(updated.nestedProcesses?.identities[0]?.pid, helper.pid);
+  assert.ok(
+    updated.recovery?.[0]?.signals.some(
+      (signal) =>
+        signal.scope === "descendant-pid" && signal.pid === helper.pid,
+    ),
+  );
+});
+
+test("recovery never signals a reused nested pid", async () => {
+  const repo = tempDir("nested-reused");
+  const fake = new FakeInspector();
+  const recorded: RuntimeProcessIdentity = {
+    pid: 61_102,
+    pgid: 61_102,
+    startedAt: "Mon Jan  1 00:00:00 2024",
+  };
+  fake.add({
+    pid: recorded.pid,
+    pgid: recorded.pgid,
+    startedAt: "Tue Jan  2 00:00:00 2024",
+  });
+  const lease = baseLease({
+    taskId: "task-reused",
+    nestedProcesses: nestedSnapshot([recorded]),
+  });
+  const path = writeLease(repo, lease);
+  const { report, calls, pidCalls } = await recoverWith(repo, fake);
+  assert.equal(calls.length, 0);
+  assert.equal(pidCalls.length, 0);
+  assert.equal(fake.isAlive(recorded.pid), true);
+  assert.equal(report.recovered, 1);
+  assert.equal(report.entries[0]?.action, "already-exited");
+  assert.equal(readLeaseFile(path)?.state, "released");
+});
+
+posixTest(
+  "recovery preserves processes when nested targets cannot be checkpointed",
+  async () => {
+    const repo = tempDir("nested-checkpoint-failure");
+    const fake = new FakeInspector();
+    const helper = identity(61_300);
+    fake.add(helper);
+    const lease = baseLease({
+      taskId: "task-checkpoint",
+      nestedProcesses: nestedSnapshot([helper]),
+    });
+    const path = writeLease(repo, lease);
+    const dir = join(path, "..");
+    chmodSync(dir, 0o500);
+    try {
+      const { report, calls, pidCalls } = await recoverWith(repo, fake);
+      assert.equal(report.needsHuman, 1);
+      assert.equal(report.recovered, 0);
+      assert.equal(calls.length, 0);
+      assert.equal(pidCalls.length, 0);
+      assert.equal(fake.isAlive(helper.pid), true);
+      assert.match(report.entries[0]?.reason ?? "", /persist/i);
+      const preserved = readLeaseFile(path)!;
+      assert.equal(preserved.state, "active");
+      assert.equal(preserved.nestedProcesses?.identities[0]?.pid, helper.pid);
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+  },
+);

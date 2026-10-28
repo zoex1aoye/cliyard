@@ -26,18 +26,24 @@ import {
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import {
+  MAX_PROCESS_TABLE_ROWS,
   compareProcessIdentity,
   isProcessIdentity,
   isProcessPid,
   ProcessInspector,
   type ProcessGroupMember,
+  type ProcessTableEntry,
 } from "../runtime/process.js";
 import type { RuntimeProcessIdentity } from "../runtime/types.js";
 import {
+  MAX_NESTED_SIGNAL_TARGETS,
+  MAX_PERSISTED_EXTERNAL_DESCENDANTS,
+  MAX_SAMPLED_DESCENDANTS,
   type ManagedWorkerProcess,
   type WorkerCleanupReason,
   type WorkerCaptureSource,
   type WorkerCleanupState,
+  type WorkerNestedProcesses,
   type WorkerProcessCleanupOutcome,
   type WorkerProcessSignalRecord,
   type WorkerProcessTreeInspector,
@@ -52,6 +58,18 @@ export const MAX_WORKER_LEASE_RECOVERY = 8;
 /** Maximum lease file size considered valid. */
 export const MAX_WORKER_LEASE_BYTES = 64 * 1024;
 export const MAX_WORKER_LEASE_DETAIL = 600;
+/** Maximum exact nested-descendant identities persisted on one lease. */
+export const MAX_WORKER_LEASE_NESTED_IDENTITIES =
+  MAX_PERSISTED_EXTERNAL_DESCENDANTS;
+/** Hard bound for the observed nested count carried as evidence. */
+export const MAX_WORKER_LEASE_NESTED_COUNT = 100_000;
+
+/**
+ * Optional, all-or-nothing durable nested-descendant evidence. The shape is
+ * shared with the managed-process observer; a lease without this field keeps
+ * the legacy v1 behavior.
+ */
+export type WorkerLeaseNestedProcesses = WorkerNestedProcesses;
 export const DEFAULT_LEASE_TERM_GRACE_MS = 2_000;
 export const DEFAULT_LEASE_KILL_GRACE_MS = 1_000;
 export const DEFAULT_LEASE_POLL_MS = 50;
@@ -127,6 +145,12 @@ export interface WorkerLease {
   cleanupReason?: WorkerLeaseCleanupReason;
   cleanedAt?: string;
   cleanup?: WorkerLeaseCleanupEvidence;
+  /**
+   * Bounded exact identities of descendants observed outside the worker's
+   * dedicated group before the controller could die. Absent for legacy
+   * leases and for invocations that never observed an external descendant.
+   */
+  nestedProcesses?: WorkerLeaseNestedProcesses;
   recovery?: WorkerLeaseRecoveryEvidence[];
 }
 
@@ -248,6 +272,11 @@ export function parseWorkerLease(value: unknown): WorkerLease | undefined {
   if (!controller) return undefined;
   const worker = parseWorker(value.worker);
   if (!worker) return undefined;
+  const nestedProcesses =
+    value.nestedProcesses === undefined
+      ? undefined
+      : parseNestedProcesses(value.nestedProcesses, controller.host);
+  if (value.nestedProcesses !== undefined && !nestedProcesses) return undefined;
 
   let cleanupReason: WorkerLeaseCleanupReason | undefined;
   if (value.cleanupReason !== undefined) {
@@ -292,7 +321,66 @@ export function parseWorkerLease(value: unknown): WorkerLease | undefined {
     ...(cleanupReason !== undefined ? { cleanupReason } : {}),
     ...(cleanedAt !== undefined ? { cleanedAt } : {}),
     ...(cleanup !== undefined ? { cleanup } : {}),
+    ...(nestedProcesses !== undefined ? { nestedProcesses } : {}),
     ...(recovery !== undefined ? { recovery } : {}),
+  };
+}
+
+/**
+ * Optional nested evidence is all-or-nothing and must belong to the same host
+ * as the controller. Duplicate pids, a count smaller than the persisted list,
+ * or an untruncated count that disagrees with the persisted list are
+ * malformed, never best-effort evidence.
+ */
+function parseNestedProcesses(
+  value: unknown,
+  controllerHost: string,
+): WorkerLeaseNestedProcesses | undefined {
+  if (!isRecord(value) || value.version !== 1) return undefined;
+  if (
+    !isBoundedText(value.host, 256) ||
+    !sameHost(value.host, controllerHost) ||
+    typeof value.observedCount !== "number" ||
+    !Number.isInteger(value.observedCount) ||
+    value.observedCount < 0 ||
+    value.observedCount > MAX_WORKER_LEASE_NESTED_COUNT ||
+    typeof value.truncated !== "boolean" ||
+    !isTimestamp(value.lastObservedAt) ||
+    !Array.isArray(value.identities) ||
+    value.identities.length > MAX_WORKER_LEASE_NESTED_IDENTITIES
+  ) {
+    return undefined;
+  }
+  const identities: RuntimeProcessIdentity[] = [];
+  const seen = new Set<number>();
+  for (const raw of value.identities) {
+    // pid 1 (init/launchd) is never a worker descendant; accepting it would
+    // make the registry a traversal root for the entire process tree.
+    if (!isProcessIdentity(raw) || raw.pid <= 1 || seen.has(raw.pid)) {
+      return undefined;
+    }
+    seen.add(raw.pid);
+    identities.push(copyIdentity(raw));
+  }
+  if (value.observedCount < identities.length) return undefined;
+  // A complete registry persists every observed identity. Only a truncated
+  // registry may carry a larger observed count than its bounded list.
+  if (!value.truncated && value.observedCount !== identities.length) {
+    return undefined;
+  }
+  if (
+    value.observedCount > MAX_WORKER_LEASE_NESTED_IDENTITIES &&
+    !value.truncated
+  ) {
+    return undefined;
+  }
+  return {
+    version: 1,
+    host: value.host,
+    observedCount: value.observedCount,
+    truncated: value.truncated,
+    lastObservedAt: value.lastObservedAt,
+    identities,
   };
 }
 
@@ -421,10 +509,17 @@ function parseSignals(raw: unknown): WorkerProcessSignalRecord[] | undefined {
     if (!isRecord(value)) return undefined;
     if (
       (value.signal !== "SIGTERM" && value.signal !== "SIGKILL") ||
-      value.scope !== "process-group" ||
+      (value.scope !== "process-group" && value.scope !== "descendant-pid") ||
       (value.result !== "sent" && value.result !== "failed") ||
       !isTimestamp(value.at)
     ) {
+      return undefined;
+    }
+    let pid: number | undefined;
+    if (value.scope === "descendant-pid") {
+      if (!isProcessPid(value.pid)) return undefined;
+      pid = value.pid;
+    } else if (value.pid !== undefined) {
       return undefined;
     }
     let detail: string | undefined;
@@ -436,7 +531,8 @@ function parseSignals(raw: unknown): WorkerProcessSignalRecord[] | undefined {
     }
     signals.push({
       signal: value.signal,
-      scope: "process-group",
+      scope: value.scope,
+      ...(pid !== undefined ? { pid } : {}),
       at: value.at,
       result: value.result,
       ...(detail !== undefined ? { detail } : {}),
@@ -596,14 +692,89 @@ export function createWorkerLeaseAttacher(
       throw asPersistenceError(error, "cannot persist the exact worker identity");
     }
 
-    let mutable: MutableLeaseHandle | undefined;
     let updated = false;
+    let closing = false;
+    let nestedFailure: WorkerLeasePersistenceError | undefined;
+    let writeChain: Promise<void> = Promise.resolve();
+    let unsubscribeNested: (() => void) | undefined;
+
+    const markNestedUnhealthy = (error: unknown): void => {
+      if (nestedFailure !== undefined) return;
+      nestedFailure = asPersistenceError(
+        error,
+        "cannot persist nested descendant evidence",
+      );
+      // Stop the invocation rather than accept a worker whose nested
+      // ownership evidence is not durable.
+      void cleanupForLeaseFailure(managed);
+    };
+
+    const persistNestedSnapshot = (snapshot: WorkerNestedProcesses): void => {
+      if (closing || updated || nestedFailure !== undefined) return;
+      if (!sameHost(snapshot.host, controller.host)) {
+        markNestedUnhealthy(
+          new WorkerLeasePersistenceError(
+            "nested descendant evidence host does not match the controller host",
+          ),
+        );
+        return;
+      }
+      // Never durably write evidence that the strict lease parser would later
+      // reject: a malformed snapshot is a persistence-health failure.
+      if (
+        snapshot.version !== 1 ||
+        !isTimestamp(snapshot.lastObservedAt) ||
+        typeof snapshot.truncated !== "boolean" ||
+        !Number.isInteger(snapshot.observedCount) ||
+        snapshot.observedCount < 0 ||
+        snapshot.observedCount > MAX_WORKER_LEASE_NESTED_COUNT ||
+        !Array.isArray(snapshot.identities) ||
+        snapshot.identities.length > MAX_SAMPLED_DESCENDANTS ||
+        snapshot.identities.some(
+          (identity) => !isProcessIdentity(identity) || identity.pid <= 1,
+        )
+      ) {
+        markNestedUnhealthy(
+          new WorkerLeasePersistenceError(
+            "nested descendant evidence is malformed",
+          ),
+        );
+        return;
+      }
+      const onDisk = readLeaseFile(path);
+      if (!onDisk) {
+        markNestedUnhealthy(
+          new WorkerLeasePersistenceError(
+            `worker lease disappeared before nested evidence could be written: ${path}`,
+          ),
+        );
+        return;
+      }
+      assertImmutableLeaseFields(onDisk, current);
+      const next = applyNestedSnapshot(onDisk, snapshot, now().toISOString());
+      if (!next) return;
+      writeJsonAtomic(path, next);
+      current = next;
+    };
+
     const handle: MutableLeaseHandle = {
       leaseId: current.leaseId,
       path,
-      current,
+      // The observer may replay its current snapshot synchronously inside
+      // `observeExternalDescendants`, before this function returns, so the
+      // handle must read the live variable instead of a copied snapshot.
+      get current() {
+        return current;
+      },
       async update(outcome: WorkerProcessCleanupOutcome): Promise<WorkerLease> {
-        if (updated) return mutable!.current;
+        if (updated) return current;
+        closing = true;
+        unsubscribeNested?.();
+        unsubscribeNested = undefined;
+        // Let any already-enqueued nested snapshot finish before the terminal
+        // update; the update itself must be the last write to the lease.
+        await writeChain;
+        if (nestedFailure !== undefined) throw nestedFailure;
         const onDisk = readLeaseFile(path);
         if (!onDisk) {
           throw new WorkerLeasePersistenceError(
@@ -611,17 +782,169 @@ export function createWorkerLeaseAttacher(
           );
         }
         assertImmutableLeaseFields(onDisk, current);
-        const next = applyCleanupOutcome(onDisk, outcome, now().toISOString());
+        const updatedAt = now().toISOString();
+        const withCleanup = applyCleanupOutcome(onDisk, outcome, updatedAt);
+        const next = enrichNestedFromRecord(withCleanup, outcome.record, updatedAt);
         writeJsonAtomic(path, next);
         current = next;
-        mutable!.current = next;
         updated = true;
         return next;
       },
     };
-    mutable = handle;
+
+    // Subscribe only after the immutable controller and worker identity have
+    // been durably written. Snapshot writes are serialized on one chain so an
+    // older observation can never replace a newer one.
+    const observeNested = managed.observeExternalDescendants;
+    if (typeof observeNested === "function") {
+      unsubscribeNested = observeNested.call(managed, (snapshot) => {
+        if (closing) return;
+        writeChain = writeChain
+          .then(() => persistNestedSnapshot(snapshot))
+          .catch(markNestedUnhealthy);
+      });
+      await writeChain;
+      if (nestedFailure !== undefined) {
+        unsubscribeNested();
+        unsubscribeNested = undefined;
+        await cleanupForLeaseFailure(managed);
+        throw nestedFailure;
+      }
+    }
+
     return handle;
   };
+}
+
+/**
+ * Merge one observer snapshot into the durable registry. Older snapshots are
+ * ignored; identity evidence is monotonic (never removed by a newer snapshot)
+ * and the persisted list stays bounded. An empty snapshot never creates or
+ * replaces evidence.
+ */
+function applyNestedSnapshot(
+  lease: WorkerLease,
+  snapshot: WorkerNestedProcesses,
+  at: string,
+): WorkerLease | undefined {
+  const existing = lease.nestedProcesses;
+  if (
+    !existing &&
+    snapshot.observedCount === 0 &&
+    snapshot.identities.length === 0 &&
+    !snapshot.truncated
+  ) {
+    return undefined;
+  }
+  // ISO timestamps from different offsets sort differently as strings; compare
+  // parsed instants so an older observation can never win on lexical order.
+  const existingTime = existing ? timestampMs(existing.lastObservedAt) : undefined;
+  const snapshotTime = timestampMs(snapshot.lastObservedAt);
+  if (
+    existing &&
+    existingTime !== undefined &&
+    snapshotTime !== undefined &&
+    snapshotTime < existingTime
+  ) {
+    return undefined;
+  }
+  const identities = new Map<number, RuntimeProcessIdentity>();
+  for (const identity of existing?.identities ?? []) {
+    identities.set(identity.pid, copyIdentity(identity));
+  }
+  for (const identity of snapshot.identities) {
+    identities.set(identity.pid, copyIdentity(identity));
+  }
+  const observedCount = Math.max(
+    existing?.observedCount ?? 0,
+    snapshot.observedCount,
+    identities.size,
+  );
+  const truncated =
+    existing?.truncated === true ||
+    snapshot.truncated ||
+    observedCount > MAX_WORKER_LEASE_NESTED_IDENTITIES;
+  const bounded = [...identities.values()]
+    .sort((first, second) => first.pid - second.pid)
+    .slice(0, MAX_WORKER_LEASE_NESTED_IDENTITIES);
+  const lastObservedAt =
+    existing &&
+    existingTime !== undefined &&
+    snapshotTime !== undefined &&
+    existingTime > snapshotTime
+      ? existing.lastObservedAt
+      : snapshot.lastObservedAt;
+  if (
+    existing &&
+    existing.host === lease.controller.host &&
+    existing.observedCount === observedCount &&
+    existing.truncated === truncated &&
+    existing.lastObservedAt === lastObservedAt &&
+    sameIdentities(existing.identities, bounded)
+  ) {
+    return undefined;
+  }
+  return {
+    ...lease,
+    updatedAt: at,
+    nestedProcesses: {
+      version: 1,
+      host: lease.controller.host,
+      observedCount,
+      truncated,
+      lastObservedAt,
+      identities: bounded,
+    },
+  };
+}
+
+/**
+ * The terminal process-tree record may enrich the durable registry, but it
+ * never removes identities and never invents them. A foreign-host record is
+ * not nested-evidence authority.
+ */
+function enrichNestedFromRecord(
+  lease: WorkerLease,
+  record: WorkerProcessCleanupOutcome["record"],
+  at: string,
+): WorkerLease {
+  const identities = record.observedExternalDescendants;
+  const count = record.observedExternalDescendantCount;
+  if (
+    !identities ||
+    identities.length === 0 ||
+    count === undefined ||
+    !sameHost(record.host, lease.controller.host)
+  ) {
+    return lease;
+  }
+  const snapshot: WorkerNestedProcesses = {
+    version: 1,
+    host: lease.controller.host,
+    observedCount: Math.max(count, identities.length),
+    truncated:
+      count > identities.length ||
+      count > MAX_WORKER_LEASE_NESTED_IDENTITIES,
+    lastObservedAt: record.cleanedAt ?? at,
+    identities: identities.map(copyIdentity),
+  };
+  return applyNestedSnapshot(lease, snapshot, at) ?? lease;
+}
+
+function sameIdentities(
+  left: readonly RuntimeProcessIdentity[],
+  right: readonly RuntimeProcessIdentity[],
+): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (
+      compareProcessIdentity(left[index], right[index]) !== "match" ||
+      left[index]!.pid !== right[index]!.pid
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function provisionalLease(input: {
@@ -902,6 +1225,23 @@ export type WorkerLeaseControllerState =
   | "foreign-host"
   | "unknown";
 
+/**
+ * Read-only projection of the optional durable nested registry. The liveness
+ * counters are only classified when this host can inspect exact identities;
+ * otherwise every identity is reported as `unknown`.
+ */
+export interface WorkerLeaseNestedStatus {
+  present: boolean;
+  observedCount: number;
+  identityCount: number;
+  truncated: boolean;
+  lastObservedAt?: string;
+  live: number;
+  gone: number;
+  reused: number;
+  unknown: number;
+}
+
 export interface WorkerLeaseStatusEntry {
   leaseId: string;
   taskId: string;
@@ -919,6 +1259,7 @@ export interface WorkerLeaseStatusEntry {
   cleanupReason?: WorkerLeaseCleanupReason;
   cleanedAt?: string;
   cleanup?: WorkerLeaseCleanupEvidence;
+  nestedProcesses: WorkerLeaseNestedStatus;
   latestObservation?: string;
 }
 
@@ -1064,6 +1405,7 @@ async function statusEntry(
       : {}),
     ...(lease.cleanedAt !== undefined ? { cleanedAt: lease.cleanedAt } : {}),
     ...(cleanup ? { cleanup } : {}),
+    nestedProcesses: await observeNestedForStatus(lease, inspector),
     ...(latestRecovery
       ? {
           latestObservation:
@@ -1078,6 +1420,56 @@ async function statusEntry(
           }
         : {}),
   };
+}
+
+async function observeNestedForStatus(
+  lease: WorkerLease,
+  inspector: WorkerProcessTreeInspector,
+): Promise<WorkerLeaseNestedStatus> {
+  const nested = lease.nestedProcesses;
+  if (!nested) {
+    return {
+      present: false,
+      observedCount: 0,
+      identityCount: 0,
+      truncated: false,
+      live: 0,
+      gone: 0,
+      reused: 0,
+      unknown: 0,
+    };
+  }
+  const status: WorkerLeaseNestedStatus = {
+    present: true,
+    observedCount: nested.observedCount,
+    identityCount: nested.identities.length,
+    truncated: nested.truncated,
+    lastObservedAt: nested.lastObservedAt,
+    live: 0,
+    gone: 0,
+    reused: 0,
+    unknown: 0,
+  };
+  if (!sameHost(nested.host, inspector.host)) {
+    status.unknown = nested.identities.length;
+    return status;
+  }
+  for (const identity of nested.identities) {
+    if (!inspector.isAlive(identity.pid)) {
+      status.gone += 1;
+      continue;
+    }
+    try {
+      const observed = await inspector.capture(identity.pid);
+      const comparison = compareProcessIdentity(identity, observed);
+      if (comparison === "match") status.live += 1;
+      else if (comparison === "mismatch") status.reused += 1;
+      else status.unknown += 1;
+    } catch {
+      status.unknown += 1;
+    }
+  }
+  return status;
 }
 
 async function observeControllerForStatus(
@@ -1124,6 +1516,11 @@ export interface WorkerLeaseRecoveryOptions {
   pollMs?: number;
   /** Injection for tests; production only signals a negative process group. */
   killGroup?: (pgid: number, signal: NodeJS.Signals) => void;
+  /**
+   * Injection for tests; production only signals an exact revalidated pid.
+   * Nested targets are never signalled by a process group.
+   */
+  killPid?: (pid: number, signal: NodeJS.Signals) => void;
   now?: () => Date;
 }
 
@@ -1150,7 +1547,18 @@ export interface WorkerLeaseRecoveryEntry {
   resumeNeeded: boolean;
   signals: WorkerProcessSignalRecord[];
   residualCount?: number;
+  /** Present when the lease carried durable nested-descendant evidence. */
+  nested?: WorkerLeaseNestedRecoveryStatus;
   leaseUpdated: boolean;
+}
+
+/** Bounded nested registry observation included in a recovery entry. */
+export interface WorkerLeaseNestedRecoveryStatus {
+  observedCount: number;
+  persistedCount: number;
+  truncated: boolean;
+  targetCount: number;
+  residualCount: number;
 }
 
 export interface WorkerLeaseResumeNeed {
@@ -1184,6 +1592,7 @@ interface RecoveryContext {
   killGraceMs: number;
   pollMs: number;
   killGroup: (pgid: number, signal: NodeJS.Signals) => void;
+  killPid: (pid: number, signal: NodeJS.Signals) => void;
   now: () => Date;
 }
 
@@ -1196,6 +1605,10 @@ interface RecoveryDecision {
   resumeNeeded: boolean;
   signals: WorkerProcessSignalRecord[];
   residualCount?: number;
+  /** Bounded nested registry observation for the recovery report. */
+  nested?: WorkerLeaseNestedRecoveryStatus;
+  /** Refreshed nested target set to persist; omitted leaves the registry. */
+  nextNested?: WorkerNestedProcesses;
   /** Lifecycle state to persist; omitted means preserve the current state. */
   nextState?: WorkerLeaseState;
   cleanupReason?: WorkerLeaseCleanupReason;
@@ -1236,6 +1649,11 @@ export async function recoverWorkerLeases(
       options.killGroup ??
       ((pgid, signal) => {
         process.kill(-pgid, signal);
+      }),
+    killPid:
+      options.killPid ??
+      ((pid, signal) => {
+        process.kill(pid, signal);
       }),
     now,
   };
@@ -1289,7 +1707,7 @@ export async function recoverWorkerLeases(
       continue;
     }
 
-    const decision = await recoverActiveLease(lease, context);
+    const decision = await recoverActiveLease(lease, context, path);
     let leaseUpdated = false;
     if (decision.controllerState === "dead") {
       const evidence: WorkerLeaseRecoveryEvidence = {
@@ -1344,6 +1762,7 @@ export async function recoverWorkerLeases(
       ...(decision.residualCount !== undefined
         ? { residualCount: decision.residualCount }
         : {}),
+      ...(decision.nested !== undefined ? { nested: decision.nested } : {}),
       leaseUpdated,
     });
   }
@@ -1371,6 +1790,7 @@ export async function recoverWorkerLeases(
 async function recoverActiveLease(
   lease: WorkerLease,
   context: RecoveryContext,
+  path: string,
 ): Promise<RecoveryDecision> {
   if (!sameHost(lease.controller.host, context.inspector.host)) {
     return {
@@ -1412,7 +1832,7 @@ async function recoverActiveLease(
     };
   }
 
-  return recoverWorkerGroup(lease, context);
+  return recoverWorkerGroup(lease, context, path);
 }
 
 async function observeController(
@@ -1442,7 +1862,11 @@ async function observeController(
 async function recoverWorkerGroup(
   lease: WorkerLease,
   context: RecoveryContext,
+  path: string,
 ): Promise<RecoveryDecision> {
+  if (lease.nestedProcesses !== undefined) {
+    return recoverNestedWorker(lease, context, path);
+  }
   const pid = lease.worker.pid;
   const pgid = lease.worker.pgid;
   const osStartIdentity = lease.worker.osStartIdentity;
@@ -1644,6 +2068,698 @@ async function recoverWorkerGroup(
   };
 }
 
+/**
+ * Recovery for a lease carrying durable nested-descendant evidence.
+ *
+ * The only signals are (a) the legacy guarded dedicated-group signal while
+ * the exact top-level leader is present and (b) exact-pid signals to
+ * revalidated nested identities. A leader that is absent or reused never
+ * authorizes a negative-pgid signal.
+ */
+async function recoverNestedWorker(
+  lease: WorkerLease,
+  context: RecoveryContext,
+  path: string,
+): Promise<RecoveryDecision> {
+  const registry = lease.nestedProcesses;
+  if (registry === undefined) {
+    return preserveNeedsHuman("nested descendant registry is absent");
+  }
+
+  let targetCount = 0;
+  let residualCount = 0;
+  let persistedCount = registry.identities.length;
+  let refreshedObservation = false;
+  const nestedStatus = (): WorkerLeaseNestedRecoveryStatus => ({
+    observedCount: refreshedObservation
+      ? targetCount
+      : registry.observedCount,
+    persistedCount,
+    truncated: registry.truncated,
+    targetCount,
+    residualCount,
+  });
+  const preserve = (
+    reason: string,
+    extras: Partial<RecoveryDecision> = {},
+  ): RecoveryDecision => ({
+    ...preserveNeedsHuman(reason),
+    nested: nestedStatus(),
+    ...extras,
+  });
+
+  // Rule 1: a truncated or structurally incomplete registry authorizes
+  // nothing. All-or-nothing validation is repeated here because recovery must
+  // not rely on a caller having re-parsed the lease.
+  if (registry.truncated) {
+    return preserve(
+      "nested descendant registry is truncated; processes preserved",
+    );
+  }
+  if (
+    registry.version !== 1 ||
+    !isTimestamp(registry.lastObservedAt) ||
+    !Number.isInteger(registry.observedCount) ||
+    registry.observedCount < 0 ||
+    registry.observedCount > MAX_WORKER_LEASE_NESTED_COUNT ||
+    !sameHost(registry.host, lease.controller.host) ||
+    !sameHost(registry.host, context.inspector.host) ||
+    registry.observedCount !== registry.identities.length ||
+    registry.identities.length > MAX_WORKER_LEASE_NESTED_IDENTITIES
+  ) {
+    return preserve(
+      "nested descendant registry is structurally incomplete; processes preserved",
+    );
+  }
+  const seenPids = new Set<number>();
+  for (const identity of registry.identities) {
+    if (
+      !isProcessIdentity(identity) ||
+      identity.pid <= 1 ||
+      seenPids.has(identity.pid)
+    ) {
+      return preserve(
+        "nested descendant registry contains an invalid or duplicate identity; " +
+          "processes preserved",
+      );
+    }
+    seenPids.add(identity.pid);
+  }
+
+  const pid = lease.worker.pid;
+  const pgid = lease.worker.pgid;
+  const osStartIdentity = lease.worker.osStartIdentity;
+  if (lease.worker.captureMode !== "posix-group") {
+    return preserve(
+      "worker was captured as windows-exact-child; no recoverable POSIX group",
+    );
+  }
+  if (!isProcessPid(pid) || !isProcessPid(pgid) || !osStartIdentity) {
+    return preserve(
+      "exact worker pid/pgid/OS start identity is missing; processes preserved",
+    );
+  }
+  if (pgid !== pid) {
+    return preserve(
+      "worker was not the leader of its dedicated process group; processes preserved",
+    );
+  }
+  const expectedIdentity: RuntimeProcessIdentity = {
+    pid,
+    pgid,
+    startedAt: osStartIdentity,
+  };
+
+  // Rule 2/3: classify the top-level leader. Capture errors stay ambiguous;
+  // an absent or reused leader only disables group cleanup.
+  let leaderObserved: RuntimeProcessIdentity | undefined;
+  try {
+    leaderObserved = await context.inspector.capture(pid);
+  } catch {
+    return preserve("worker identity could not be inspected; processes preserved");
+  }
+  const leaderPresent =
+    leaderObserved !== undefined &&
+    compareProcessIdentity(expectedIdentity, leaderObserved) === "match";
+  if (
+    leaderObserved !== undefined &&
+    !leaderPresent &&
+    compareProcessIdentity(expectedIdentity, leaderObserved) === "unknown"
+  ) {
+    return preserve("worker exact identity is ambiguous; processes preserved");
+  }
+
+  // An absent leader never authorizes a negative-pgid signal, but it must not
+  // block the durable nested registry either: exact-pid recovery continues,
+  // and any remaining worker-group members simply keep the lease unreleased
+  // (checked after the target grace below).
+  // Nested targets are signalled by pid, so the recovery process and its own
+  // group must be provably excludable before any identity is collected.
+  let ownGroupId: number;
+  try {
+    const own = await context.inspector.capture(process.pid);
+    if (!own || !isProcessPid(own.pgid)) {
+      return preserve(
+        "cannot prove the recovery process group; processes preserved",
+      );
+    }
+    ownGroupId = own.pgid;
+  } catch {
+    return preserve(
+      "cannot inspect the recovery process group; processes preserved",
+    );
+  }
+
+  // Rule 5: revalidate every persisted nested identity before any snapshot.
+  const roots: RuntimeProcessIdentity[] = [];
+  for (const identity of [...registry.identities].sort(
+    (first, second) => first.pid - second.pid,
+  )) {
+    let observed: RuntimeProcessIdentity | undefined;
+    try {
+      observed = await context.inspector.capture(identity.pid);
+    } catch {
+      return preserve(
+        "nested descendant identity could not be inspected; processes preserved",
+      );
+    }
+    if (!observed) continue; // gone
+    const comparison = compareProcessIdentity(identity, observed);
+    if (comparison === "match") {
+      // A fabricated registry never turns the recovery process or its own
+      // group into a nested target.
+      if (identity.pid === process.pid || identity.pgid === ownGroupId) {
+        continue;
+      }
+      roots.push(identity);
+      continue;
+    }
+    if (comparison === "mismatch") continue; // reused pid: never signalled
+    return preserve(
+      "nested descendant identity is ambiguous; processes preserved",
+    );
+  }
+
+  // Rule 4/6: one bounded snapshot supplies both the leader's fresh
+  // descendant graph and the recursive extension of matching nested roots.
+  const targets = new Map<number, RuntimeProcessIdentity>();
+  let graph: ProcessGraph | undefined;
+  if (leaderPresent || roots.length > 0) {
+    const snapshotProcessTable = context.inspector.snapshotProcessTable;
+    if (typeof snapshotProcessTable !== "function") {
+      return preserve(
+        "process-table inspection is unavailable; processes preserved",
+      );
+    }
+    let table: ProcessTableEntry[];
+    try {
+      table = await snapshotProcessTable.call(context.inspector, {
+        maxEntries: MAX_PROCESS_TABLE_ROWS,
+      });
+    } catch {
+      return preserve(
+        "process table could not be snapshotted; processes preserved",
+      );
+    }
+    graph = buildProcessGraph(table);
+    if (!graph) {
+      return preserve(
+        "process table contains a malformed or duplicate row; processes preserved",
+      );
+    }
+    if (leaderPresent) {
+      const row = graph.byPid.get(pid);
+      if (!row || compareProcessIdentity(expectedIdentity, row) !== "match") {
+        return preserve(
+          "worker leader identity changed during recovery; processes preserved",
+        );
+      }
+      const walked = collectExternalDescendants(
+        graph,
+        expectedIdentity,
+        pgid,
+        ownGroupId,
+        targets,
+      );
+      if (walked !== "ok") {
+        return preserve(
+          walked === "over-bound"
+            ? `external descendants exceed the ${MAX_NESTED_SIGNAL_TARGETS}-process signal bound; processes preserved`
+            : "descendant relationship graph is incomplete; processes preserved",
+        );
+      }
+    }
+    for (const root of roots) {
+      const row = graph.byPid.get(root.pid);
+      if (!row || compareProcessIdentity(root, row) !== "match") {
+        return preserve(
+          "nested descendant root identity changed during recovery; " +
+            "processes preserved",
+        );
+      }
+      if (root.pid !== pid && !targets.has(root.pid)) {
+        if (targets.size >= MAX_NESTED_SIGNAL_TARGETS) {
+          return preserve(
+            `external descendants exceed the ${MAX_NESTED_SIGNAL_TARGETS}-process signal bound; processes preserved`,
+          );
+        }
+        targets.set(root.pid, copyIdentity(root));
+      }
+      const walked = collectExternalDescendants(
+        graph,
+        root,
+        pgid,
+        ownGroupId,
+        targets,
+      );
+      if (walked !== "ok") {
+        return preserve(
+          walked === "over-bound"
+            ? `external descendants exceed the ${MAX_NESTED_SIGNAL_TARGETS}-process signal bound; processes preserved`
+            : "descendant relationship graph is incomplete; processes preserved",
+        );
+      }
+    }
+  }
+  targetCount = targets.size;
+  refreshedObservation = true;
+
+  // Rule 8: persist the refreshed exact target set before any signal. An
+  // empty target set never overwrites the durable registry.
+  let checkpoint: WorkerNestedProcesses | undefined;
+  if (targets.size > 0) {
+    const at = context.now().toISOString();
+    checkpoint = {
+      version: 1,
+      host: lease.controller.host,
+      observedCount: targets.size,
+      truncated: false,
+      lastObservedAt: at,
+      identities: [...targets.values()]
+        .sort((first, second) => first.pid - second.pid)
+        .map(copyIdentity),
+    };
+    try {
+      writeJsonAtomic(path, {
+        ...lease,
+        nestedProcesses: checkpoint,
+        updatedAt: at,
+      });
+    } catch {
+      return preserve(
+        "refreshed nested target set could not be persisted; processes preserved",
+      );
+    }
+    persistedCount = checkpoint.identities.length;
+  }
+  const checkpointExtra = checkpoint !== undefined ? { nextNested: checkpoint } : {};
+
+  // Rule 9: the top-level group is cleaned only through the existing guarded
+  // path and only while its exact leader is present.
+  const groupResult = leaderPresent
+    ? await cleanVerifiedWorkerGroup(expectedIdentity, pgid, context)
+    : { ok: true, signals: [], residual: 0, reason: "" };
+  const signals: WorkerProcessSignalRecord[] = [...groupResult.signals];
+  const targetIds = [...targets.values()].sort(
+    (first, second) => first.pid - second.pid,
+  );
+
+  // Rule 10: SIGTERM exact nested pids only.
+  let ambiguous = false;
+  for (const target of targetIds) {
+    if (!isSignalableTargetPid(target.pid)) continue;
+    const state = await revalidateTarget(target, context);
+    if (state === "match") {
+      if (sendPidSignal(target.pid, "SIGTERM", context, signals) === "error") {
+        ambiguous = true;
+      }
+    } else if (state === "unknown") {
+      ambiguous = true;
+    }
+  }
+
+  const termWait = await waitForTargetsGone(targetIds, context, context.termGraceMs);
+  if (termWait.unknown) ambiguous = true;
+
+  // Escalate only targets that still hold their exact identity.
+  const killTargets: RuntimeProcessIdentity[] = [];
+  for (const observed of termWait.alive) {
+    const state = await revalidateTarget(observed, context);
+    if (state === "match") {
+      killTargets.push(observed);
+      if (sendPidSignal(observed.pid, "SIGKILL", context, signals) === "error") {
+        ambiguous = true;
+      }
+    } else if (state === "unknown") {
+      ambiguous = true;
+    }
+  }
+  const killWait = await waitForTargetsGone(killTargets, context, context.killGraceMs);
+  if (killWait.unknown) ambiguous = true;
+
+  // Rule 11: re-read every target after the final grace. A still-matching live
+  // pid is residual; a reused pid is not ours and is never signalled.
+  const finalTargets = await observeTargets(targetIds, context);
+  if (finalTargets.unknown) ambiguous = true;
+  residualCount = finalTargets.alive.length;
+
+  // The group must also be provably empty before the lease can be released.
+  let groupResidual = 0;
+  try {
+    const remaining = await context.inspector.listGroupMembers(pgid);
+    groupResidual = remaining.length;
+  } catch {
+    ambiguous = true;
+  }
+
+  const reasonParts: string[] = [];
+  if (groupResult.signals.length > 0) reasonParts.push(groupResult.reason);
+  if (signals.length > groupResult.signals.length) {
+    reasonParts.push(
+      `${signals.length - groupResult.signals.length} nested signal(s) sent`,
+    );
+  }
+  if (!groupResult.ok) reasonParts.push(groupResult.reason);
+  if (groupResidual > 0) {
+    reasonParts.push(`${groupResidual} worker-group member(s) remain`);
+  }
+  if (residualCount > 0) {
+    reasonParts.push(`${residualCount} nested target(s) remain`);
+  }
+  if (ambiguous) reasonParts.push("nested recovery stayed ambiguous");
+
+  const recovered =
+    !ambiguous &&
+    residualCount === 0 &&
+    groupResidual === 0 &&
+    (groupResult.ok || !leaderPresent);
+  if (recovered) {
+    const action: WorkerLeaseRecoveryEvidence["action"] =
+      signals.length > 0 ? "terminated" : "already-exited";
+    return {
+      outcome: "recovered",
+      action,
+      reason:
+        signals.length > 0
+          ? "verified worker group and exact nested targets terminated"
+          : "verified worker group and exact nested targets are already gone",
+      controllerState: "dead",
+      workerState: signals.length > 0 ? "terminated" : "exited",
+      resumeNeeded: true,
+      signals,
+      nested: nestedStatus(),
+      ...checkpointExtra,
+      nextState: "released",
+      cleanupReason: "recovery",
+      cleanedAt: context.now().toISOString(),
+    };
+  }
+
+  const reason =
+    reasonParts.length > 0
+      ? reasonParts.join("; ")
+      : groupResult.reason || "nested recovery did not complete";
+  const residual = Math.max(residualCount, groupResidual, groupResult.residual);
+  return {
+    outcome: "needs_human",
+    action: "preserved",
+    reason: boundText(reason),
+    controllerState: "dead",
+    workerState: "preserved",
+    resumeNeeded: false,
+    signals,
+    ...(residual > 0 ? { residualCount: residual } : {}),
+    nested: nestedStatus(),
+    ...checkpointExtra,
+    // Only a signal that was actually delivered and then left a residual
+    // marks the lease cleanup-failed; ambiguity before any signal keeps the
+    // lease active so a later recovery can retry.
+    ...(residual > 0 && signals.length > 0
+      ? {
+          nextState: "cleanup-failed" as WorkerLeaseState,
+          cleanupReason: "recovery" as WorkerLeaseCleanupReason,
+          cleanedAt: context.now().toISOString(),
+        }
+      : {}),
+  };
+}
+
+interface ProcessGraph {
+  byPid: Map<number, ProcessTableEntry>;
+  children: Map<number, ProcessTableEntry[]>;
+}
+
+function buildProcessGraph(
+  table: readonly ProcessTableEntry[],
+): ProcessGraph | undefined {
+  const byPid = new Map<number, ProcessTableEntry>();
+  const children = new Map<number, ProcessTableEntry[]>();
+  for (const entry of table) {
+    if (
+      !Number.isSafeInteger(entry.pid) ||
+      entry.pid <= 0 ||
+      !Number.isSafeInteger(entry.ppid) ||
+      entry.ppid < 0 ||
+      !Number.isSafeInteger(entry.pgid) ||
+      entry.pgid < 0 ||
+      typeof entry.startedAt !== "string" ||
+      entry.startedAt.trim() === ""
+    ) {
+      return undefined;
+    }
+    if (byPid.has(entry.pid)) return undefined;
+    byPid.set(entry.pid, entry);
+    const siblings = children.get(entry.ppid);
+    if (siblings) siblings.push(entry);
+    else children.set(entry.ppid, [entry]);
+  }
+  return { byPid, children };
+}
+
+/**
+ * Walk every descendant of one validated root. Only rows with a complete
+ * exact identity and a process group outside the managed group become signal
+ * targets; in-group descendants belong to the guarded group path.
+ */
+function collectExternalDescendants(
+  graph: ProcessGraph,
+  root: RuntimeProcessIdentity,
+  managedPgid: number,
+  ownGroupId: number,
+  targets: Map<number, RuntimeProcessIdentity>,
+): "ok" | "incomplete" | "over-bound" {
+  const queue: number[] = [root.pid];
+  const seen = new Set<number>([root.pid]);
+  let visited = 0;
+  while (queue.length > 0) {
+    const parent = queue.shift() as number;
+    for (const child of graph.children.get(parent) ?? []) {
+      if (seen.has(child.pid)) continue;
+      seen.add(child.pid);
+      visited += 1;
+      if (visited > MAX_SAMPLED_DESCENDANTS) return "incomplete";
+      // The recovery process and its own group are never traversed or
+      // signalled, even if a fabricated table makes them descendants.
+      const ownProcess =
+        child.pid === process.pid || child.pgid === ownGroupId;
+      if (
+        !ownProcess &&
+        isProcessIdentity(child) &&
+        child.pid > 1 &&
+        child.pgid !== managedPgid &&
+        !targets.has(child.pid)
+      ) {
+        if (targets.size >= MAX_NESTED_SIGNAL_TARGETS) return "over-bound";
+        targets.set(child.pid, copyIdentity(child));
+      }
+      if (!ownProcess && child.pid > 1) queue.push(child.pid);
+    }
+  }
+  return "ok";
+}
+
+function isSignalableTargetPid(pid: number): boolean {
+  return isProcessPid(pid) && pid > 1 && pid !== process.pid;
+}
+
+/** `match` means the recorded identity still owns the pid. */
+async function revalidateTarget(
+  identity: RuntimeProcessIdentity,
+  context: RecoveryContext,
+): Promise<"match" | "gone" | "reused" | "unknown"> {
+  let observed: RuntimeProcessIdentity | undefined;
+  try {
+    observed = await context.inspector.capture(identity.pid);
+  } catch {
+    return "unknown";
+  }
+  if (!observed) return "gone";
+  const comparison = compareProcessIdentity(identity, observed);
+  if (comparison === "match") return "match";
+  if (comparison === "mismatch") return "reused";
+  return "unknown";
+}
+
+function sendPidSignal(
+  pid: number,
+  signal: "SIGTERM" | "SIGKILL",
+  context: RecoveryContext,
+  signals: WorkerProcessSignalRecord[],
+): "sent" | "gone" | "error" {
+  if (!isSignalableTargetPid(pid)) return "gone";
+  try {
+    context.killPid(pid, signal);
+    signals.push({
+      signal,
+      scope: "descendant-pid",
+      pid,
+      at: context.now().toISOString(),
+      result: "sent",
+    });
+    return "sent";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return "gone";
+    signals.push({
+      signal,
+      scope: "descendant-pid",
+      pid,
+      at: context.now().toISOString(),
+      result: "failed",
+      detail: boundText(error instanceof Error ? error.message : String(error)),
+    });
+    return "error";
+  }
+}
+
+interface TargetObservation {
+  alive: RuntimeProcessIdentity[];
+  unknown: boolean;
+}
+
+async function observeTargets(
+  targets: readonly RuntimeProcessIdentity[],
+  context: RecoveryContext,
+): Promise<TargetObservation> {
+  const alive: RuntimeProcessIdentity[] = [];
+  let unknown = false;
+  for (const target of targets) {
+    if (!isSignalableTargetPid(target.pid)) continue;
+    let observed: RuntimeProcessIdentity | undefined;
+    try {
+      observed = await context.inspector.capture(target.pid);
+    } catch {
+      unknown = true;
+      continue;
+    }
+    if (!observed) continue;
+    const comparison = compareProcessIdentity(target, observed);
+    if (comparison === "match") alive.push(observed);
+    else if (comparison === "unknown") unknown = true;
+  }
+  return { alive, unknown };
+}
+
+async function waitForTargetsGone(
+  targets: readonly RuntimeProcessIdentity[],
+  context: RecoveryContext,
+  graceMs: number,
+): Promise<TargetObservation> {
+  const deadline = Date.now() + graceMs;
+  for (;;) {
+    const observation = await observeTargets(targets, context);
+    if (observation.alive.length === 0 && !observation.unknown) {
+      return observation;
+    }
+    if (Date.now() >= deadline) return observation;
+    await sleep(Math.min(context.pollMs, Math.max(1, deadline - Date.now())));
+  }
+}
+
+interface GroupCleanupResult {
+  ok: boolean;
+  signals: WorkerProcessSignalRecord[];
+  residual: number;
+  reason: string;
+}
+
+/** Existing guarded dedicated-group cleanup, shared by nested recovery. */
+async function cleanVerifiedWorkerGroup(
+  identity: RuntimeProcessIdentity,
+  pgid: number,
+  context: RecoveryContext,
+): Promise<GroupCleanupResult> {
+  let members: ProcessGroupMember[];
+  try {
+    members = await context.inspector.listGroupMembers(pgid);
+  } catch {
+    return {
+      ok: false,
+      signals: [],
+      residual: 0,
+      reason: "worker group could not be listed; processes preserved",
+    };
+  }
+  if (members.length === 0) {
+    return { ok: true, signals: [], residual: 0, reason: "verified worker group is already gone" };
+  }
+  const guard = await groupSignalAllowed(pgid, identity, members, context);
+  if (!guard.ok) {
+    return { ok: false, signals: [], residual: members.length, reason: guard.reason };
+  }
+  const signals: WorkerProcessSignalRecord[] = [];
+  const term = sendGroupSignal(pgid, "SIGTERM", context, signals);
+  if (term === "error") {
+    return {
+      ok: false,
+      signals,
+      residual: members.length,
+      reason: "SIGTERM to the verified worker group failed; processes preserved",
+    };
+  }
+  try {
+    members = await waitForGroupEmpty(pgid, context, context.termGraceMs);
+  } catch {
+    return {
+      ok: false,
+      signals,
+      residual: members.length,
+      reason: "worker group became uninspectable after SIGTERM; processes preserved",
+    };
+  }
+  if (members.length === 0) {
+    return {
+      ok: true,
+      signals,
+      residual: 0,
+      reason: "verified worker group terminated after SIGTERM",
+    };
+  }
+  const residualBeforeKill = members.length;
+  const killGuard = await groupSignalAllowed(pgid, identity, members, context);
+  if (!killGuard.ok) {
+    return {
+      ok: false,
+      signals,
+      residual: residualBeforeKill,
+      reason: killGuard.reason,
+    };
+  }
+  const kill = sendGroupSignal(pgid, "SIGKILL", context, signals);
+  if (kill === "error") {
+    return {
+      ok: false,
+      signals,
+      residual: residualBeforeKill,
+      reason: "SIGKILL to the verified worker group failed; processes preserved",
+    };
+  }
+  try {
+    members = await waitForGroupEmpty(pgid, context, context.killGraceMs);
+  } catch {
+    return {
+      ok: false,
+      signals,
+      residual: residualBeforeKill,
+      reason: "worker group became uninspectable after SIGKILL; lease preserved",
+    };
+  }
+  if (members.length === 0) {
+    return {
+      ok: true,
+      signals,
+      residual: 0,
+      reason: "verified worker group terminated after SIGTERM/SIGKILL",
+    };
+  }
+  return {
+    ok: false,
+    signals,
+    residual: members.length,
+    reason: `verified worker group still has ${members.length} member(s) after SIGKILL`,
+  };
+}
+
 function preserveNeedsHuman(reason: string): RecoveryDecision {
   return {
     outcome: "needs_human",
@@ -1765,6 +2881,9 @@ function appendRecoveryEvidence(
   );
   return {
     ...lease,
+    ...(decision.nextNested !== undefined
+      ? { nestedProcesses: decision.nextNested }
+      : {}),
     ...(decision.nextState !== undefined
       ? { state: decision.nextState }
       : {}),
@@ -1852,6 +2971,11 @@ function isBoundedText(value: unknown, max: number): value is string {
     value.length <= max &&
     !value.includes("\0")
   );
+}
+
+function timestampMs(value: string): number | undefined {
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? undefined : parsed;
 }
 
 function isTimestamp(value: unknown): value is string {

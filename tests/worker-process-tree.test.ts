@@ -9,7 +9,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
 import {
   chmodSync,
   existsSync,
@@ -20,11 +20,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import {
   compareProcessIdentity,
   isProcessPid,
   ProcessInspector,
+  type ProcessTableEntry,
 } from "../src/runtime/process.js";
 import type { RuntimeProcessIdentity } from "../src/runtime/types.js";
 import {
@@ -36,6 +37,7 @@ import {
   MAX_SAMPLED_DESCENDANTS,
   parseWorkerProcessRecord,
   WorkerProcessTreeManager,
+  type WorkerNestedProcesses,
   type WorkerProcessTreeInspector,
   type WorkerProcessTreeManagerOptions,
   type WorkerProcessRecord,
@@ -77,18 +79,27 @@ const holdMs = Number(process.argv[4] ?? "60000");
 const ignoreTerm = process.argv[5] === "ignore";
 const childIgnoreTerm = process.argv[6] === "ignore";
 const detachHelper = process.argv[7] === "detach";
+const staggerMs = Number(process.argv[8] ?? "0");
 
 if (ignoreTerm) process.on("SIGTERM", () => {});
 const pids = [];
-for (let index = 0; index < childCount; index += 1) {
+const spawnChild = () => {
   const child = spawn(
     process.execPath,
     [${JSON.stringify(helperFixture)}, childIgnoreTerm ? "ignore" : "term"],
     { stdio: "ignore", detached: detachHelper },
   );
   pids.push(child.pid);
+  writeFileSync(pidFile, JSON.stringify(pids));
+};
+if (staggerMs > 0 && childCount > 1) {
+  spawnChild();
+  for (let index = 1; index < childCount; index += 1) {
+    setTimeout(spawnChild, staggerMs * index);
+  }
+} else {
+  for (let index = 0; index < childCount; index += 1) spawnChild();
 }
-writeFileSync(pidFile, JSON.stringify(pids));
 setTimeout(() => process.exit(0), holdMs);
 `,
   "utf8",
@@ -244,6 +255,7 @@ function spawnLeader(
     ignoreTerm?: boolean;
     childIgnoreTerm?: boolean;
     detachHelper?: boolean;
+    staggerMs?: number;
   } = {},
 ) {
   const managed = tree.spawn(
@@ -256,6 +268,7 @@ function spawnLeader(
       options.ignoreTerm ? "ignore" : "term",
       options.childIgnoreTerm ? "ignore" : "term",
       options.detachHelper ? "detach" : "same-group",
+      String(options.staggerMs ?? 0),
     ],
     { stdio: ["ignore", "ignore", "ignore"] },
   );
@@ -1300,3 +1313,181 @@ test("closed loop rejects malformed process-tree records", async () => {
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// External-descendant observation
+// ---------------------------------------------------------------------------
+
+posixTest(
+  "observer replays the current external-descendant snapshot and emits changes",
+  async () => {
+    const tree = manager({ descendantPollMs: 250 });
+    const pidFile = nextPidFile("observe");
+    // Two helpers; the second is spawned after a pause so the observer sees
+    // both an initial snapshot and a later changed one.
+    const managed = spawnLeader(tree, pidFile, {
+      children: 2,
+      detachHelper: true,
+      staggerMs: 600,
+    });
+    const snapshots: WorkerNestedProcesses[] = [];
+    const unsubscribe = managed.observeExternalDescendants!((snapshot) => {
+      snapshots.push(snapshot);
+    });
+    try {
+      await waitFor(
+        () => snapshots.some((snapshot) => snapshot.identities.length === 1),
+        "first external descendant snapshot",
+        10_000,
+      );
+      await waitFor(() => {
+        try {
+          return JSON.parse(readFileSync(pidFile, "utf8")).length === 2;
+        } catch {
+          return false;
+        }
+      }, "second helper pid");
+      const helperPids = await readHelperPids(pidFile);
+      await waitFor(
+        () => snapshots.some((snapshot) => snapshot.identities.length === 2),
+        "updated external descendant snapshot",
+        10_000,
+      );
+
+      const latest = snapshots[snapshots.length - 1]!;
+      assert.equal(latest.version, 1);
+      assert.equal(latest.host, inspector.host);
+      assert.equal(latest.truncated, false);
+      assert.equal(latest.observedCount, 2);
+      assert.equal(latest.identities.length, 2);
+      assert.ok(!Number.isNaN(Date.parse(latest.lastObservedAt)));
+      for (const pid of helperPids) {
+        assert.ok(
+          latest.identities.some((identity) => identity.pid === pid),
+          `snapshot contains helper ${pid}`,
+        );
+        // Observation is read-only: every helper is still running.
+        assert.equal(inspector.isAlive(pid), true);
+      }
+
+      // A late subscriber receives the current snapshot immediately, and
+      // unsubscribing stops further deliveries.
+      const replayed: WorkerNestedProcesses[] = [];
+      const off = managed.observeExternalDescendants!((snapshot) => {
+        replayed.push(snapshot);
+      });
+      assert.equal(replayed.length, 1);
+      assert.equal(replayed[0]?.identities.length, 2);
+      off();
+      const delivered = replayed.length;
+      await delay(350);
+      assert.equal(replayed.length, delivered);
+
+      const outcome = await managed.cleanup("cancel");
+      assert.equal(outcome.treeOk, true);
+      for (const pid of helperPids) {
+        await waitFor(
+          () => !inspector.isAlive(pid),
+          `observed helper ${pid} death`,
+        );
+        liveFixtures.delete(pid);
+      }
+    } finally {
+      unsubscribe();
+      await managed.cleanup("cancel");
+    }
+  },
+);
+
+/** Deterministic snapshot source for the bounded/truncated observation test. */
+class SyntheticSnapshotInspector implements WorkerProcessTreeInspector {
+  readonly host = "host-a";
+  readonly supported = true;
+  readonly leaderPid = 9_000_001;
+  readonly leaderStartedAt = "Mon Jan  1 00:00:00 2024";
+  external: ProcessTableEntry[] = [];
+  signals: Array<{ pid: number; signal: string }> = [];
+  snapshotCalls = 0;
+
+  isAlive(pid: number | undefined): boolean {
+    return pid === this.leaderPid;
+  }
+
+  async capture(
+    pid: number | undefined,
+  ): Promise<RuntimeProcessIdentity | undefined> {
+    if (pid !== this.leaderPid) return undefined;
+    return {
+      pid: this.leaderPid,
+      pgid: this.leaderPid,
+      startedAt: this.leaderStartedAt,
+    };
+  }
+
+  async listGroupMembers(): Promise<RuntimeProcessIdentity[]> {
+    return [];
+  }
+
+  async snapshotProcessTable(): Promise<ProcessTableEntry[]> {
+    this.snapshotCalls += 1;
+    return [
+      {
+        pid: this.leaderPid,
+        ppid: 1,
+        pgid: this.leaderPid,
+        startedAt: this.leaderStartedAt,
+      },
+      ...this.external,
+    ];
+  }
+}
+
+test(
+  "observer marks an over-bound external snapshot truncated and never signals",
+  async () => {
+    const fake = new SyntheticSnapshotInspector();
+    fake.external = Array.from({ length: 33 }, (_, index) => ({
+      pid: 9_000_100 + index,
+      ppid: fake.leaderPid,
+      pgid: 9_000_200 + index,
+      startedAt: "Mon Jan  1 00:00:00 2024",
+    }));
+    const tree = manager({ platform: "linux", inspector: fake });
+    const child = Object.assign(new EventEmitter(), {
+      pid: fake.leaderPid,
+      exitCode: null,
+      signalCode: null,
+      kill(signal: NodeJS.Signals) {
+        fake.signals.push({ pid: fake.leaderPid, signal });
+        return true;
+      },
+    }) as unknown as ChildProcess;
+    const managed = tree.manage(child);
+    const snapshots: WorkerNestedProcesses[] = [];
+    const unsubscribe = managed.observeExternalDescendants!((snapshot) => {
+      snapshots.push(snapshot);
+    });
+    try {
+      await waitFor(() => snapshots.length > 0, "truncated snapshot");
+      const snapshot = snapshots[snapshots.length - 1]!;
+      assert.equal(snapshot.truncated, true);
+      assert.equal(snapshot.observedCount, 33);
+      assert.equal(
+        snapshot.identities.length,
+        MAX_PERSISTED_EXTERNAL_DESCENDANTS,
+      );
+      // An unchanged process table produces no duplicate emission.
+      await waitFor(
+        () => fake.snapshotCalls >= 2,
+        "second unchanged sample",
+      );
+      assert.equal(snapshots.length, 1);
+      // Observation alone never signals anything, including the leader.
+      assert.deepEqual(fake.signals, []);
+    } finally {
+      unsubscribe();
+      await managed.cleanup("cancel");
+    }
+    assert.deepEqual(fake.signals, []);
+  },
+);
