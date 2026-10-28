@@ -282,6 +282,13 @@ test("execution profiles normalize bounded fields and derive capabilities", () =
   assert.equal(defaults[1]!.profileId, defaults[0]!.profileId);
   assert.equal(defaults[2]!.modelId, "deepseek-v4-pro");
   assert.equal(defaults[2]!.endpointRef, "deepseek-codex-default");
+
+  const custom = createLegacyExecutionProfile({
+    runtimeId: "claude",
+    modelId: "custom-model",
+  });
+  assert.equal(custom.providerId, "unknown");
+  assert.equal(custom.endpointRef, "unknown-default-endpoint");
 });
 
 test("profile and continuation parsers reject secrets, URLs and false capabilities", () => {

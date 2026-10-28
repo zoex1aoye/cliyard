@@ -212,9 +212,12 @@ export function createLegacyExecutionProfile(
     throw new Error(`unsupported execution runtime: ${String(input.runtimeId)}`);
   }
   const modelId = input.modelId ?? DEFAULT_EXECUTION_MODELS[input.runtimeId];
-  const providerId = input.providerId ?? "deepseek";
+  const providerId = input.providerId ?? inferProviderId(modelId);
   const endpointRef =
-    input.endpointRef ?? DEFAULT_EXECUTION_ENDPOINT_REFS[input.runtimeId];
+    input.endpointRef ??
+    (providerId === "deepseek"
+      ? DEFAULT_EXECUTION_ENDPOINT_REFS[input.runtimeId]
+      : "unknown-default-endpoint");
   const profileId =
     input.profileId ??
     deriveExecutionProfileId({
@@ -410,6 +413,10 @@ function hasOnlyKeys(
 
 function isExecutionRuntime(value: unknown): value is ExecutionRuntimeId {
   return value === "claude" || value === "codex";
+}
+
+function inferProviderId(modelId: string): string {
+  return /^deepseek[-_:/]/i.test(modelId) ? "deepseek" : "unknown";
 }
 
 function isProfileId(value: unknown): value is string {
