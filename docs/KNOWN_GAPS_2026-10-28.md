@@ -2,9 +2,9 @@
 
 > Recorded: 2026-10-28
 >
-> Accepted, not yet merged: WorkspaceBoundary v1
-> `c04bb96ea98004493b4d88cc5cbe56e052fa0915` on
-> `cliyard/integration/workspace-boundary-v1-finish`
+> Accepted, not yet merged:
+> WorkspaceBoundary v1 `c04bb96ea98004493b4d88cc5cbe56e052fa0915` and
+> WorkerProcessTree v1.1 `9a38174a872d70b7a250225c31fa7ce4efdcf06e`
 
 ## Current state
 
@@ -15,8 +15,17 @@ WorkspaceBoundary v1 has passed its task verifier:
 - no worker path-audit escape;
 - no active worker lease or Supervisor lock at completion.
 
-It is a guard-only detection layer. It does not prevent writes and has not yet
-been exercised by a control-plane process that loads the new implementation.
+WorkspaceBoundary v1 is a guard-only detection layer. It does not prevent
+writes. A later WorkerProcessTree v1.1 run launched the Supervisor from the
+accepted WorkspaceBoundary code and produced a non-null clean guard record, so
+real self-host execution is now measured.
+
+WorkerProcessTree v1.1 has also passed its task verifier:
+
+- focused process/WB/Supervisor set: 89/89;
+- complete suite: 440/440;
+- no worker path-audit escape;
+- no active worker lease, Supervisor lock or test helper left behind.
 
 The original `workspace-boundary-v1` run remains blocked history. Manual
 adoption would have been the wrong model because its timed-out integration
@@ -40,12 +49,13 @@ scan was used.
 
 This disproves the broad implication that a WorkerLease/POSIX group always owns
 the complete worker process tree. A CLI or test runner can create a new session
-or process group. Current cleanup covers:
+or process group. WorkerProcessTree v1.1 now covers, while the top-level leader
+is alive or its relation was sampled before exit:
 
 - the dedicated top-level worker group;
 - descendants that stayed in that group.
 
-It does not cover:
+It still does not cover:
 
 - descendants that created a separate group/session while the leader was
   alive;
@@ -59,16 +69,15 @@ from the task's worktree. Therefore the run that implements a control-plane
 feature cannot exercise that new code unless the CLI is explicitly launched
 from an already accepted integration worktree.
 
-The next run should launch the accepted WorkspaceBoundary implementation from
-`c04bb96` while targeting the main checkout. Its RunManifest must contain
-non-null `workspaceBoundary` evidence; only then is real self-host execution
-proven.
+The WorkerProcessTree v1.1 run launched the Supervisor from `c04bb96` while
+targeting the main checkout. Its RunManifest contains a non-null
+`workspaceBoundary: clean` record, proving real self-host execution.
 
 ## Existing P0/P1 gaps
 
 | Priority | Gap | Current state | Next action |
 |---|---|---|---|
-| P0 | Nested descendant process groups | Observed real orphan `99841`; only top-level group is leased/cleaned | WorkerProcessTree v1.1 |
+| P0 | Live nested descendant process groups | Closed for live/sampled trees: WorkerProcessTree v1.1 cleans exact external descendants on timeout/cancel | Keep measured regressions |
 | P0 | OS write prevention | WorkspaceBoundary detects after the fact | Provider-neutral SandboxProvider |
 | P0 | Controller-death recovery of nested groups | Lease stores the top-level worker group only | Follow after live-leader cleanup |
 | P1 | WorkspaceBoundary evidence parser consistency | Optional digest fields are format-checked but not fully cross-validated against add/remove/modify semantics | Harden with the next boundary schema change |
@@ -84,27 +93,26 @@ proven.
 
 ## Decision
 
-The next slice is **WorkerProcessTree v1.1**:
+The live-leader nested-process gap is closed by WorkerProcessTree v1.1. The
+remaining process-ownership gap is controller death after a nested group has
+already detached from the top-level worker.
 
-1. Add a bounded process-table inspection capability on macOS/Linux.
-2. Track descendants of a live managed worker, including those that create a
-   separate process group.
-3. Revalidate exact process identity before signalling.
-4. Clean those exact descendants on timeout/cancel while preserving the
-   existing dedicated-group behavior.
-5. Record bounded descendant evidence and fail closed on ambiguity.
+The next implementation priority is **controller-death nested process
+ownership**, because WorkerLease still persists only the top-level worker group.
+That slice must extend the lease/store/recovery protocol without weakening
+exact identity checks.
 
-This ranks first because it fixes an observed safety regression in code already
-claimed as complete. SandboxProvider prevention remains the next P0 safety
-slice after nested process ownership has a measured fix.
+Immediately after it, implement the provider-neutral **SandboxProvider** for OS
+write prevention. ProfileCatalog and grid admission remain behind process and
+filesystem safety.
 
 ## Next-run execution rule
 
-For the next self-host run:
+For subsequent self-host runs:
 
 - commit the design/Plan files first;
 - compile and commit contracts from the accepted integration base;
-- launch the Supervisor CLI from the accepted WorkspaceBoundary integration
-  worktree, while targeting the main checkout;
+- launch the Supervisor CLI from the latest accepted integration worktree,
+  while targeting the main checkout;
 - require a non-null guard record for the produced run;
 - keep the worktrees and require manual diff review before merge.
