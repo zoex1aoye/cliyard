@@ -1,0 +1,67 @@
+{
+  "planId": "worker-process-tree-v1.1",
+  "contracts": [
+    {
+      "taskId": "worker-process-tree-v1.1",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Implement WorkerProcessTree v1.1 live nested-descendant ownership on top of the accepted WorkspaceBoundary integration base. Reproduce the observed leak where a managed worker or its test runner creates a separate POSIX process group/session; the current cleanup kills only the top-level dedicated group and leaves the nested group alive. Extend the read-only ProcessInspector in src/runtime/process.ts with a bounded process-table snapshot on macOS/Linux containing pid, ppid, pgid and exact lstart identity. Extend WorkerProcessTreeManager/ManagedWorkerProcess in src/agents/process-tree.ts to track descendants of the spawned worker while its leader is alive: use a low-frequency bounded poll (default no faster than 250ms), merge exact descendant identities, and stop the sampler on cleanup. Before terminating the top-level dedicated group on timeout or cancel, take a fresh tree snapshot and identify recursively related descendants. Clean descendants that created external groups by signalling only exact descendant PIDs after re-reading and matching pid+pgid+lstart; never use pkill, process names, a workspace-wide heuristic or a broad scan. Keep the existing dedicated-group SIGTERM to SIGKILL path for members that stayed in the top-level group. Refuse any identity that cannot be revalidated, any process in cliyard's own group, PID 1, malformed ps rows or incomplete relationships; preserve the primary worker failure but fail the result closed when nested cleanup is ambiguous. Bound sampled and persisted descendants, counts, diagnostics and signal records. Add optional bounded fields to WorkerProcessRecord for observed external descendant identities/groups and cleanup results while keeping older version-1 records readable. Add real POSIX tests in tests/worker-process-tree.test.ts that reproduce the leak with a helper Node process launched detached into its own group, prove timeout and cancel cleanup kill both the top-level group and the exact nested group, prove normal same-group cleanup remains unchanged, prove an unrelated/reused identity is never signalled, and cover bounded/malformed evidence and legacy manifest parsing. Skip real group tests only on win32 and retain the documented Windows limitation. Explicitly document that controller-death recovery of nested groups is not closed by this slice because the worker lease currently stores only the top-level group; that is the next process-ownership follow-up. Update docs/evidence/WORKER_PROCESS_TREE.md, design/worker-process-tree-v1.md, README.md, docs/NEXT_ITERATION.md and docs/NEXT_STEP_CONTROLLER.md with the measured scope, evidence and remaining controller-death gap. Do not modify WorkerLease recovery claims except to clarify their limitation; do not claim complete process-tree ownership after controller death."
+      ],
+      "nonGoals": [
+        "Do not implement controller-death recovery of nested process groups.",
+        "Do not add Windows Job Object support.",
+        "Do not use pkill, process-name matching or an unbounded process scan.",
+        "Do not signal a process whose pid+pgid+lstart identity cannot be revalidated.",
+        "Do not add SandboxProvider, SRT, Codex Sandbox, bubblewrap or dependency changes.",
+        "Do not claim nested groups are recoverable after the controller is SIGKILLed."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        ".",
+        "design/workspace-boundary-v1.md",
+        "design/worker-process-tree-v1.md",
+        "design/worker-lease-v1.md",
+        "docs/evidence/WORKER_PROCESS_TREE.md",
+        "docs/evidence/WORKER_LEASE.md",
+        "src/runtime/process.ts",
+        "src/agents/process-tree.ts",
+        "src/agents/worker-lease.ts",
+        "tests/worker-process-tree.test.ts",
+        "tests/worker-lease.test.ts"
+      ],
+      "writePaths": [
+        "src/runtime/process.ts",
+        "src/agents/process-tree.ts",
+        "tests/worker-process-tree.test.ts",
+        "docs/evidence/WORKER_PROCESS_TREE.md",
+        "design/worker-process-tree-v1.md",
+        "README.md",
+        "docs/NEXT_ITERATION.md",
+        "docs/NEXT_STEP_CONTROLLER.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "c04bb96ea98004493b4d88cc5cbe56e052fa0915",
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/worker-process-tree.test.ts tests/worker-lease.test.ts tests/workspace-boundary.test.ts tests/workspace-boundary-integration.test.ts tests/supervisor-cli.test.ts",
+        "npm test"
+      ],
+      "deliverables": [
+        "A live worker's external descendant process groups are discovered with exact identities.",
+        "Timeout and cancel clean both the top-level dedicated group and observed nested groups.",
+        "Unrelated or unverifiable identities are never signalled.",
+        "Bounded nested-descendant evidence survives record parsing and status remains backward-compatible.",
+        "Controller-death nested-group recovery is explicitly left as the next gap."
+      ],
+      "forbidden": [
+        "Do not touch files outside writePaths.",
+        "Do not kill by process name, workspace or broad process list.",
+        "Do not rewrite or broaden WorkspaceBoundary protections.",
+        "Do not claim complete cleanup after controller death.",
+        "Do not weaken or skip the real nested-group regression tests."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}
