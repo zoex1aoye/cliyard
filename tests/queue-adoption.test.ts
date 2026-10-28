@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -29,13 +30,19 @@ import {
   cancelQueueItem,
   isPlanBackedQueueItem,
   loadQueue,
-  queueAdoptionEventsPath,
   queuePaths,
-  readQueueAdoptionEvents,
   retryQueueItem,
   saveQueue,
   type QueueItem,
 } from "../src/orchestration/queue-store.js";
+import {
+  appendQueueEvent,
+  isQueueControlEvent,
+  queueEventJournalPath,
+  readQueueAdoptionEvents,
+  readQueueEventJournal,
+  type AppendQueueEventInput,
+} from "../src/orchestration/event-journal.js";
 import {
   createRunManifest,
   loadRunManifest,
@@ -351,13 +358,27 @@ test("adopt closes a blocked Plan item without changing RunManifest authority", 
     assert.deepEqual(repeated, adopted);
     assert.equal(readQueueAdoptionEvents(repo).totalEvents, 1);
 
-    const eventFile = queueAdoptionEventsPath(repo);
-    assert.equal(existsSync(eventFile), true);
-    const eventLines = readFileSync(eventFile, "utf8")
-      .trim()
-      .split("\n");
-    assert.equal(eventLines.length, 1);
-    const event = JSON.parse(eventLines[0]!) as Record<string, unknown>;
+    // The unified journal holds the adoption line plus normal lifecycle events.
+    const journalPath = queueEventJournalPath(repo);
+    const journalLines = readFileSync(journalPath, "utf8").trim().split("\n");
+    const adoptionLines = journalLines.filter(
+      (line) =>
+        (JSON.parse(line) as Record<string, unknown>).type ===
+        "queue.item.adopted",
+    );
+    assert.equal(adoptionLines.length, 1);
+    assert.ok(journalLines.length > 1);
+    const journal = readQueueEventJournal(repo);
+    assert.equal(journal.malformedLines, 0);
+    assert.ok(journal.events.some((entry) => entry.type === "attempt.started"));
+
+    // No dedicated adoption stream is created.
+    assert.equal(
+      existsSync(join(repo, ".cliyard", "queue-events", "adoptions.jsonl")),
+      false,
+    );
+
+    const event = JSON.parse(adoptionLines[0]!) as Record<string, unknown>;
     assert.deepEqual(Object.keys(event).sort(), [
       "approvedBy",
       "at",
@@ -379,7 +400,15 @@ test("adopt closes a blocked Plan item without changing RunManifest authority", 
     assert.equal(event.itemId, "root");
     assert.equal(event.runId, "run-blocked-root");
     assert.equal(event.status, "completed");
+    assert.equal(event.at, resolution.approvedAt);
+    assert.equal(event.sourceManifestStatus, resolution.sourceManifestStatus);
+    assert.equal(event.baseCommit, resolution.baseCommit);
     assert.equal(event.reviewedCommit, reviewedCommit);
+    assert.equal(event.contractsHash, resolution.contractsHash);
+    assert.equal(event.reviewEvidencePath, resolution.reviewEvidencePath);
+    assert.equal(event.reviewEvidenceHash, resolution.reviewEvidenceHash);
+    assert.equal(event.approvedBy, resolution.approvedBy);
+    assert.equal(event.reason, resolution.reason);
     // The event is bounded metadata; review command text never enters it.
     assert.ok(!JSON.stringify(event).includes("npm test"));
 
@@ -430,6 +459,262 @@ test("adopt closes a blocked Plan item without changing RunManifest authority", 
     };
     assert.equal(parsed.items[0]?.completion, "adopted");
     assert.deepEqual(parsed.items[0]?.resolution, resolution);
+  });
+});
+
+test("queue.item.adopted enforces the strict unified-journal field contract", async () => {
+  await withRepo(async (repo) => {
+    const valid: AppendQueueEventInput = {
+      type: "queue.item.adopted",
+      at: "2026-10-28T10:00:00.000Z",
+      itemId: "root",
+      runId: "run-blocked-root",
+      status: "completed",
+      sourceManifestStatus: "blocked",
+      baseCommit: "a".repeat(40),
+      reviewedCommit: "b".repeat(40),
+      contractsHash: "c".repeat(64),
+      reviewEvidencePath: "/tmp/evidence.json",
+      reviewEvidenceHash: "d".repeat(64),
+      approvedBy: "operator-a",
+      reason: "reviewed and integrated",
+    };
+    appendQueueEvent(repo, valid);
+    const journal = readQueueEventJournal(repo);
+    assert.equal(journal.totalEvents, 1);
+    assert.equal(journal.malformedLines, 0);
+    assert.equal(isQueueControlEvent(journal.events[0]), true);
+    const appended = journal.events[0]!;
+    assert.equal(appended.type, "queue.item.adopted");
+    assert.equal(appended.baseCommit, valid.baseCommit);
+    assert.equal(appended.reviewedCommit, valid.reviewedCommit);
+    assert.equal(appended.contractsHash, valid.contractsHash);
+    assert.equal(appended.reviewEvidenceHash, valid.reviewEvidenceHash);
+
+    // Every adoption field is required.
+    for (const key of [
+      "itemId",
+      "runId",
+      "status",
+      "sourceManifestStatus",
+      "baseCommit",
+      "reviewedCommit",
+      "contractsHash",
+      "reviewEvidencePath",
+      "reviewEvidenceHash",
+      "approvedBy",
+      "reason",
+    ] as const) {
+      const { [key]: _removed, ...rest } = valid;
+      assert.throws(
+        () => appendQueueEvent(repo, rest as AppendQueueEventInput),
+        /field contract|requires|must be/,
+        key,
+      );
+    }
+
+    // Wrong status/manifest status, abbreviated commits and bad hashes fail.
+    for (const override of [
+      { status: "blocked" },
+      { sourceManifestStatus: "completed" },
+      { baseCommit: "abc" },
+      { reviewedCommit: "f".repeat(39) },
+      { contractsHash: "not-a-hash" },
+      { reviewEvidenceHash: "e".repeat(63) },
+    ]) {
+      assert.throws(
+        () =>
+          appendQueueEvent(repo, {
+            ...valid,
+            ...override,
+          } as AppendQueueEventInput),
+        /field contract|must be|must equal|status must/,
+        JSON.stringify(override),
+      );
+    }
+
+    // Oversized text is rejected rather than silently truncated.
+    assert.throws(
+      () =>
+        appendQueueEvent(repo, { ...valid, reason: "x".repeat(1_001) }),
+      /exceeds 1000/,
+    );
+    assert.throws(
+      () =>
+        appendQueueEvent(repo, { ...valid, approvedBy: "x".repeat(129) }),
+      /exceeds 128/,
+    );
+    assert.throws(
+      () =>
+        appendQueueEvent(repo, {
+          ...valid,
+          reviewEvidencePath: `/tmp/${"x".repeat(4_092)}`,
+        }),
+      /exceeds 4096/,
+    );
+
+    // Secret-bearing text fails closed on append.
+    for (const secret of [
+      { reason: "api_key=abcdefgh12345678" },
+      { approvedBy: "Bearer abcdefghijklmnopqrstuvwxyz012345" },
+      { reviewEvidencePath: "/tmp/token=abcdefgh12345678" },
+    ]) {
+      assert.throws(
+        () =>
+          appendQueueEvent(repo, {
+            ...valid,
+            ...secret,
+          } as AppendQueueEventInput),
+        /secret/,
+      );
+    }
+
+    // Adoption-only fields are forbidden on unrelated event types.
+    for (const [key, value] of [
+      ["approvedBy", "operator-a"],
+      ["sourceManifestStatus", "blocked"],
+      ["baseCommit", "a".repeat(40)],
+      ["contractsHash", "c".repeat(64)],
+      ["reviewEvidencePath", "/tmp/evidence.json"],
+      ["reviewEvidenceHash", "d".repeat(64)],
+    ] as const) {
+      assert.throws(
+        () =>
+          appendQueueEvent(repo, {
+            type: "run.blocked",
+            [key]: value,
+          } as AppendQueueEventInput),
+        /must not carry adoption field/,
+        key,
+      );
+    }
+
+    // Raw malformed, incomplete and misplaced lines stay malformed counts and
+    // never become valid adoption observations.
+    const path = queueEventJournalPath(repo);
+    const withoutReason = { ...valid } as Record<string, unknown>;
+    delete withoutReason.reason;
+    const misplaced = {
+      version: 1,
+      eventId: "misplaced-adoption-field",
+      at: valid.at,
+      type: "run.blocked",
+      approvedBy: "operator-a",
+    };
+    writeFileSync(
+      path,
+      `${[JSON.stringify(withoutReason), JSON.stringify(misplaced), "{broken"].join("\n")}\n`,
+      { encoding: "utf8", flag: "a" },
+    );
+    const after = readQueueEventJournal(repo);
+    assert.equal(after.totalEvents, 1);
+    assert.equal(after.malformedLines, 3);
+    const adoptionSummary = readQueueAdoptionEvents(repo);
+    assert.equal(adoptionSummary.totalEvents, 1);
+    assert.equal(adoptionSummary.malformedLines, 3);
+    assert.equal(adoptionSummary.events[0]?.reviewedCommit, valid.reviewedCommit);
+  });
+});
+
+test("adoption summary filters the unified journal beyond the display window", async () => {
+  await withRepo(async (repo) => {
+    await blockedRoot(repo, "root", "run-blocked-root");
+    const reviewedCommit = commitFile(
+      repo,
+      "reviewed.txt",
+      "reviewed\n",
+      "reviewed",
+    );
+    const evidence = writeEvidence(repo, "evidence.json", { reviewedCommit });
+    adopt(repo, "root", {
+      runId: "run-blocked-root",
+      artifact: reviewedCommit,
+      evidencePath: evidence.path,
+    });
+    for (let index = 0; index < 3; index += 1) {
+      appendQueueEvent(repo, {
+        type: "controller.heartbeat",
+        at: `2026-10-28T10:00:0${index}.000Z`,
+      });
+    }
+
+    // The display window contains only the newest unrelated event, but the
+    // adoption projection still scans the whole unified journal.
+    const snapshot = await buildControlSnapshot(repo, { journalLimit: 1 });
+    assert.equal(snapshot.journal.events.length, 1);
+    assert.equal(snapshot.journal.events[0]?.type, "controller.heartbeat");
+    assert.equal(snapshot.queue.adoptionEvents.totalEvents, 1);
+    assert.equal(snapshot.queue.adoptionEvents.path, queueEventJournalPath(repo));
+    assert.equal(
+      snapshot.queue.adoptionEvents.events[0]?.type,
+      "queue.item.adopted",
+    );
+    assert.equal(
+      snapshot.queue.adoptionEvents.events[0]?.reviewedCommit,
+      reviewedCommit,
+    );
+
+    // Malformed and unrelated records never alter adoption authority.
+    writeFileSync(queueEventJournalPath(repo), "{broken\n", {
+      encoding: "utf8",
+      flag: "a",
+    });
+    const after = await buildControlSnapshot(repo);
+    assert.equal(after.journal.malformedLines, 1);
+    assert.equal(after.queue.adoptionEvents.totalEvents, 1);
+    assert.equal(after.queue.adoptionEvents.malformedLines, 1);
+    assert.equal(after.items[0]?.completion, "adopted");
+    assert.equal(
+      itemById(repo, "root").resolution?.reviewedCommit,
+      reviewedCommit,
+    );
+  });
+});
+
+test("a failed unified-journal append preserves queue adoption authority", async () => {
+  await withRepo(async (repo) => {
+    await blockedRoot(repo, "root", "run-blocked-root");
+    const reviewedCommit = commitFile(
+      repo,
+      "reviewed.txt",
+      "reviewed\n",
+      "reviewed",
+    );
+    const evidence = writeEvidence(repo, "evidence.json", { reviewedCommit });
+    // A directory at the journal path makes every append fail.
+    const journalPath = queueEventJournalPath(repo);
+    rmSync(journalPath, { force: true });
+    mkdirSync(journalPath);
+
+    const adopted = adopt(repo, "root", {
+      runId: "run-blocked-root",
+      artifact: reviewedCommit,
+      evidencePath: evidence.path,
+    });
+    assert.equal(adopted.status, "completed");
+    assert.ok(adopted.resolution);
+
+    // queue.json remains valid and authoritative despite the failed append.
+    const persisted = itemById(repo, "root");
+    assert.equal(persisted.status, "completed");
+    assert.deepEqual(persisted.resolution, adopted.resolution);
+    assert.equal(
+      existsSync(join(repo, ".cliyard", "queue-events", "adoptions.jsonl")),
+      false,
+    );
+
+    const snapshot = await buildControlSnapshot(repo);
+    assert.equal(snapshot.items[0]?.completion, "adopted");
+    assert.equal(snapshot.queue.adoptionEvents.totalEvents, 0);
+    assert.ok(snapshot.queue.adoptionEvents.readError);
+    assert.ok(snapshot.journal.readError);
+
+    // Human status still reports adoption from queue authority.
+    const human: string[] = [];
+    await runQueueCli(["status", "--repo", repo], {
+      log: (line) => human.push(line),
+    });
+    assert.match(human.join("\n"), /root {2}completed \(adopted\)/);
   });
 });
 

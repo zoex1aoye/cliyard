@@ -17,7 +17,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
-  appendFileSync,
   closeSync,
   existsSync,
   fsyncSync,
@@ -72,10 +71,6 @@ export const MAX_REVIEW_NOTES_LENGTH = 2_000;
 export const MAX_REVIEW_EVIDENCE_PATH_LENGTH = 4_096;
 export const MAX_APPROVED_BY_LENGTH = 128;
 export const MAX_ADOPTION_REASON_LENGTH = 1_000;
-/** Bounded adoption events, kept beside the general queue event journal. */
-export const QUEUE_ADOPTION_EVENTS_DIR = "queue-events";
-export const QUEUE_ADOPTION_EVENTS_FILE = "adoptions.jsonl";
-export const DEFAULT_ADOPTION_EVENT_LIMIT = 200;
 
 /** Queue ids are explicit labels and must be safe path/manifest identifiers. */
 const QUEUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -872,44 +867,6 @@ export interface AdoptQueueItemInput {
   reason: string;
 }
 
-export function queueAdoptionEventsPath(repoRoot: string): string {
-  return join(
-    resolve(repoRoot),
-    SUPERVISOR_DIR,
-    QUEUE_ADOPTION_EVENTS_DIR,
-    QUEUE_ADOPTION_EVENTS_FILE,
-  );
-}
-
-export interface QueueAdoptionEvent {
-  version: 1;
-  eventId: string;
-  at: string;
-  type: "queue.item.adopted";
-  itemId: string;
-  runId: string;
-  status: "completed";
-  sourceManifestStatus: OperatorResolutionManifestStatus;
-  baseCommit: string;
-  reviewedCommit: string;
-  contractsHash: string;
-  reviewEvidencePath: string;
-  reviewEvidenceHash: string;
-  approvedBy: string;
-  reason: string;
-}
-
-export interface QueueAdoptionEventSummary {
-  version: 1;
-  path: string;
-  exists: boolean;
-  totalEvents: number;
-  malformedLines: number;
-  events: QueueAdoptionEvent[];
-  lastEventAt: string | null;
-  readError: string | null;
-}
-
 /**
  * Adopt one blocked queue item whose work was manually reviewed and integrated.
  *
@@ -1000,7 +957,22 @@ export function adoptQueueItem(
     item.updatedAt = at;
     document.updatedAt = at;
     saveQueue(root, document);
-    tryAppendQueueAdoptionEvent(root, resolution);
+    // Observability only: resolution in queue.json is the durable authority.
+    tryAppendQueueEvent(root, {
+      type: "queue.item.adopted",
+      at: resolution.approvedAt,
+      itemId: resolution.queueItemId,
+      runId: resolution.sourceRunId,
+      status: "completed",
+      sourceManifestStatus: resolution.sourceManifestStatus,
+      baseCommit: resolution.baseCommit,
+      reviewedCommit: resolution.reviewedCommit,
+      contractsHash: resolution.contractsHash,
+      reviewEvidencePath: resolution.reviewEvidencePath,
+      reviewEvidenceHash: resolution.reviewEvidenceHash,
+      approvedBy: resolution.approvedBy,
+      reason: resolution.reason,
+    });
     return item;
   });
 }
@@ -1480,164 +1452,6 @@ function requireAdoptionText(
   maxLength: number,
 ): string {
   return requireBoundedSecretFreeText(value, label, maxLength);
-}
-
-// ---------------------------------------------------------------------------
-// Adoption event stream
-// ---------------------------------------------------------------------------
-
-function appendQueueAdoptionEvent(
-  repoRoot: string,
-  resolution: OperatorResolution,
-): QueueAdoptionEvent {
-  const event: QueueAdoptionEvent = {
-    version: 1,
-    eventId: randomUUID(),
-    at: resolution.approvedAt,
-    type: "queue.item.adopted",
-    itemId: resolution.queueItemId,
-    runId: resolution.sourceRunId,
-    status: "completed",
-    sourceManifestStatus: resolution.sourceManifestStatus,
-    baseCommit: resolution.baseCommit,
-    reviewedCommit: resolution.reviewedCommit,
-    contractsHash: resolution.contractsHash,
-    reviewEvidencePath: resolution.reviewEvidencePath,
-    reviewEvidenceHash: resolution.reviewEvidenceHash,
-    approvedBy: resolution.approvedBy,
-    reason: resolution.reason,
-  };
-  const path = queueAdoptionEventsPath(repoRoot);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  appendFileSync(path, `${JSON.stringify(event)}\n`, "utf8");
-  return event;
-}
-
-/** Best-effort append: an observability failure never masks adoption. */
-function tryAppendQueueAdoptionEvent(
-  repoRoot: string,
-  resolution: OperatorResolution,
-): QueueAdoptionEvent | undefined {
-  try {
-    return appendQueueAdoptionEvent(repoRoot, resolution);
-  } catch {
-    return undefined;
-  }
-}
-
-/** Read the bounded adoption event stream; malformed lines are counted. */
-export function readQueueAdoptionEvents(
-  repoRoot: string,
-  limit = DEFAULT_ADOPTION_EVENT_LIMIT,
-): QueueAdoptionEventSummary {
-  const path = queueAdoptionEventsPath(repoRoot);
-  const normalizedLimit =
-    Number.isInteger(limit) && limit > 0
-      ? Math.min(limit, 5_000)
-      : DEFAULT_ADOPTION_EVENT_LIMIT;
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return {
-        version: 1,
-        path,
-        exists: false,
-        totalEvents: 0,
-        malformedLines: 0,
-        events: [],
-        lastEventAt: null,
-        readError: null,
-      };
-    }
-    return {
-      version: 1,
-      path,
-      exists: true,
-      totalEvents: 0,
-      malformedLines: 0,
-      events: [],
-      lastEventAt: null,
-      readError: errorMessage(error),
-    };
-  }
-  const valid: QueueAdoptionEvent[] = [];
-  let malformedLines = 0;
-  for (const line of raw.split("\n")) {
-    if (!line.trim()) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line) as unknown;
-    } catch {
-      malformedLines += 1;
-      continue;
-    }
-    if (!isQueueAdoptionEvent(parsed)) {
-      malformedLines += 1;
-      continue;
-    }
-    valid.push(parsed);
-  }
-  return {
-    version: 1,
-    path,
-    exists: true,
-    totalEvents: valid.length,
-    malformedLines,
-    events: valid.slice(-normalizedLimit),
-    lastEventAt: valid.length > 0 ? valid[valid.length - 1]!.at : null,
-    readError: null,
-  };
-}
-
-export function isQueueAdoptionEvent(
-  value: unknown,
-): value is QueueAdoptionEvent {
-  if (!isRecord(value)) return false;
-  if (
-    value.version !== 1 ||
-    value.type !== "queue.item.adopted" ||
-    value.status !== "completed" ||
-    typeof value.eventId !== "string" ||
-    !value.eventId.trim() ||
-    typeof value.at !== "string" ||
-    Number.isNaN(Date.parse(value.at)) ||
-    (value.sourceManifestStatus !== "blocked" &&
-      value.sourceManifestStatus !== "interrupted")
-  ) {
-    return false;
-  }
-  const { itemId, runId, approvedBy, reason, reviewEvidencePath } = value;
-  const { baseCommit, reviewedCommit, contractsHash, reviewEvidenceHash } =
-    value;
-  if (
-    typeof itemId !== "string" ||
-    !itemId.trim() ||
-    typeof runId !== "string" ||
-    !runId.trim() ||
-    typeof approvedBy !== "string" ||
-    !approvedBy.trim() ||
-    typeof reason !== "string" ||
-    !reason.trim() ||
-    typeof reviewEvidencePath !== "string" ||
-    !reviewEvidencePath.trim() ||
-    typeof baseCommit !== "string" ||
-    typeof reviewedCommit !== "string" ||
-    typeof contractsHash !== "string" ||
-    typeof reviewEvidenceHash !== "string"
-  ) {
-    return false;
-  }
-  return (
-    FULL_COMMIT_PATTERN.test(baseCommit) &&
-    FULL_COMMIT_PATTERN.test(reviewedCommit) &&
-    SHA256_PATTERN.test(contractsHash) &&
-    SHA256_PATTERN.test(reviewEvidenceHash) &&
-    approvedBy.length <= MAX_APPROVED_BY_LENGTH &&
-    reason.length <= MAX_ADOPTION_REASON_LENGTH &&
-    reviewEvidencePath.length <= MAX_REVIEW_EVIDENCE_PATH_LENGTH
-  );
 }
 
 // ---------------------------------------------------------------------------

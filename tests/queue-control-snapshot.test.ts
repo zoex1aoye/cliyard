@@ -21,6 +21,7 @@ import {
 import {
   appendQueueEvent,
   queueEventJournalPath,
+  readQueueAdoptionEvents,
   readQueueEventJournal,
   tryAppendQueueEvent,
 } from "../src/orchestration/event-journal.js";
@@ -367,6 +368,94 @@ test("queue status reports missing manifests and malformed journal lines without
     assert.equal(damaged.observedNextAction, "inspect-and-retry");
     assert.match(damaged.errors[0] ?? "", /run missing-run:/);
     assert.equal(damaged.run, null);
+  });
+});
+
+test("queue status projects adoption events from the unified journal", async () => {
+  await withRepo(async (repo) => {
+    const adoption = {
+      type: "queue.item.adopted" as const,
+      at: "2026-10-28T10:00:00.000Z",
+      itemId: "root",
+      runId: "run-root",
+      status: "completed" as const,
+      sourceManifestStatus: "blocked" as const,
+      baseCommit: "a".repeat(40),
+      reviewedCommit: "b".repeat(40),
+      contractsHash: "c".repeat(64),
+      reviewEvidencePath: "/tmp/evidence.json",
+      reviewEvidenceHash: "d".repeat(64),
+      approvedBy: "operator-a",
+      reason: "reviewed and integrated",
+    };
+    appendQueueEvent(repo, adoption);
+    for (let index = 0; index < 3; index += 1) {
+      appendQueueEvent(repo, {
+        type: "controller.heartbeat",
+        at: `2026-10-28T10:00:0${index}.000Z`,
+      });
+    }
+
+    // The normal display window is full of unrelated events...
+    const snapshot = await buildControlSnapshot(repo, { journalLimit: 1 });
+    assert.equal(snapshot.journal.events.length, 1);
+    assert.equal(snapshot.journal.events[0]?.type, "controller.heartbeat");
+    // ...but the adoption projection still sees the unified-journal record.
+    assert.equal(
+      snapshot.queue.adoptionEvents.path,
+      queueEventJournalPath(repo),
+    );
+    assert.equal(snapshot.queue.adoptionEvents.totalEvents, 1);
+    assert.equal(snapshot.queue.adoptionEvents.events[0]?.itemId, "root");
+    assert.equal(
+      snapshot.queue.adoptionEvents.events[0]?.reviewedCommit,
+      adoption.reviewedCommit,
+    );
+
+    const cli = await runCli(repo, ["status", "--json"]);
+    assert.equal(cli.code, 0);
+    assert.equal(cli.json.queue.adoptionEvents.totalEvents, 1);
+    assert.equal(
+      cli.json.queue.adoptionEvents.events[0].type,
+      "queue.item.adopted",
+    );
+
+    const humanLines: string[] = [];
+    assert.equal(
+      await runQueueCli(["status", "--repo", repo], {
+        log: (line) => humanLines.push(line),
+      }),
+      0,
+    );
+    assert.match(
+      humanLines.join("\n"),
+      /adoptions: 1 event\(s\), 0 malformed/,
+    );
+
+    // Malformed and adoption-field-misplaced lines are counted by the unified
+    // reader and never surface as adoption observations.
+    writeFileSync(
+      queueEventJournalPath(repo),
+      `${
+        [
+          "{broken",
+          JSON.stringify({ ...adoption, reason: undefined }),
+          JSON.stringify({
+            version: 1,
+            eventId: "misplaced",
+            at: adoption.at,
+            type: "run.blocked",
+            approvedBy: "operator-a",
+          }),
+        ].join("\n")
+      }\n`,
+      { encoding: "utf8", flag: "a" },
+    );
+    const after = readQueueEventJournal(repo);
+    assert.equal(after.malformedLines, 3);
+    const summary = readQueueAdoptionEvents(repo);
+    assert.equal(summary.totalEvents, 1);
+    assert.equal(summary.malformedLines, 3);
   });
 });
 
