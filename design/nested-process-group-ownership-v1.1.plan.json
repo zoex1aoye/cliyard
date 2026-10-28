@@ -1,0 +1,40 @@
+{
+  "planId": "nested-process-group-ownership-v1.1",
+  "tasks": [
+    {
+      "taskId": "nested-process-group-compaction-core",
+      "goal": "Implement nested process-group compaction on top of reviewed draft af76d3a per design/nested-process-group-ownership-v1.1.md. Extend WorkerNestedProcesses with an optional backward-compatible groups array (max 16) whose entries contain pgid, an exact RuntimeProcessIdentity leader with leader.pid === leader.pgid, observedMemberCount and lastObservedAt; keep at most 32 ungrouped exact-pid fallback identities and preserve legacy/truncated parsing. During validated sampling, group external descendants by pgid, capture a group leader only when its exact pid===pgid row is observed, and do not mark a registry truncated merely because one owned group has many members. Extend cleanup so an external group with a valid leader is handled as one guarded unit: fresh exact leader capture, fresh member listing, all members share pgid, group is not cliyard's own group/pid, persist refreshed evidence before signals, SIGTERM the negative pgid, re-run the guard, escalate SIGKILL only while ownership remains exact, then verify members are gone. Add a nested-process-group signal scope and bounded group counters while preserving descendant-pid for ungrouped fallback. Extend controller-death recovery so a persisted external group with matching exact leader may use the guarded negative-pgid path; if the leader is absent but members remain, never signal the unproven group and use only complete exact-pid fallback or needs_human. A reused leader pid/lstart must remain untouched. Keep group count/bounds, process-table caps and all existing top-level worker group behavior fail-closed. Add a real POSIX test with a detached nested group of at least 512 members proving one group-ownership path does not hit the 256 related-process failure, plus real controller-death recovery of that group, reused leader refusal, absent-leader residual refusal, mixed group/ungrouped cleanup, parser round-trip/legacy compatibility and no leftover helpers. Preserve the reviewed draft's attacher race fix, exact snapshots, status projection and all existing tests. Do not modify TaskContract, RunManifest authority, verifier timeout, RuntimeManager, Windows parity or cross-host behavior.",
+      "nonGoals": [
+        "Do not increase an arbitrary descendant PID cap as the fix.",
+        "Do not signal a nested group without a fresh exact leader and membership guard.",
+        "Do not use process names, ports or broad process scans.",
+        "Do not change verifier command timeouts in this task.",
+        "Do not modify TaskContract acceptance or rewrite RunManifest history.",
+        "Do not add Windows Job Objects, cross-host recovery, daemon or automatic resume."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/worker-process-tree-v1.md",
+        "docs/evidence/WORKER_PROCESS_TREE.md",
+        "docs/evidence/WORKER_LEASE.md",
+        "src/agents/process-tree.ts",
+        "src/agents/worker-lease.ts",
+        "src/runtime/process.ts",
+        "tests/worker-process-tree.test.ts",
+        "tests/worker-lease.test.ts"
+      ],
+      "writePaths": [
+        "src/agents/process-tree.ts",
+        "src/agents/worker-lease.ts",
+        "tests/worker-process-tree.test.ts",
+        "tests/worker-lease.test.ts"
+      ],
+      "verifyCommands": [
+        "npx tsx --test tests/worker-process-tree.test.ts tests/worker-lease.test.ts",
+        "npm run build",
+        "npm test"
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}

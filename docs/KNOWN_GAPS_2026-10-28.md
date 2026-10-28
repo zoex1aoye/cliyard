@@ -144,6 +144,40 @@ It has two sequential tasks:
 The core task intentionally excludes SandboxProvider, Windows Job Objects,
 cross-host recovery, automatic resume and RunManifest rewriting.
 
+## First self-host attempt observation
+
+Run `0c199514-b24e-4f7a-a855-f2b8eb4484b4` executed
+`controller-death-nested-core`; the dependent evidence task remained blocked.
+The run was rejected by process cleanup, not by code assertions:
+
+```text
+process_tree_cleanup_failed
+descendant snapshot exceeds 256 related processes
+residualCount=0
+```
+
+Independent post-run review measured focused **56/56**, build pass, complete
+suite **455/455** in **26.08 s**, no changed path outside the four frozen
+`writePaths`, `WorkspaceBoundary=clean`, and no surviving process groups from
+the recorded test fixtures. The reviewed draft is preserved at
+`af76d3a33793a8b9c2d6f5a1009c7f899c3dc74c` but is not accepted.
+
+Two follow-up gaps were confirmed:
+
+| Priority | Gap | Evidence | Next action |
+|---|---|---|---|
+| P0 | Exact-pid nested ownership does not scale to a large owned group | A legitimate test command produced more than 256 external descendants; cleanup failed closed despite zero residual after the run | Compact ownership by nested pgid with exact leader identity and guarded group signals |
+| P1 | Verifier command timeout has little headroom | Initial verifier `npm test` timed out at 30 s; an independent full run passed in 26.08 s | Add per-command or project-level verifier timeout policy before relying on full-suite commands as near-limit gates |
+
+The next Plan is:
+
+- [nested-process-group-ownership-v1.1.md](../design/nested-process-group-ownership-v1.1.md);
+- [nested-process-group-ownership-v1.1.plan.json](../design/nested-process-group-ownership-v1.1.plan.json).
+
+It starts from reviewed draft `af76d3a`, not from an accepted integration.
+That provenance must remain explicit; the draft is not silently promoted to
+accepted code.
+
 ## Next-run execution rule
 
 For subsequent self-host runs:

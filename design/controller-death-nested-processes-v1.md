@@ -202,3 +202,29 @@ The current main checkout contains newer governance documents that are not
 ancestors of `9a38174`. This is recorded as a separate provenance gap. It does
 not change the code base for this run, but it must be considered during manual
 integration.
+
+## First attempt outcome
+
+Run `0c199514-b24e-4f7a-a855-f2b8eb4484b4` implemented this Plan and preserved
+all four allowed write paths. Independent review measured:
+
+- focused tests 56/56;
+- build pass;
+- complete suite 455/455 in 26.08 seconds;
+- no path outside `writePaths`;
+- WorkspaceBoundary clean;
+- no surviving test process groups after the run.
+
+The run was still rejected because a legitimate high-fan-out test command
+exceeded the exact-pid descendant bound:
+
+```text
+process_tree_cleanup_failed
+descendant snapshot exceeds 256 related processes
+residualCount=0
+```
+
+The reviewed draft is preserved as
+`af76d3a33793a8b9c2d6f5a1009c7f899c3dc74c`; it is not accepted. The next Plan,
+[nested-process-group-ownership-v1.1.md](nested-process-group-ownership-v1.1.md),
+addresses the group-fan-out gap rather than raising an arbitrary PID cap.
