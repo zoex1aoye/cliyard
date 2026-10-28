@@ -9,12 +9,15 @@
 import type { TaskStatus } from "../core/status.js";
 import type { CostTruth, FailureRecord } from "../failures.js";
 import type { TaskExtensionRecord } from "../agents/continuation.js";
+import type { WorkerProcessRecord } from "../agents/process-tree.js";
 
 export const RUN_MANIFEST_VERSION = 1 as const;
 export const ACTIVE_RUN_VERSION = 1 as const;
 export const MAX_PATH_AUDITS = 64;
 export const MAX_PATH_AUDIT_PATHS = 128;
 export const MAX_PATH_AUDIT_ERROR_LENGTH = 2_000;
+/** Bounded cumulative process-tree evidence records per task. */
+export const MAX_PROCESS_TREES = 32;
 
 export type RunStatus = "running" | "interrupted" | "completed" | "blocked";
 
@@ -80,6 +83,16 @@ export interface RunTaskState {
    * timer. Older manifests omit this field.
    */
   extensions?: TaskExtensionRecord[];
+  /**
+   * Cumulative bounded process-tree evidence for every worker invocation
+   * observed for this task. Older manifests omit this field.
+   */
+  processTrees?: WorkerProcessRecord[];
+  /**
+   * Structured resource-cleanup failure, separate from `failure`. A task with
+   * this record was never accepted on worker success alone.
+   */
+  cleanupFailure?: FailureRecord;
 }
 
 /** A rejected attempt whose worktree still validates for reuse. */

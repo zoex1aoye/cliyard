@@ -11,6 +11,14 @@ import { existsSync } from "node:fs";
 import { collectChangedPaths } from "./git-paths.js";
 import { auditPathScope } from "./path-scope.js";
 import {
+  attachProcessTreeEvidence,
+  firstWorkerCleanupFailure,
+  recordWorkerProcessTree,
+  WorkerProcessTreeManager,
+  type ManagedWorkerProcess,
+  type WorkerProcessRecord,
+} from "./process-tree.js";
+import {
   boundFailureText,
   classifyFailure,
   createCostObservation,
@@ -182,6 +190,8 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
       ? Math.floor(requestedHeartbeat)
       : DEFAULT_HEARTBEAT_MS;
   const sessions = new Map<string, Session>();
+  const managers = new Map<string, ManagedWorkerProcess>();
+  const processTree = new WorkerProcessTreeManager();
 
   return {
     id: "claude",
@@ -262,6 +272,8 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
         const retryNotes: string[] = [];
         /** Every provider invocation started by this attempt, including retries. */
         const observations: CostObservation[] = [];
+        /** Bounded process-tree evidence for every invocation in this attempt. */
+        const processTrees: WorkerProcessRecord[] = [];
         const extensionState: DeadlineGrantState = {
           extensionCount: 0,
           cumulativeTimeoutMs: timeoutMs,
@@ -308,9 +320,11 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
                   launch: invocationLaunch,
                   prompt,
                   emit,
-                  onSpawn: (child) => {
+                  processTree,
+                  onSpawn: (child, managed) => {
                     const session = sessions.get(sessionId);
                     if (session) session.child = child;
+                    managers.set(sessionId, managed);
                     emit({
                       type: "session.start",
                       phase: "starting",
@@ -322,6 +336,7 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
                   },
                 }),
               );
+              recordWorkerProcessTree(processTrees, res.processTree);
               parsed = res.result;
               observations.push(
                 recordAttemptCost(invocationLaunch.sessionId, res),
@@ -469,18 +484,22 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
             .join("\n")
             .trim()
             .slice(-6000);
-          const failed =
+          const workerFailed =
             Boolean(changed.error) ||
             res.code !== 0 ||
             parsed?.is_error === true;
-          const failure = failed
+          // A worker success with ambiguous tree cleanup fails closed; a
+          // worker failure stays primary and cleanup remains separate evidence.
+          const cleanupFailure = firstWorkerCleanupFailure(processTrees);
+          const failed = workerFailed || cleanupFailure !== undefined;
+          const failure = workerFailed
             ? buildClaudeFailure({
                 res,
                 ...(parsed ? { parsed } : {}),
                 ...(changed.error ? { changedError: changed.error } : {}),
                 timeoutMs: res.deadlineTimeoutMs,
               })
-            : undefined;
+            : cleanupFailure;
           return {
             sessionId,
             ...(res.providerSessionId
@@ -498,6 +517,10 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
               ? { finalText: parsed.result }
               : {}),
             ...(failure ? { failure } : {}),
+            ...(cleanupFailure ? { cleanupFailure } : {}),
+            ...(processTrees.length > 0
+              ? { processTrees: [...processTrees] }
+              : {}),
             ...(extensionState.records.length > 0
               ? {
                   extensions: extensionState.records.map((record) => ({
@@ -513,6 +536,15 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
           };
         } catch (e) {
           const message = e instanceof Error ? e.message : String(e);
+          const carrier = e as {
+            processTree?: WorkerProcessRecord;
+            cleanupFailure?: ReturnType<typeof firstWorkerCleanupFailure>;
+          };
+          if (carrier.processTree) {
+            recordWorkerProcessTree(processTrees, carrier.processTree);
+          }
+          const cleanupFailure =
+            carrier.cleanupFailure ?? firstWorkerCleanupFailure(processTrees);
           emit({
             type: "error",
             phase: "ending",
@@ -530,6 +562,10 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
               code: "spawn_error",
               messageDetail: `spawn error: ${message}`,
             }),
+            ...(cleanupFailure ? { cleanupFailure } : {}),
+            ...(processTrees.length > 0
+              ? { processTrees: [...processTrees] }
+              : {}),
             ...(extensionState.records.length > 0
               ? {
                   extensions: extensionState.records.map((record) => ({
@@ -567,7 +603,14 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
     async cancel(sessionId: string): Promise<void> {
       const session = sessions.get(sessionId);
       if (!session) return;
-      session.child?.kill("SIGTERM");
+      const managed = managers.get(sessionId);
+      if (managed) {
+        // Await the same idempotent cleanup used by close/timeout.
+        await managed.cleanup("cancel");
+        managers.delete(sessionId);
+      } else {
+        session.child?.kill("SIGTERM");
+      }
       sessions.delete(sessionId);
     },
   };
@@ -865,6 +908,8 @@ interface ClaudeRunResult {
   protocolFailure: boolean;
   /** Deadline in force when this invocation stopped. */
   deadlineTimeoutMs: number;
+  /** Bounded cleanup evidence for this invocation's process tree. */
+  processTree: WorkerProcessRecord;
 }
 
 type ClaudeSessionLaunch =
@@ -912,7 +957,8 @@ function runClaude(opts: {
   launch: ClaudeSessionLaunch;
   prompt: string;
   emit: ProgressEmitter;
-  onSpawn: (child: ChildProcess) => void;
+  processTree: WorkerProcessTreeManager;
+  onSpawn: (child: ChildProcess, managed: ManagedWorkerProcess) => void;
 }): Promise<ClaudeRunResult> {
   return new Promise((resolvePromise, reject) => {
     const args = [
@@ -935,12 +981,15 @@ function runClaude(opts: {
       "--no-chrome",
       ...opts.extraArgs,
     ];
-    const child = spawn(opts.binary, args, {
+    // POSIX: detached so the CLI leads a dedicated process group whose exact
+    // identity is captured immediately (design/worker-process-tree-v1.md).
+    const managed = opts.processTree.spawn(opts.binary, args, {
       cwd: opts.cwd,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    opts.onSpawn(child);
+    const child = managed.child;
+    opts.onSpawn(child, managed);
 
     let stdout = "";
     let stderr = "";
@@ -1096,7 +1145,9 @@ function runClaude(opts: {
         phase: "ending",
         message: `worker timed out after ${deadlineTimeoutMs}ms`,
       });
-      child.kill("SIGTERM");
+      // Terminate the dedicated worker group, never cliyard's own group. The
+      // close handler awaits this same idempotent cleanup.
+      void managed.cleanup("timeout");
     };
     const armDeadline = (
       delayMs: number,
@@ -1256,7 +1307,10 @@ function runClaude(opts: {
       childClosed = true;
       settled = true;
       cleanup();
-      reject(error);
+      void (async () => {
+        const outcome = await managed.cleanup("spawn-error");
+        reject(attachProcessTreeEvidence(error, outcome));
+      })();
     });
     child.on("close", (code, signal) => {
       void (async () => {
@@ -1276,6 +1330,11 @@ function runClaude(opts: {
         if (settled) return;
         settled = true;
         cleanup();
+        // Residual descendants may outlive the leader; the result is not
+        // observable until the managed group is gone or cleanup failed closed.
+        const treeOutcome = await managed.cleanup(
+          timedOut ? "timeout" : "child-close",
+        );
         const exitCode = timedOut ? 124 : (code ?? 1);
         if (!result && !timedOut && exitCode !== 0) {
           opts.emit({
@@ -1302,6 +1361,7 @@ function runClaude(opts: {
           unresolvedProviderError: unresolvedError,
           protocolFailure,
           ...(providerErrorText ? { errorText: providerErrorText } : {}),
+          processTree: treeOutcome.record,
         });
       })();
     });

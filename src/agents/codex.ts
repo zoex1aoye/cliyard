@@ -6,6 +6,14 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { collectChangedPaths } from "./git-paths.js";
 import {
+  attachProcessTreeEvidence,
+  firstWorkerCleanupFailure,
+  recordWorkerProcessTree,
+  WorkerProcessTreeManager,
+  type ManagedWorkerProcess,
+  type WorkerProcessRecord,
+} from "./process-tree.js";
+import {
   boundFailureText,
   createFailureRecord,
   unavailableCostTruth,
@@ -47,46 +55,62 @@ function runCodex(
   prompt: string,
   extraArgs: string[],
   timeoutMs: number,
+  processTree: WorkerProcessTreeManager,
+  onSpawn: (managed: ManagedWorkerProcess) => void,
 ): Promise<{
   code: number;
   stdout: string;
   stderr: string;
   timedOut: boolean;
   signal: NodeJS.Signals | null;
+  processTree: WorkerProcessRecord;
 }> {
   return new Promise((resolvePromise, reject) => {
     const args = ["exec", "-m", model, ...extraArgs, prompt];
-    const child = spawn(binary, args, {
+    const managed = processTree.spawn(binary, args, {
       cwd,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    const child = managed.child;
+    onSpawn(managed);
     let stdout = "";
     let stderr = "";
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      // Terminate the dedicated group (POSIX). The close handler awaits the
+      // same idempotent cleanup before the result is observable.
+      void managed.cleanup("timeout");
     }, timeoutMs);
-    child.stdout.on("data", (d) => {
+    child.stdout?.on("data", (d) => {
       stdout += String(d);
     });
-    child.stderr.on("data", (d) => {
+    child.stderr?.on("data", (d) => {
       stderr += String(d);
     });
     child.on("error", (err) => {
       clearTimeout(timer);
-      reject(err);
+      void (async () => {
+        const outcome = await managed.cleanup("spawn-error");
+        reject(attachProcessTreeEvidence(err, outcome));
+      })();
     });
     child.on("close", (code, signal) => {
       clearTimeout(timer);
-      resolvePromise({
-        code: timedOut ? 124 : (code ?? 1),
-        stdout,
-        stderr,
-        timedOut,
-        signal,
-      });
+      void (async () => {
+        const outcome = await managed.cleanup(
+          timedOut ? "timeout" : "child-close",
+        );
+        resolvePromise({
+          code: timedOut ? 124 : (code ?? 1),
+          stdout,
+          stderr,
+          timedOut,
+          signal,
+          processTree: outcome.record,
+        });
+      })();
     });
   });
 }
@@ -96,6 +120,8 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
   const model = opts.model ?? process.env.CLIYARD_CODEX_MODEL ?? "deepseek-v4-pro";
   const timeoutMs = opts.timeoutMs ?? 10 * 60_000;
   const sessions = new Map<string, Session>();
+  const managers = new Map<string, ManagedWorkerProcess>();
+  const processTree = new WorkerProcessTreeManager();
   let seq = 0;
 
   return {
@@ -205,6 +231,7 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
           };
         }
 
+        const processTrees: WorkerProcessRecord[] = [];
         try {
           const res = await runCodex(
             binary,
@@ -213,7 +240,12 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
             prompt,
             opts.extraArgs ?? [],
             timeoutMs,
+            processTree,
+            (managed) => {
+              managers.set(sessionId, managed);
+            },
           );
+          recordWorkerProcessTree(processTrees, res.processTree);
           let changed: Awaited<ReturnType<typeof collectChangedPaths>>;
           try {
             changed = await collectChangedPaths(
@@ -231,8 +263,12 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
             : changed.paths.length
               ? `\n[codex] changed: ${changed.paths.join(", ")}`
               : "\n[codex] changed: (none)";
-          const failed =
+          const workerFailed =
             res.timedOut || res.code !== 0 || Boolean(changed.error);
+          // Ambiguous tree cleanup makes an otherwise successful worker fail
+          // closed; a worker failure stays the primary failure and cleanup is
+          // kept as separate resource evidence.
+          const cleanupFailure = firstWorkerCleanupFailure(processTrees);
           const detail = [
             res.stderr.trim(),
             changed.error ? `git diff failed: ${changed.error}` : "",
@@ -242,7 +278,11 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
           return {
             sessionId,
             exitCode:
-              res.code !== 0 ? res.code : changed.error ? 1 : 0,
+              res.code !== 0
+                ? res.code
+                : changed.error || cleanupFailure
+                  ? 1
+                  : 0,
             touchedPaths: changed.paths,
             ...(changed.error
               ? {
@@ -252,7 +292,7 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
             logTail:
               (res.stdout + "\n" + res.stderr).trim().slice(-4000) +
               changedLog,
-            ...(failed
+            ...(workerFailed
               ? {
                   failure: createFailureRecord({
                     timedOut: res.timedOut,
@@ -267,10 +307,25 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
                     ...(detail ? { messageDetail: detail } : {}),
                   }),
                 }
+              : cleanupFailure
+                ? { failure: cleanupFailure }
+                : {}),
+            ...(cleanupFailure ? { cleanupFailure } : {}),
+            ...(processTrees.length > 0
+              ? { processTrees: [...processTrees] }
               : {}),
           };
         } catch (e) {
           const message = e instanceof Error ? e.message : String(e);
+          const carrier = e as {
+            processTree?: WorkerProcessRecord;
+            cleanupFailure?: ReturnType<typeof firstWorkerCleanupFailure>;
+          };
+          if (carrier.processTree) {
+            recordWorkerProcessTree(processTrees, carrier.processTree);
+          }
+          const cleanupFailure =
+            carrier.cleanupFailure ?? firstWorkerCleanupFailure(processTrees);
           return {
             sessionId,
             exitCode: 1,
@@ -282,6 +337,10 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
               code: "spawn_error",
               messageDetail: `spawn error: ${message}`,
             }),
+            ...(cleanupFailure ? { cleanupFailure } : {}),
+            ...(processTrees.length > 0
+              ? { processTrees: [...processTrees] }
+              : {}),
           };
         }
       })();
@@ -309,6 +368,12 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
     },
 
     async cancel(sessionId: string): Promise<void> {
+      const managed = managers.get(sessionId);
+      if (managed) {
+        // Await the same idempotent cleanup the close/timeout paths use.
+        await managed.cleanup("cancel");
+        managers.delete(sessionId);
+      }
       sessions.delete(sessionId);
     },
   };
