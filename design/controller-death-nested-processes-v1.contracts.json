@@ -1,0 +1,86 @@
+{
+  "planId": "controller-death-nested-processes-v1",
+  "contracts": [
+    {
+      "taskId": "controller-death-nested-core",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Implement controller-death recovery for previously observed nested worker descendants from design/controller-death-nested-processes-v1.md. Extend ManagedWorkerProcess with a bounded exact-identity external-descendant observer that replays its current snapshot on subscribe and emits changed snapshots from validated process-table samples; it must never signal. Extend backward-compatible WorkerLease version 1 with optional all-or-nothing nestedProcesses evidence containing version, host, observedCount, truncated, lastObservedAt and at most 32 deduplicated exact pid/pgid/os-start identities. The attacher must subscribe only after the immutable controller and worker identities are durably written, serialize atomic 0600 updates, never let an older snapshot overwrite a newer one, and fail closed by stopping/rejecting the invocation if nested-evidence persistence becomes unhealthy. A missing field must preserve legacy behavior; malformed, partial, duplicate or host-mismatched evidence must reject the lease. Extend recover-workers so a proven-dead controller can recover when the top-level leader is gone but a durable nested identity remains: never signal without exact identity, refresh a live top-level leader's descendant graph before group cleanup, recursively extend each matching nested root through the bounded process-table snapshot, fail closed before signalling on truncation, malformation, snapshot ambiguity or over-bound targets, persist the refreshed target set before signals, then TERM/SIGKILL exact nested pids only and verify they are gone. If the top-level leader is still exactly present, preserve the existing guarded dedicated-group cleanup; absence of the top-level leader never authorizes a negative-pgid signal. Expose bounded nested registry presence/count/truncation observation in WorkerLease status JSON without changing RunManifest acceptance. Add focused fake-inspector and real POSIX SIGKILL tests in the existing files for observer replay/update, durable nested persistence, write-failure rejection, truncated no-signal behavior, top-level-leader-absent nested recovery, exact-pid TERM/KILL, reused-pid refusal, legacy parsing and no orphan helpers. Do not change TaskContract, RunManifest authority, RuntimeManager, ports, Windows parity, cross-host recovery, automatic resume or RunManifest rewriting."
+      ],
+      "nonGoals": [
+        "Do not implement OS filesystem or network sandboxing.",
+        "Do not add Windows Job Object support or cross-host recovery.",
+        "Do not use process names, ports, broad scans or negative-pgid signals without the existing exact leader guard.",
+        "Do not change TaskContract acceptance or rewrite RunManifest history.",
+        "Do not add a daemon or automatic resume."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "docs/evidence/WORKER_PROCESS_TREE.md",
+        "docs/evidence/WORKER_LEASE.md",
+        "design/worker-process-tree-v1.md",
+        "src/agents/process-tree.ts",
+        "src/agents/worker-lease.ts",
+        "src/runtime/process.ts",
+        "tests/worker-process-tree.test.ts",
+        "tests/worker-lease.test.ts"
+      ],
+      "writePaths": [
+        "src/agents/process-tree.ts",
+        "src/agents/worker-lease.ts",
+        "tests/worker-process-tree.test.ts",
+        "tests/worker-lease.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "9a38174a872d70b7a250225c31fa7ce4efdcf06e",
+      "verifyCommands": [
+        "npx tsx --test tests/worker-process-tree.test.ts tests/worker-lease.test.ts",
+        "npm run build",
+        "npm test"
+      ],
+      "maxRepairs": 2
+    },
+    {
+      "taskId": "controller-death-nested-evidence",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "After controller-death-nested-core is accepted, document only the implemented controller-death nested process ownership behavior and measured evidence. Update design/worker-process-tree-v1.md to replace its controller-death limitation with the exact new guarantees and remaining limits. Add docs/evidence/CONTROLLER_DEATH_NESTED_PROCESSES.md with the accepted base lineage, durable nested registry schema and bounds, sampling/persistence path, recovery algorithm, real SIGKILL fixture, exact commands and observed counts, identity-reuse safeguards, lease status projection, and explicit non-claims for Windows, cross-host, unsampled children, incomplete registries and OS write prevention. Update README.md and docs/NEXT_STEP_CONTROLLER.md so the next process gap is SandboxProvider rather than nested recovery. Do not modify source or tests and do not claim more than the core task's measured evidence."
+      ],
+      "nonGoals": [
+        "Do not modify source or tests.",
+        "Do not claim cross-host or Windows recovery.",
+        "Do not claim recovery for descendants that were never observed before controller death.",
+        "Do not implement SandboxProvider in this documentation task."
+      ],
+      "dependsOn": [
+        "controller-death-nested-core"
+      ],
+      "readPaths": [
+        "design/controller-death-nested-processes-v1.md",
+        "design/worker-process-tree-v1.md",
+        "docs/evidence/WORKER_PROCESS_TREE.md",
+        "docs/evidence/WORKER_LEASE.md",
+        "src/agents/process-tree.ts",
+        "src/agents/worker-lease.ts",
+        "tests/worker-process-tree.test.ts",
+        "tests/worker-lease.test.ts"
+      ],
+      "writePaths": [
+        "README.md",
+        "design/worker-process-tree-v1.md",
+        "docs/NEXT_STEP_CONTROLLER.md",
+        "docs/evidence/CONTROLLER_DEATH_NESTED_PROCESSES.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "9a38174a872d70b7a250225c31fa7ce4efdcf06e",
+      "verifyCommands": [
+        "test -f docs/evidence/CONTROLLER_DEATH_NESTED_PROCESSES.md",
+        "grep -q 'controller-death nested process' docs/evidence/CONTROLLER_DEATH_NESTED_PROCESSES.md",
+        "git diff --check"
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
