@@ -17,6 +17,7 @@ North star: stop babysitting AI. **CLI + local Control API = stable product boun
 **Supervisor v0 operations:** [docs/SUPERVISOR_V0.md](docs/SUPERVISOR_V0.md) — durable foreground runs, recovery, limitations, safe self-hosting.
 **Foreground orchestration queue v0:** [docs/evidence/ORCHESTRATION_QUEUE.md](docs/evidence/ORCHESTRATION_QUEUE.md) — explicit-approval queue over frozen contracts, dependency-ordered sequential dispatch, blocked stop/continue, retry/resume, stale-running reconciliation and queue-lock evidence. No daemon; RunManifest remains task authority.
 **Plan-backed chained queue base v0:** [docs/evidence/PLAN_BACKED_CHAIN.md](docs/evidence/PLAN_BACKED_CHAIN.md) — `queue add-plan` snapshots an approved Plan, materializes queue-owned contracts at a pinned root HEAD or the completed upstream RunManifest `integrationHead`, and proves downstream worktree/integration ancestry in three real Claude Code + DeepSeek two-item chains. Fail-closed, idempotent, one linear dependency; no daemon.
+**Queue manual adoption v1:** [docs/evidence/QUEUE_ADOPTION.md](docs/evidence/QUEUE_ADOPTION.md) — `queue adopt` closes one blocked item with a separately versioned `OperatorResolution` after human review; the source blocked RunManifest stays historical truth and its tasks are never marked accepted. Adopted lineage is explicit for Plan-backed dependants. Fail-closed on state, run binding, contracts/Plan identity, full-commit ancestry and bounded secret-free evidence. No parallel dispatch, profile activation, admission, Windows parity or daemon.
 **Pinned-base chained read context v0:** [docs/evidence/CHAINED_READ_CONTEXT.md](docs/evidence/CHAINED_READ_CONTEXT.md) — explicit downstream `readPaths` are validated against the exact shared contracts `baseCommit` with a Git object lookup, not the control checkout. Measured by focused tests and one real Claude Code + DeepSeek two-item chain (2/2, 13.953 s) whose downstream task read `foundation.txt` from the upstream base. No copying, automatic approval or daemon.
 **RuntimeManager v0:** [docs/RUNTIME_MANAGER.md](docs/RUNTIME_MANAGER.md) — finite local services, leased ports, runtime manifest/evidence, cleanup, limitations.
 **Runtime orphan recovery:** [docs/RUNTIME_ORPHAN_RECOVERY.md](docs/RUNTIME_ORPHAN_RECOVERY.md) — exact-identity preflight, exact lease-owner PID, `runtimeId`-bearing recovery records, `supervisor reap`, start/resume reconciliation, evidence-preserving gaps.
@@ -25,7 +26,7 @@ North star: stop babysitting AI. **CLI + local Control API = stable product boun
 **Task Architect evidence:** [docs/evidence/TASK_ARCHITECT.md](docs/evidence/TASK_ARCHITECT.md) — measured read-only Plan production (fake-worker guards plus one real Claude Code + DeepSeek smoke), human review gate and limitations.
 **Control snapshot, event journal and resource snapshot v0:** [docs/evidence/CONTROL_SNAPSHOT.md](docs/evidence/CONTROL_SNAPSHOT.md) — read-only `queue status` joins queue, RunManifest, task, worker progress and line-age evidence; queue mutations append bounded audit events; host resources are sampled and provider capacity/quota/balance/pricing remain explicitly unknown until observed.
 **Worker failure taxonomy and cost truth v0:** [docs/evidence/FAILURE_COST_TRUTH.md](docs/evidence/FAILURE_COST_TRUTH.md) — one shared ten-category failure enum with bounded, credential-free records; four cost states (`provider-reported`, `cli-estimated`, `usage-only`, `unavailable`); Claude Code `total_cost_usd` is a non-authoritative CLI estimate, never a DeepSeek invoice or balance; the configured budget is a guard, not spend; RunManifest remains task authority; no automatic retry, routing, admission or parallel dispatch.
-**Next iteration:** [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md) — after the now-implemented failure taxonomy and cost truth, the revised order is CLI+model execution-profile routing, a shared hierarchical admission broker, parallel queue + Plan-wave execution, a stable local Control API with a thin DSH cockpit, then DesignRevision/EvidenceBundle and finally look-ahead control. The scheduler warm start is 3 concurrent tasks; it is not a provider permit. Provider concurrency, quota, balance and price are learned per execution binding, while CPU/RAM, runtime, port and rate-limit feedback constrain a calibrated hard bound. Unknown bindings begin with one in-flight probe. Product rationale/build-vs-borrow is in [docs/PRODUCT_STRATEGY_V2.md](docs/PRODUCT_STRATEGY_V2.md), admission design in [design/dynamic-parallel-admission-v0.md](design/dynamic-parallel-admission-v0.md), and operational gaps in [docs/NEXT_STEP_CONTROLLER.md](docs/NEXT_STEP_CONTROLLER.md). Daemon, cross-host execution, SQLite, automatic main merge and unlimited concurrency remain non-goals.
+**Next iteration:** [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md) — after the now-implemented failure taxonomy/cost truth, queue manual adoption and deadline-fixture stability, the revised order is: **WorkerLease persisted at spawn plus controller owner-death recovery**, then a secret-free **ProfileCatalog with real binding activation**, per-run Supervisor ownership with short control-store locks, **fixed hierarchical admission**, and only then Windows Job Object ownership and telemetry-backed dynamic scoring. Parallel queue dispatch is not enabled by adoption. The scheduler warm start is 3 concurrent tasks; it is not a provider permit. Provider concurrency, quota, balance and price are learned per execution binding, while CPU/RAM, runtime, port and rate-limit feedback constrain a calibrated hard bound. Unknown bindings begin with one in-flight probe. Product rationale/build-vs-borrow is in [docs/PRODUCT_STRATEGY_V2.md](docs/PRODUCT_STRATEGY_V2.md), admission design in [design/dynamic-parallel-admission-v0.md](design/dynamic-parallel-admission-v0.md), and operational gaps in [docs/NEXT_STEP_CONTROLLER.md](docs/NEXT_STEP_CONTROLLER.md). Daemon, cross-host execution, SQLite, automatic main merge and unlimited concurrency remain non-goals.
 
 ## What we want (ideal)
 
@@ -47,7 +48,7 @@ Human: versioned requirements + visual/design evidence
 - **Claude Code + DeepSeek worker:** `claude-ds` + `npm run claude-batch`
 - **Continuous waves:** independent ready tasks execute in parallel within an integration branch; accepted task branches are snapshotted and merged sequentially, then the next dependent wave starts from the new integration head. This intra-item parallelism exists, but still needs first-class task/resource admission and two-level observability.
 - **Supervisor v0 (durable foreground):** `supervisor start/status/resume/reap/stop`, atomic JSON RunManifest, integration-branch checkpoint, one-lock recovery; resume skips accepted tasks (no daemon, no SQLite)
-- **Foreground orchestration queue v0 (explicit approval):** `queue add/add-plan/list/retry/cancel/run` over frozen contracts or approved Plans. Contract-backed `add` freezes the contracts path and SHA-256 at add; `run` dispatches ready items one at a time through the existing Supervisor, stops at the first blocked item by default, and with `--continue-on-blocked` keeps independent work moving while dependants become blocked. Blocked items retry explicitly (`start` when no run exists, otherwise `resume --retry-rejected`); a same-host stale queue lock is reclaimed and a `running` item with a recorded run id reconciles against its RunManifest. The queue never approves or rewrites contracts and never rewrites a RunManifest. Completed and cancelled items are monotonic. Sequential, same-host, foreground only.
+- **Foreground orchestration queue v0 (explicit approval):** `queue add/add-plan/list/retry/cancel/run/adopt` over frozen contracts or approved Plans. Contract-backed `add` freezes the contracts path and SHA-256 at add; `run` dispatches ready items one at a time through the existing Supervisor, stops at the first blocked item by default, and with `--continue-on-blocked` keeps independent work moving while dependants become blocked. Blocked items retry explicitly (`start` when no run exists, otherwise `resume --retry-rejected`); a same-host stale queue lock is reclaimed and a `running` item with a recorded run id reconciles against its RunManifest. `queue adopt` closes one reviewed blocked item with a separately versioned `OperatorResolution`: the source blocked/interrupted RunManifest is read-only historical truth, its tasks are never marked accepted, and the queue item becomes `completed` with `completion: "adopted"`. Adoption requires the exact run binding, unchanged frozen contracts/approved Plan, a full reviewed commit inside the pinned-base/current-HEAD lineage, and bounded secret-free evidence. The queue never approves or rewrites contracts and never rewrites a RunManifest. Completed and cancelled items are monotonic. Sequential, same-host, foreground only; adoption does not enable parallel dispatch.
 - **Control snapshot + queue event journal v0:** `queue status [--json]` is read-only and joins item state, Plan/materialization lineage, the latest RunManifest/tasks, queue and supervisor liveness, latest worker progress, retry policy and a host resource sample. Missing manifests and malformed journal lines are reported as degraded evidence; they never become success. Queue add/retry/cancel, Plan materialization, dispatch, blocking and provider session boundaries append bounded events to `.cliyard/queue-events/events.jsonl`. Provider profiles are unresolved until an `ExecutionProfile` exists: capacity, quota, balance and pricing are `unknown/null`, never filled from a public nominal number.
 - **Worker failure taxonomy + cost truth v0:** every newly rejected dispatched task carries a structured, bounded `FailureRecord` in its RunManifest task (category, stage, optional code, message, `observedAt`, advisory `retryableHint`). The exact categories are `budget_exhausted`, `timeout`, `provider_transient`, `provider_auth`, `provider_protocol`, `worker_process_exit`, `verifier_rejected`, `policy_blocked`, `resource_exhausted` and `unknown`; classification distinguishes a worker process failure from a post-success verifier rejection. Cost truth is one of `provider-reported`, `cli-estimated`, `usage-only` or `unavailable`, with per-session provenance and explicit `missing` reasons. Claude Code `total_cost_usd` is a non-authoritative CLI estimate (never a DeepSeek bill or balance); token usage is preserved independently; a zero emitted by the CLI stays zero but non-authoritative; missing cost stays `unavailable`, never `$0`. The configured `--max-budget-usd` is recorded as `guardBudgetUsd`, not spend. Accepted and rejected tasks keep their cost, including across worktree cleanup. `supervisor status` and `queue status` expose failure/cost; queue pre-dispatch blocks keep an item-level `policy_blocked` failure only when no RunManifest exists. RunManifest remains task authority. Nothing in this slice retries automatically: `retryableHint` is advisory, the queue needs explicit `queue retry`, Supervisor needs explicit `resume --retry-rejected`, and the Claude adapter's pre-existing bounded transient retry is unchanged.
 - **Plan-backed chained queue base v0:** `queue add-plan <plan.json> --repo <path> --id <id> [--depends-on <id>]` snapshots an explicitly approved Plan (absolute path + SHA-256) and requires the Plan id to equal the queue id. A root item pins the repository HEAD captured at add; a dependent item waits for its one upstream to complete, then compiles the Plan deterministically at that RunManifest's `integrationHead` into a queue-owned artifact under `.cliyard/queue/materialized/` before any attempt increment or Supervisor start. Retry/resume re-verifies the recorded Plan hash, artifact bytes, base and upstream lineage; a changed Plan, artifact or upstream evidence blocks instead of being substituted. The downstream integration branch starts at the upstream head, so the upstream `integrationHead` is an ancestor of the downstream one. A downstream task may declare an upstream-produced file explicitly in `readPaths`; preflight proves it against that pinned base. One linear dependency only; no automatic Plan generation/approval, no multi-parent integration/merge queue, no parallel dispatch or daemon.
@@ -58,19 +59,21 @@ Human: versioned requirements + visual/design evidence
 - **Runtime failure drills v0:** `npm run runtime-drill` runs readiness-timeout, verify-failure and cleanup-failure in three independent child processes, writes a versioned JSON report plus per-scenario manifests/logs/leases, and verifies the service/port is clean afterward. A timed-out/abnormal child is terminated (SIGTERM → bounded SIGKILL) and its proven orphan runtime is reconciled by the exact reaper; the recovery is persisted in the report, while the abnormal scenario itself still reports failure. Diagnostic only — no daemon
 - **Windows track:** `doctor` / `run` / `batch` via WSL (deferred for CodeBuddy E2E)
 
-Not yet: CLI+model execution-profile routing, dynamic hierarchical admission, bounded inter-item and intra-item parallel dispatch, a stable local Control API, a reusable DesignRevision/EvidenceBundle, a self-owned fallback UI, or a supervised look-ahead controller/daemon. Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, cross-host execution, SQLite manifests, unlimited parallel runtimes, multi-parent integration/merge queue and provider-conversation resume also remain unclaimed. The current queue is explicit-approval, sequential, same-host and foreground; the current task DAG can run independent ready tasks concurrently but lacks a shared CPU/RAM/provider/runtime admission broker. Plan-backed items deterministically compile contracts from an already-approved Plan; v0 supports only one linear queue dependency. Explicit downstream `readPaths` are validated at the pinned contracts base. Task Architect produces a human-reviewable Plan only; it does **not** freeze contracts or dispatch automatically.
+Not yet: **WorkerLease persisted at spawn and controller owner-death recovery** (the next safety prerequisite), secret-free `ProfileCatalog` with real binding activation, CLI+model execution-profile routing, fixed hierarchical admission, bounded inter-item and intra-item parallel dispatch, a stable local Control API, a reusable DesignRevision/EvidenceBundle, a self-owned fallback UI, or a supervised look-ahead controller/daemon. Windows Job Object process-tree parity and telemetry-backed dynamic scoring are later prerequisites, not shortcuts past WorkerLease, profile activation and fixed admission. Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, cross-host execution, SQLite manifests, unlimited parallel runtimes, multi-parent integration/merge queue and provider-conversation resume also remain unclaimed. The current queue is explicit-approval, sequential, same-host and foreground; adoption is a human review resolution, not parallel execution. The current task DAG can run independent ready tasks concurrently but lacks a shared CPU/RAM/provider/runtime admission broker. Plan-backed items deterministically compile contracts from an already-approved Plan; v0 supports only one linear queue dependency. Explicit downstream `readPaths` are validated at the pinned contracts base. Task Architect produces a human-reviewable Plan only; it does **not** freeze contracts or dispatch automatically.
 
-Measured suite (2026-10-27, failure/cost working tree on `69f62de`):
-`npm run build` exit `0`; focused failure taxonomy **14/14** (85.7 ms), Claude
-failure/cost **17/17** (11694.1 ms), supervisor failure/cost **12/12**
-(1134.9 ms) and queue control **7/7** (733.3 ms); combined focused **50/50**
-(9991.6 ms); full `npm test` **290/290** (14175.8 ms). Counts were reproduced
-in a second focused run; durations vary between local runs. This round adds 45 tests
-over the prior ControlSnapshot baseline of 245/245 on `3776c09` (14 taxonomy +
-17 Claude adapter + 12 durable supervisor/queue + 2 queue-control). The previous
-read-context baseline was 240/240 on `390d61e`; its focused 5/5, Plan-backed
-31/31 and real-provider chain evidence remain historical measurements. One real
-Claude Code + DeepSeek two-item chain with downstream
+Measured suite (2026-10-28, execution-authority slice on `ce1157a`):
+`npm run build` exit `0`; focused queue adoption **8/8** (2539.7 ms),
+focused deadline extension **13/13** (23601.98 ms); full `npm test`
+**371/371** (24411.1 ms, 0 fail). The two upstream slices integrate
+`manual-queue-adoption` (`b7f7d9e`) and `deadline-fixture-stability`
+(`c57d591`): adoption adds 8 focused tests, and the stabilized deadline
+fixture adds 1 late-result test and is green. The previous execution-authority
+review recorded **361/362** with that fixture red; this integration closes it.
+Earlier focused and full counts remain historical measurements: failure/cost
+**290/290** on `69f62de` (taxonomy 14/14, Claude 17/17, supervisor 12/12,
+queue control 7/7, combined 50/50); ControlSnapshot **245/245** on `3776c09`;
+read-context **240/240** on `390d61e` (focused 5/5, Plan-backed 31/31). One
+real Claude Code + DeepSeek two-item chain with downstream
 `readPaths: ["foundation.txt"]` completed 2/2 in 13.953 s, captured the live
 downstream worktree at the upstream `integrationHead` with `foundation.txt`
 present and `upper.txt` absent, observed the worker reading that file, and
@@ -78,6 +81,7 @@ verified both final files plus integration ancestry (exit `0`). Three earlier
 chains without explicit readPaths (17.2 s, 24.6 s and 21.4 s) remain historical
 measurements. These are single local macOS results, not a long-term flake-rate,
 cost or CI claim. Evidence:
+[docs/evidence/QUEUE_ADOPTION.md](docs/evidence/QUEUE_ADOPTION.md),
 [docs/evidence/FAILURE_COST_TRUTH.md](docs/evidence/FAILURE_COST_TRUTH.md),
 [docs/evidence/CHAINED_READ_CONTEXT.md](docs/evidence/CHAINED_READ_CONTEXT.md),
 [docs/evidence/PLAN_BACKED_CHAIN.md](docs/evidence/PLAN_BACKED_CHAIN.md),
@@ -192,9 +196,16 @@ npm run dev -- queue run --repo <scratch-repo> [--continue-on-blocked] \
   [--max-dispatches n] [--json]
 npm run dev -- queue retry <queue-id> --repo <scratch-repo> [--json]
 npm run dev -- queue cancel <queue-id> --repo <scratch-repo> [--json]
+# Close one blocked item whose work was manually reviewed and integrated:
+npm run dev -- queue adopt <queue-id> --repo <scratch-repo> --run <run-id> \
+  --artifact <full-reviewed-commit> --evidence <review-evidence.json> \
+  --approved-by <operator> --reason <text> [--json]
+# Adoption records a separate OperatorResolution and leaves the blocked
+# RunManifest and its unaccepted tasks untouched.
 # Plan items support at most one dependency. A root item pins the HEAD captured
 # at add-plan; a dependent item materializes at the upstream completed
-# RunManifest integrationHead. Changing the Plan blocks; it is never auto-approved.
+# RunManifest integrationHead, or at the explicitly adopted reviewed commit.
+# Changing the Plan blocks; it is never auto-approved.
 # Default run stops at the first blocked item; --continue-on-blocked runs
 # independent items and blocks dependants. No daemon, parallel dispatch or dry-run.
 # After `npm run build`: node dist/cli.js queue …
@@ -234,9 +245,14 @@ reclaimed; foreign-host locks fail closed. Details and measured crash windows:
 [docs/evidence/ORCHESTRATION_QUEUE.md](docs/evidence/ORCHESTRATION_QUEUE.md)
 and [docs/evidence/PLAN_BACKED_CHAIN.md](docs/evidence/PLAN_BACKED_CHAIN.md).
 Queue audit events are appended to
-`<target>/.cliyard/queue-events/events.jsonl` (gitignored). They are bounded,
-best-effort observations only; `queue status` reads them but never appends or
-rewrites them.
+`<target>/.cliyard/queue-events/events.jsonl` (gitignored). Successful first
+adoptions also append one bounded line to
+`<target>/.cliyard/queue-events/adoptions.jsonl`; `queue.json` remains the
+authority for the `OperatorResolution` if that observability append fails.
+These streams are bounded, best-effort observations only; `queue status`
+reads them but never appends or rewrites them. An adopted item shows
+`completion: "adopted"`; its source blocked/interrupted RunManifest remains
+historical truth and is never rewritten.
 
 Runtime evidence: `<target>/.cliyard/runtime/<runtimeId>/runtime-manifest.json`
 plus `<service>.log` and `data/<service>/`; port leases live in

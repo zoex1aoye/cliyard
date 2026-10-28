@@ -80,9 +80,9 @@
 > 下一阶段按“执行权威链”推进，而不是同时铺开所有缺口：
 >
 > ```text
-> queue adoption / OperatorResolution
->   -> deadline fixture stability
->   -> WorkerLease persisted at spawn + controller-death policy
+> [已完成] queue adoption / OperatorResolution
+>   -> [已完成] deadline fixture stability
+>   -> [下一步] WorkerLease persisted at spawn + controller-death policy
 >   -> ProfileCatalog + real binding activation
 >   -> per-run Supervisor ownership + short control locks
 >   -> fixed hierarchical queue / Plan-wave admission
@@ -97,6 +97,26 @@
 > 与 cliyard 自身 SIGKILL 恢复都归入 `ProcessOwnerProvider` /
 > `WorkerLease` 边界；具体决定见
 > [execution-authority-v1.md](../design/execution-authority-v1.md)。
+>
+> **2026-10-28 queue adoption closure：** `manual-queue-adoption`
+> (`b7f7d9e`) 与 `deadline-fixture-stability` (`c57d591`) 已合入
+> integration HEAD `ce1157a`。queue manual adoption v1 已实现：`queue
+> adopt` 只关闭一个 blocked item，要求精确 run binding、未变化的 frozen
+> contracts/approved Plan、full reviewed commit 位于 pinned base 与当前 HEAD
+> 的 lineage 中，以及 bounded、secret-free 的 review evidence；它写入独立
+> 版本化的 `OperatorResolution`，原 blocked/interrupted RunManifest 保持历史
+> 真相，task 不被标记 accepted。`queue status` 显示 `completed (adopted)`，
+> Plan-backed dependant 使用显式 adopted lineage。实测：`npm run build`
+> exit 0；queue-adoption focused **8/8**（2539.7 ms）；deadline-extension
+> focused **13/13**（23601.98 ms）；完整套件 **371/371**（24411.1 ms，
+> 0 fail）。此前记录的 **361/362** 红门禁已关闭：stabilized fixture 改用
+> grant callback marker 握手，并新增一个 late-result 仍判 timeout 的测试。
+> adoption 不启用并行派发、动态路由、profile 激活、准入、Windows parity
+> 或 daemon。下一步顺序明确为 **WorkerLease at spawn + owner-death
+> recovery → ProfileCatalog + 真实 binding activation → per-run Supervisor
+> ownership + short control locks → fixed hierarchical admission → Windows
+> Job Object → telemetry-backed dynamic scoring**。证据见
+> [evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md)。
 >
 > 当前已完成能力仍不包含 daemon/后台服务、跨主机回收、浏览器证据、SQLite、
 > 有界并行准入和多父 integration/merge queue；其中 **CLI + 模型路由、有界
@@ -228,6 +248,37 @@
     ancestry、artifact hash、fail-closed matrix）见
     [docs/evidence/PLAN_BACKED_CHAIN.md](evidence/PLAN_BACKED_CHAIN.md)；
     该文档记录的 readPaths caveat 已由下一条修复。
+- **Queue Manual Adoption v1（OperatorResolution）**
+  - `queue adopt <queue-id> --repo <path> --run <run-id> --artifact
+    <full-git-sha> --evidence <review-evidence.json> --approved-by <operator>
+    --reason <text> [--json]`；只接受 blocked item，且 `lastRunId` 必须等于
+    `--run`；
+  - 校验 frozen contracts（Plan-backed 还校验 approved Plan、
+    materialization 与 source manifest base）、source RunManifest 的
+    blocked/interrupted 状态及 repo/run/contracts 一致性；`--artifact`
+    必须是 40 或 64 位 full commit，且是 pinned base 的后代、当前 HEAD 的
+    祖先或相等；
+  - review evidence v1 是严格 allow-list：version 1、ISO `reviewedAt`、
+    1..64 条 command、至少一条 `exitCode: 0`、`outputSha256` 为 hex
+    SHA-256，文本 bounded 且拒绝明显凭据；evidence 文件上限 64 KiB，按
+    精确字节计算 SHA-256；
+  - 成功后 item 变 `completed`，保留 attempts/runIds，清除 pending
+    reason/failure；`resolution` 记录 source run/status、base、
+    contracts hash、reviewed commit、evidence path/hash、
+    approvedBy/approvedAt、reason；
+  - 重复 adopt 仅在同一 resolution identity 的全部字段 byte-equal 时幂等
+    （`approvedAt` 除外）；任何差异 fail closed；原 RunManifest 与 task
+    acceptance 均不改变，retry/cancel 仍拒绝 completed item；
+  - 首次成功 append 一条 bounded `queue.item.adopted` 到
+    `.cliyard/queue-events/adoptions.jsonl`；journal 写失败只影响观测，
+    `queue.json` 仍是 adoption authority；`queue status` 暴露
+    `completion: "adopted"` 与 bounded adoption events；
+  - Plan-backed dependant 的 materialization 记录 `upstreamAdoptedCommit`；
+    source manifest 未 completed 时以 reviewed commit 为 base，只有合法
+    completed `integrationHead` 包含 reviewed commit 时才使用该 head；
+  - 实测 focused 8/8（2539.7 ms）、full 371/371（24411.1 ms）、
+    `npm run build` exit 0；见
+    [evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md)。
 - **Chained Read Context v0（pinned base）**
   - `validateReadContexts` 现在接收 contracts 的精确 shared `baseCommit`，
     对每个非豁免显式 `readPath` 执行 `git cat-file -e <base>:<path>`；
@@ -423,6 +474,10 @@
   materialized artifact 无 GC；显式 `readPaths` 现在按 pinned contracts base
   验证（原 control-checkout caveat 已修复，见
   [docs/evidence/CHAINED_READ_CONTEXT.md](evidence/CHAINED_READ_CONTEXT.md)）；
+  manual adoption 只关闭一个已 blocked/interrupted 的 reviewed item，不自动
+  接受 task、不自动 retry、不启用并行；**WorkerLease at spawn /
+  owner-death recovery、ProfileCatalog 真实激活和 fixed admission 均未
+  实现**；
   没有 queue 级 `--dry-run`、
   活动 run 的 stop 命令、history/compaction/GC 或 contract 原地更新；
   start 阶段若在记录 run id 前崩溃，stale item 会 fail closed 为 blocked；
@@ -606,7 +661,28 @@ daemon 周期回收、Windows 进程身份、生产或跨仓库端口协调、�
 派发、自动 push/合入 main、provider 会话续跑、自动 worktree GC，以及本轮
 未实现的受监督前台长时控制器/daemon。
 
-## 2. 验证（2026-10-27，本工作树，macOS）
+## 2. 验证
+
+### 2026-10-28 Queue Manual Adoption v1 + deadline fixture stability
+
+集成 HEAD `ce1157a`（`manual-queue-adoption` `b7f7d9e` +
+`deadline-fixture-stability` `c57d591`，macOS，Node `v20.20.2`）：
+
+```text
+npm run build                                          → exit 0
+focused queue adoption                                 → 8/8 通过（2539.7 ms）
+focused deadline extension                             → 13/13 通过（23601.98 ms）
+npm test（完整套件）                                   → 371/371 通过（24411.1 ms，0 fail）
+```
+
+371 由本次集成的 8 个 adoption 测试、1 个新的 deadline late-result 负例和
+此前记录 362 项组成；此前 `361/362` 的 deadline fixture 红门禁已关闭。
+stabilized fixture 改用 grant callback marker 握手，不再用固定 sleep 与最终
+deadline 竞速，并断言 late result 仍然 timeout。以上为单次本机运行；不构成
+CI、长期 flake 率或跨主机结论。测试通过方式与证据边界见
+[evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md)。
+
+### 2026-10-27 历史基线（failure/cost 工作树）
 
 当前套件（包含 failure/cost、chained read context、Plan-backed chain、queue、
 Task Architect、attempt continuity / worker progress 与 failure drill 测试）：
@@ -779,14 +855,55 @@ Worker 验收演练，因此不把它们当作 drill、reaper 或跨主机证据
 已完成的 RuntimeManager v0、Orphan Reaper v0、hardening、failure drills v0、
 attempt continuity / worker progress / drill abnormal recovery v0、Task
 Architect v0、**Foreground Orchestration Queue v0**、
-**Plan-backed Chained Queue Base v0**、**Chained Read Context v0**、
-**ControlSnapshot/event/resource v0**，以及
-**Worker Failure Taxonomy / Cost Truth v0**
-不在下一迭代重复。
-下一具体步骤是 CLI + 模型执行组合路由和有界并行；
-controller/daemon 仍留到路由、准入和证据语义稳定之后。
+**Plan-backed Chained Queue Base v0**、**Queue Manual Adoption v1**、
+**Chained Read Context v0**、**ControlSnapshot/event/resource v0**，以及
+**Worker Failure Taxonomy / Cost Truth v0**，加上 deadline fixture
+stability，不在下一迭代重复。
+下一具体步骤严格按执行权威链，而不是同时铺开：
+**WorkerLease persisted at spawn + controller owner-death recovery →
+ProfileCatalog + 真实 binding activation → per-run Supervisor ownership +
+short control locks → fixed hierarchical admission → Windows Job Object →
+telemetry-backed dynamic scoring**。adoption 只关闭 blocked item，不启用并行、
+路由或准入；Windows 与动态评分不得越过前三项前置。
 
-1. **CLI + 模型执行组合路由与有界并行派发（P0，未实现）**
+1. **WorkerLease persisted at spawn + owner-death recovery（P0，下一步，未实现）**
+   - worker 身份一可用就持久化 lease，而不是等 `collect()` 返回才写；
+   - lease 记录 run/task/attempt/profile、controller pid/host/identity、
+     worker pid/pgid/osStartIdentity/captureMode、workspace、createdAt/
+     heartbeatAt、cleanup 状态；
+   - controller 被 SIGKILL 后，新 controller 读取 lease 并精确核对身份；
+     仅对仍存活且已证明归属的 group 执行终止，保留 worktree 与既有证据，
+     通过显式新 attempt 或 provider session continuation 继续；group 已消失
+     则检查 artifacts 并只验收可证明的部分；身份或清理不明确一律
+     `needs_human`，绝不按 pid/pgid/进程名猜测；
+   - 不承诺重接旧 CLI stdout；若 worker 必须比 controller 活得更久，需要
+     外部 guardian/OS service manager 与单独证据协议；
+   - 这是任何并行执行的安全前置；当前没有 durable WorkerLease，也没有
+     cliyard 自身 SIGKILL 后的 owner-death 恢复。
+2. **ProfileCatalog + 真实 binding activation（P0，WorkerLease 之后）**
+   - 建立 secret-free `ProfileCatalog`，持久化 `ExecutionProfile`、
+     endpoint/账号绑定和能力；
+   - 路由先做 deterministic hard filtering + operator preference；LLM 可以
+     建议但不能拥有持久化 RouteDecision；
+   - adapter 必须返回或持久化 binding activation 结果后才允许 dispatch；
+     未激活、未知容量或未知账户状态 fail closed；不继承公开并发数字；
+   - profile selection 不等于 endpoint/account 已激活，二者必须分开记录。
+3. **Per-run Supervisor ownership + short control-store locks（P0）**
+   - 替换 repo-global 长持有 Supervisor ownership 的模型；每个 run 独立
+     ownership，控制存储锁只覆盖短操作；
+   - 必须先做独立架构 spike，不能直接并发调用现有 `runQueue`；
+   - 明确多 `running` item 的独立 manifest/worktree/branch、blocked 隔离
+     与独立崩溃恢复。
+4. **Fixed hierarchical admission（P0，profile 激活与 per-run ownership 之后）**
+   - 准入是合取限制：queue-item slot + task slot + execution-profile slot +
+     runtime/device slot + port/browser/database lease + budget/host
+     capacity；
+   - 未知 profile capacity 先走单并发 probe；多个局部 max 不得相乘成无界
+     worker burst；
+   - 同时覆盖 queue item 并行与 Plan ready-wave 并行，不能只做其中一条轴；
+   - 先固定上限，之后才允许基于实测遥测的 ramp/backoff；动态评分必须晚于
+     本项和真实 binding activation。
+5. **CLI + 模型执行组合路由与有界并行派发（P0，前置完成后）**
    - 支持三类现实场景：多模型 + 多 CLI、单 CLI + 多模型、单模型 + 多 CLI；
    - 持久化 `ExecutionProfile`、endpoint/账号绑定、路由硬约束、评分依据、
      fallback，以及 `provider-reported`/`cli-estimated`/`usage-only`/
@@ -798,14 +915,14 @@ controller/daemon 仍留到路由、准入和证据语义稳定之后。
      slot 和端口 lease；依赖任务仍按上游 integrationHead 串行；
    - Plan 编译器的写路径规则改为“无传递依赖的重叠拒绝、有传递依赖的重叠
      按序串行”，从而支持同模块子任务既并行又安全串行；
-   - Supervisor 当前 repo-global lock / single active-run 模型必须先做独立
-     架构 spike，不能直接并发调用现有 `runQueue`。
-2. **Control API、可替换入口与外部 UI（P0/P1，未实现）**
+   - 只有 WorkerLease/owner-death、profile activation 与 fixed admission
+     完成后，才允许开启并行。
+6. **Control API、可替换入口与外部 UI（P0/P1，未实现）**
    - CLI 与版本化本地 Control API / event stream 是稳定入口；
    - DSH 只做薄 cockpit，优先注册 `dsh-better-sidebar` tab；
    - 后续最小自有 Web UI 复用同一 API，DSH 停止维护不影响控制面；
    - 不自研完整编辑器、终端、diff、Git 或聊天客户端。
-3. **受监督的前台长时控制器（路由/并行/证据之后，未实现）**
+7. **受监督的前台长时控制器（路由/并行/证据之后，未实现）**
    - controller 每轮从磁盘 rehydrate，不依赖 LLM 长上下文；空闲时释放
      queue lock，并等待新批准 item 或显式 retry；
    - failure taxonomy 已可用，但没有自动 retry；自动 retry 仍需显式
@@ -813,7 +930,7 @@ controller/daemon 仍留到路由、准入和证据语义稳定之后。
    - 先证明 foreground look-ahead scheduling、controller lock/heartbeat、
      clean shutdown 和 bounded soak，再做 daemon/launchd/systemd 决策；
    - 本轮不把它写成已完成能力，也不声称 24 小时无人值守。
-4. **显式批准的人类门禁保持不变**
+8. **显式批准的人类门禁保持不变**
    - Task Architect 只产出 human-reviewable Plan，不自动冻结契约、不自动
      派发、不 merge、不 push；
    - 路径仍是 review/edit Plan → 既有 plan compiler/freeze → 显式
@@ -821,7 +938,7 @@ controller/daemon 仍留到路由、准入和证据语义稳定之后。
    - queue 只接受显式加入的 frozen contracts 或显式加入的已批准 Plan；
      不自动批准、冻结或创建契约/Plan；
    - Task Architect 和 queue 都不是 contract/run authority。
-5. **queue v0 的顺序限制进入下一阶段改造**
+9. **queue v0 的顺序限制进入下一阶段改造**
    - 当前一次一个 item 是已完成 v0 的事实，不是最终产品约束；
    - 下一阶段新增有界并行准入，但不承诺无限并行；
    - **contract-backed** 依赖仍只决定派发/失败传播，不串联 integration
@@ -853,9 +970,13 @@ continuity / progress / drill 切片，以下仍是明确非目标，不得用�
 
 Attempt reuse 是 worktree 连续性，不是 provider 会话续跑；worker progress 是
 观察信息，不是验收依据；Task Architect 只产出 Plan；queue 是前台、显式批准、
-顺序队列，不是契约或运行权威，也不是 daemon。下一步先补执行路由和有界并行
-调度，再实现 EvidenceBundle 与 look-ahead controller；daemon 必须最后经过
-独立设计、soak 和验收，不能从当前单机顺序队列证据推导出来。
+顺序队列，不是契约或运行权威，也不是 daemon。manual adoption 是人工复核后的
+queue 终态，不是自动接受、自动重试或并行派发。下一步先补 **WorkerLease at
+spawn + owner-death recovery**，再做 **ProfileCatalog/真实 binding
+activation**、per-run ownership 和 **fixed hierarchical admission**；只有这些
+完成后才允许开启有界并行。Windows Job Object 与 telemetry-backed dynamic
+scoring 分别排在其后。EvidenceBundle 与 look-ahead controller 再后；daemon
+必须最后经过独立设计、soak 和验收，不能从当前单机顺序队列证据推导出来。
 
 ## 4. 完成标准
 
@@ -1045,6 +1166,40 @@ Chained Read Context v0（已完成）：
 63. [未完成] 在路由和并行语义稳定后，实现 DesignRevision/EvidenceBundle，
     再引入 look-ahead foreground controller、bounded soak 和 daemon 决策。
 
+执行权威链下一批：
+
+64. [已完成] Queue Manual Adoption v1：`queue adopt` 只接受 blocked item 与
+    精确 run binding；校验 frozen contracts/approved Plan、source
+    blocked/interrupted manifest 和 full-commit lineage；写入独立版本化
+    `OperatorResolution`，原 RunManifest 保持历史真相、task 不标记 accepted；
+    bounded secret-free evidence、identity 幂等、adoption event 与
+    `completion: "adopted"` status；Plan-backed dependant 记录
+    `upstreamAdoptedCommit`。focused 8/8（2539.7 ms）、full 371/371
+    （24411.1 ms）、build exit 0；见
+    [evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md)。
+65. [已完成] Deadline fixture stability：test-only marker 握手替代固定
+    sleep，拓宽 fixture 窗口，并新增 late-result 仍 timeout 的负例；
+    deadline-extension focused 13/13（23601.98 ms），完整套件 371/371；
+    生产 deadline 语义未改变。
+66. [未完成] 在任何并行执行之前持久化 WorkerLease at spawn，并定义
+    controller owner-death recovery：精确身份校验、仅终止已证明归属的
+    group、保留 worktree/证据、模糊身份 `needs_human`；不承诺重接旧
+    stdout，也不承诺 worker 跨 controller 存活。
+67. [未完成] 建立 secret-free ProfileCatalog 并证明真实 endpoint/account
+    binding activation；profile selection 不等于激活，未激活或未知容量
+    fail closed。
+68. [未完成] 将 repo-global 长持有 Supervisor ownership 改为 per-run
+    ownership + short control-store locks；先架构 spike，不能直接并发
+    调用现有 `runQueue`。
+69. [未完成] 建立 fixed hierarchical admission：queue item、task、profile、
+    runtime/device、port/browser/database lease 与 budget/host capacity
+    合取限制；未知 profile 先单并发 probe；同时覆盖 queue item 与 Plan
+    ready-wave 两条并行轴。
+70. [未完成] 在 66-69 之后增加 Windows Job Object
+    `ProcessOwnerProvider`；在那之前不得声称 Windows 进程树等价。
+71. [未完成] 在 67-69 和真实遥测之后增加 dynamic routing score 与自适应
+    ramp/backoff；`3` 只是 scheduler warm start，不是 provider permit。
+
 ## 5. 下一步顺序
 
 ```text
@@ -1096,13 +1251,21 @@ Chained Read Context v0（已完成）：
 17. [已完成] Worker failure taxonomy + cost truth v0：十类枚举、四态成本、
             RunManifest checkpoint、status/journal 观察面、无自动 retry；
             focused 50/50、full 290/290、build exit 0
-18. 下一步 P0：CLI + 模型路由、两层并行 Supervisor/queue spike
-19. 然后：共享 hierarchical admission broker → 固定上限并行 v0
-            （warm start 3）→ 实测自适应 ramp/backoff
-20. 再然后：Control API、DSH thin cockpit、最小自有 Web UI
-21. 最后：DesignRevision/EvidenceBundle、look-ahead controller、soak、
+18. [已完成] Queue Manual Adoption v1 + deadline fixture stability：
+            OperatorResolution/evidence/lineage/status/event；focused 8/8、
+            deadline focused 13/13、full 371/371、build exit 0
+19. 下一步 P0：WorkerLease persisted at spawn + controller owner-death
+            recovery（精确身份、保留证据、模糊身份 needs_human）
+20. 然后：secret-free ProfileCatalog + 真实 endpoint/account binding
+            activation → per-run Supervisor ownership + short control locks
+21. 再然后：fixed hierarchical admission → 固定上限有界并行 v0
+            （warm start 3 只是调度初值）
+22. 之后：Windows Job Object ProcessOwnerProvider（不得提前）
+23. 再后：基于实测遥测的 adaptive ramp/backoff（不得早于前两项）
+24. 接着：Control API、DSH thin cockpit、最小自有 Web UI
+25. 最后：DesignRevision/EvidenceBundle、look-ahead controller、soak、
             daemon 决策
-22. 不重复已完成切片；不新增 daemon、跨主机、SQLite、无限并行、自动合入
+26. 不重复已完成切片；不新增 daemon、跨主机、SQLite、无限并行、自动合入
     main、provider 会话续跑、自动契约冻结或 24 小时声明
 ```
 
@@ -1110,16 +1273,22 @@ Chained Read Context v0（已完成）：
 
 Supervisor v0（前台、原子 JSON RunManifest、进程级 SIGKILL 恢复）已完成，
 其操作语义与自举手册见 [docs/SUPERVISOR_V0.md](SUPERVISOR_V0.md)。当前完整套件
-包含 failure/cost、chained read context、Plan-backed chain、queue、Task
-Architect、supervisor、attempt continuity/progress、ControlSnapshot 与
-runtime/drill 测试（290/290 通过）。本轮没有引入 daemon 或 SQLite，也没有把
-supervisor 或 queue 的后台化列入计划。attempt reuse 是 worktree 连续性，
-worker progress 是观察信息；failure/cost 也是观察信息，不授权自动 retry；
-Task Architect 只产出 Plan；queue 消费显式加入的 frozen contracts 或
-已批准 Plan，但不生成、批准或冻结它们；三者都不改变验收权威。RuntimeManager、
-Orphan Reaper、hardening、failure drills、attempt continuity/progress/异常
-drill 回收、Task Architect、Foreground Orchestration Queue、
-Plan-backed Chained Queue Base、Chained Read Context、ControlSnapshot/event
-与 Worker Failure Taxonomy/Cost Truth 均已收口；下一阶段先收口 CLI + 模型
-ExecutionProfile、并行 Supervisor/queue admission 和可替换 Control API；
-DesignRevision/EvidenceBundle 之后才引入 look-ahead controller 与 daemon 决策。
+包含 failure/cost、chained read context、Plan-backed chain、queue manual
+adoption、queue、Task Architect、supervisor、attempt
+continuity/progress、ControlSnapshot、deadline extension 与
+runtime/drill 测试（**371/371** 通过，2026-10-28，HEAD `ce1157a`）。
+本轮没有引入 daemon 或 SQLite，也没有把 supervisor 或 queue 的后台化列入
+计划。attempt reuse 是 worktree 连续性，worker progress 是观察信息；
+failure/cost 也是观察信息，不授权自动 retry；Task Architect 只产出 Plan；
+queue 消费显式加入的 frozen contracts 或已批准 Plan，但不生成、批准或冻结
+它们；三个组件都不改变验收权威。manual adoption 记录人工复核后的
+`OperatorResolution`，原 blocked/interrupted RunManifest 保持历史真相，task
+不标记 accepted。RuntimeManager、Orphan Reaper、hardening、failure drills、
+attempt continuity/progress/异常 drill 回收、Task Architect、Foreground
+Orchestration Queue、Plan-backed Chained Queue Base、Queue Manual Adoption
+v1、Chained Read Context、ControlSnapshot/event 与 Worker Failure
+Taxonomy/Cost Truth 均已收口；下一阶段严格先做 **WorkerLease at spawn +
+owner-death recovery**，再做 **ProfileCatalog/真实 binding activation**、
+per-run ownership 和 **fixed hierarchical admission**，然后才是有界并行、
+Windows Job Object 和 dynamic scoring；Control API 与
+DesignRevision/EvidenceBundle 再后，look-ahead controller 与 daemon 决策最后。
