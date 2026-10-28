@@ -11,20 +11,25 @@
  * Descendants can escape that group by creating their own session/group
  * (`setsid`, a detached test runner). While the worker leader is alive, a
  * low-frequency bounded sampler records the recursively related descendants
- * from process-table snapshots. At cleanup a fresh snapshot is merged, and each
- * observed external-group descendant is revalidated by exact
- * `(pid, pgid, lstart)` and signalled by exact pid only.
+ * from process-table snapshots. An external process group is represented once,
+ * by its exact leader identity (`pid === pgid`), so a legitimate test runner
+ * with hundreds of members stays one bounded unit. Descendants without an
+ * observed group leader stay exact-pid fallback candidates.
  *
  * Safety rules:
  * - A group signal requires `pgid === worker pid` (the dedicated group created
  *   by `setsid`), a re-listed membership that still belongs to it, and proof
  *   that the group is not cliyard's own group. Anything less fails closed.
+ * - A nested external-group signal additionally requires a persisted exact
+ *   leader identity, a fresh `capture(leader.pid)` match, and a fresh
+ *   membership listing whose leader row still matches. The group is signalled
+ *   as one unit; its members are never individual signal authority.
  * - Descendant snapshots are rooted at the worker leader and are used only
  *   when its exact identity still matches; a reused pid never contributes
  *   descendants.
- * - An external descendant is signalled only after a fresh identity re-read
- *   matches pid, pgid and lstart, and only when it is neither in the managed
- *   group nor in cliyard's group.
+ * - An ungrouped external descendant is signalled only after a fresh identity
+ *   re-read matches pid, pgid and lstart, and only when it is neither in the
+ *   managed group nor in cliyard's group.
  * - No `pkill`, process-name matching or workspace-wide scan is ever used.
  * - The record never carries the command line, prompt, environment or an
  *   unbounded process list.
@@ -68,7 +73,11 @@ export const MAX_PROCESS_TREE_RESIDUAL_COUNT = 100_000;
 export const MAX_PERSISTED_EXTERNAL_DESCENDANTS = 32;
 /** Maximum external process-group ids persisted in one record. */
 export const MAX_PERSISTED_EXTERNAL_GROUPS = 16;
-/** Maximum external descendant pids observed per worker (evidence count). */
+/** Maximum owned nested process groups represented in one registry. */
+export const MAX_NESTED_GROUPS = MAX_PERSISTED_EXTERNAL_GROUPS;
+/** Upper bound for an observed nested group's member count (evidence only). */
+export const MAX_NESTED_GROUP_MEMBERS = 100_000;
+/** Maximum ungrouped external descendant pids observed per worker. */
 export const MAX_SAMPLED_DESCENDANTS = 256;
 /** Maximum descendant identities tracked in memory per worker. */
 export const MAX_TRACKED_DESCENDANTS = 64;
@@ -120,15 +129,22 @@ export type WorkerCaptureSupport =
 /**
  * - `process-group`: the dedicated managed worker group.
  * - `pid`: the exact direct worker child (Windows/exact-child fallback).
- * - `descendant-pid`: one revalidated external-group descendant pid.
+ * - `descendant-pid`: one revalidated ungrouped external descendant pid.
+ * - `nested-process-group`: one guarded external group, by negative pgid.
  */
-export type WorkerProcessSignalScope = "process-group" | "pid" | "descendant-pid";
+export type WorkerProcessSignalScope =
+  | "process-group"
+  | "pid"
+  | "descendant-pid"
+  | "nested-process-group";
 
 export interface WorkerProcessSignalRecord {
   signal: "SIGTERM" | "SIGKILL";
   scope: WorkerProcessSignalScope;
   /** Present only for `descendant-pid`: the exact signalled pid. */
   pid?: number;
+  /** Present only for `nested-process-group`: the signalled group id. */
+  pgid?: number;
   at: string;
   result: "sent" | "failed";
   detail?: string;
@@ -143,13 +159,32 @@ export interface WorkerProcessSignalRecord {
 export type WorkerNestedCleanupState = "none" | "clean" | "terminated" | "failed";
 
 /**
+ * One external process group whose leader row was observed outside the managed
+ * worker group. `leader.pid === leader.pgid` by construction; the entry is not
+ * signal authority until cleanup re-proves that exact identity plus fresh
+ * membership.
+ */
+export interface WorkerNestedGroup {
+  pgid: number;
+  leader: RuntimeProcessIdentity;
+  /** Highest member count observed for the group (leader included). */
+  observedMemberCount: number;
+  lastObservedAt: string;
+}
+
+/**
  * Bounded, credential-free snapshot of descendants that left the managed
  * group. It is evidence only: no snapshot ever authorizes a signal by itself.
  *
- * `observedCount` is the true observed external-descendant count and may be
- * larger than the persisted `identities` list. `truncated` is `true` once the
- * bound is exceeded or a snapshot could not prove a complete relationship
- * graph; a truncated snapshot must never authorize recovery.
+ * `observedCount` is the true observed *ungrouped* descendant count and may be
+ * larger than the persisted `identities` list. Members of an owned group are
+ * represented by `groups`, never by individual fallback identities. `truncated`
+ * is `true` once a bound is exceeded or a snapshot could not prove a complete
+ * relationship graph; a truncated snapshot must never authorize recovery.
+ *
+ * `groups` is optional so reviewed-draft and legacy v1 evidence keeps parsing
+ * unchanged. A group with a member count above the persistence bound is still
+ * one bounded unit because cleanup re-lists fresh membership from the OS.
  */
 export interface WorkerNestedProcesses {
   version: 1;
@@ -157,18 +192,25 @@ export interface WorkerNestedProcesses {
   observedCount: number;
   truncated: boolean;
   lastObservedAt: string;
+  groups?: WorkerNestedGroup[];
   identities: RuntimeProcessIdentity[];
 }
 
 /** Bounded outcome of cleaning descendants that left the managed group. */
 export interface WorkerNestedCleanupEvidence {
   state: WorkerNestedCleanupState;
-  /** External descendant pids observed by the sampler/cleanup snapshot. */
+  /** Ungrouped external descendant pids observed by the sampler/cleanup snapshot. */
   observedDescendants: number;
-  /** Exact descendant pids that received at least one signal. */
+  /** Exact ungrouped descendant pids that received at least one signal. */
   signalledDescendants: number;
-  /** External descendant pids that could not be proven gone. */
+  /** Ungrouped external descendant pids that could not be proven gone. */
   residualDescendants: number;
+  /** Exact-led external groups considered during cleanup. */
+  observedGroups?: number;
+  /** External groups that received at least one negative-pgid signal. */
+  signalledGroups?: number;
+  /** External groups that could not be proven gone. */
+  residualGroups?: number;
   detail?: string;
 }
 
@@ -196,9 +238,9 @@ export interface WorkerProcessRecord {
   residualMembers: RuntimeProcessIdentity[];
   /** Actual residual member count observed (may exceed the bounded list). */
   residualCount: number;
-  /** Bounded exact identities of descendants observed outside the group. */
+  /** Bounded ungrouped exact identities observed outside the group. */
   observedExternalDescendants?: RuntimeProcessIdentity[];
-  /** Actual external descendant pid count (may exceed the bounded list). */
+  /** Actual ungrouped external descendant pid count (may exceed the list). */
   observedExternalDescendantCount?: number;
   /** Bounded external process-group ids observed for those descendants. */
   observedExternalGroups?: number[];
@@ -284,7 +326,7 @@ export interface ManagedWorkerProcess {
    * it no durable nested evidence can be observed.
    */
   observeExternalDescendants?(
-    listener: (snapshot: WorkerNestedProcesses) => void,
+    listener: (snapshot: WorkerNestedProcesses) => void | Promise<void>,
   ): () => void;
 }
 
@@ -310,6 +352,14 @@ interface DescendantCheck {
 interface GroupCleanupOutcome {
   state: "clean" | "terminated" | "failed";
   residual: RuntimeProcessIdentity[];
+  failure?: string;
+}
+
+/** Bounded result of cleaning every exact-led external group. */
+interface NestedGroupCleanupOutcome {
+  observed: number;
+  signalled: number;
+  residual: number;
   failure?: string;
 }
 
@@ -476,10 +526,13 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
   private readonly trackedDescendants = new Map<number, RuntimeProcessIdentity>();
   private readonly observedExternalPids = new Set<number>();
   private readonly observedExternal = new Map<number, RuntimeProcessIdentity>();
+  private readonly observedGroups = new Map<number, WorkerNestedGroup>();
   private readonly observedExternalGroupIds = new Set<number>();
   private readonly signalledDescendantPids = new Set<number>();
+  private readonly signalledGroupIds = new Set<number>();
+  private readonly residualGroupIds = new Set<number>();
   private readonly nestedSnapshotListeners = new Set<
-    (snapshot: WorkerNestedProcesses) => void
+    (snapshot: WorkerNestedProcesses) => void | Promise<void>
   >();
   private nestedSnapshot: WorkerNestedProcesses | undefined;
   private nestedSnapshotKey: string | undefined;
@@ -575,11 +628,7 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     }
     this.nestedSnapshotListeners.add(listener);
     if (this.nestedSnapshot) {
-      try {
-        listener(copyNestedProcesses(this.nestedSnapshot));
-      } catch {
-        // A subscriber failure must never break cleanup or the sampler.
-      }
+      void this.notifyNestedListener(listener, this.nestedSnapshot);
     }
     return () => {
       this.nestedSnapshotListeners.delete(listener);
@@ -663,7 +712,7 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     }
     if (result === "incomplete") {
       this.noteSamplerError(
-        `descendant snapshot exceeds ${MAX_SAMPLED_DESCENDANTS} related processes`,
+        "descendant snapshot exceeded a bounded nested registry limit",
       );
     }
   }
@@ -715,38 +764,160 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
       return "invalid-root";
     }
 
+    // The walk is bounded by the bounded process-table snapshot itself, not by
+    // an arbitrary descendant-pid cap: a legitimate nested test runner may own
+    // hundreds of members and still be one bounded group unit.
+    const external: ProcessTableEntry[] = [];
     const queue = [rootPid];
     const seen = new Set<number>([rootPid]);
-    let visited = 0;
     while (queue.length > 0) {
       const parent = queue.shift() as number;
       for (const child of children.get(parent) ?? []) {
         if (seen.has(child.pid)) continue;
         seen.add(child.pid);
-        visited += 1;
-        if (visited > MAX_SAMPLED_DESCENDANTS) {
-          // The relationship graph is incomplete. Persisted evidence is
-          // marked truncated and must never authorize recovery.
-          this.nestedIncomplete = true;
-          this.publishNestedSnapshot();
-          return "incomplete";
-        }
-        this.noteDescendant(child, managedPgid);
         queue.push(child.pid);
+        if (
+          !isProcessPid(child.pid) ||
+          !isProcessPid(child.pgid) ||
+          child.pid <= 1 ||
+          child.pid === process.pid ||
+          child.pgid === managedPgid
+        ) {
+          continue;
+        }
+        external.push(child);
       }
     }
+
+    const wasIncomplete = this.nestedIncomplete;
+    const observedAt = new Date().toISOString();
+
+    // First pass: exact group leaders. A leader is authoritative only when the
+    // observed row itself proves `pid === pgid`; a reused group id keeps the
+    // first exact leader and marks the registry truncated instead of silently
+    // promoting a new process to ownership.
+    for (const leader of external) {
+      if (leader.pid !== leader.pgid || !isProcessIdentity(leader)) continue;
+      const existing = this.observedGroups.get(leader.pgid);
+      if (existing) {
+        if (compareProcessIdentity(existing.leader, leader) !== "match") {
+          this.nestedIncomplete = true;
+        } else {
+          existing.lastObservedAt = observedAt;
+        }
+        continue;
+      }
+      if (this.observedGroups.size >= MAX_NESTED_GROUPS) {
+        this.nestedIncomplete = true;
+        continue;
+      }
+      this.observedGroups.set(leader.pgid, {
+        pgid: leader.pgid,
+        leader: copyIdentity(leader),
+        observedMemberCount: 1,
+        lastObservedAt: observedAt,
+      });
+    }
+
+    // Bounded observed-group ids, including groups whose leader row was not
+    // observed. Exceeding the group bound fails closed.
+    for (const entry of external) {
+      if (this.observedExternalGroupIds.has(entry.pgid)) continue;
+      if (this.observedExternalGroupIds.size >= MAX_PERSISTED_EXTERNAL_GROUPS) {
+        this.nestedIncomplete = true;
+        continue;
+      }
+      this.observedExternalGroupIds.add(entry.pgid);
+    }
+
+    // Members of a known group never consume fallback slots. Counts are
+    // evidence only; cleanup re-lists fresh OS membership before any signal.
+    const counts = new Map<number, number>();
+    for (const entry of external) {
+      if (!this.observedGroups.has(entry.pgid)) continue;
+      counts.set(entry.pgid, (counts.get(entry.pgid) ?? 0) + 1);
+    }
+    for (const [pgid, count] of counts) {
+      const group = this.observedGroups.get(pgid);
+      if (!group) continue;
+      group.observedMemberCount = Math.max(
+        group.observedMemberCount,
+        Math.min(count, MAX_NESTED_GROUP_MEMBERS),
+      );
+    }
+
+    // A pid first observed as ungrouped may later belong to a proven group.
+    // Group membership always wins over stale exact-pid fallback evidence.
+    for (const [pid, identity] of [...this.observedExternal]) {
+      if (!this.observedGroups.has(identity.pgid)) continue;
+      this.observedExternal.delete(pid);
+      this.observedExternalPids.delete(pid);
+      this.trackedDescendants.delete(pid);
+    }
+
+    for (const entry of external) {
+      if (this.observedGroups.has(entry.pgid)) continue;
+      this.noteUngroupedDescendant(entry);
+    }
     this.publishNestedSnapshot();
-    return "ok";
+    return this.nestedIncomplete && !wasIncomplete ? "incomplete" : "ok";
+  }
+
+  /**
+   * Record one external descendant that has no proven group leader as an
+   * exact-pid fallback candidate.
+   */
+  private noteUngroupedDescendant(entry: ProcessTableEntry): void {
+    if (
+      !isProcessPid(entry.pid) ||
+      !isProcessPid(entry.pgid) ||
+      entry.pid <= 1 ||
+      entry.pid === process.pid
+    ) {
+      return;
+    }
+    if (!this.observedExternalPids.has(entry.pid)) {
+      if (this.observedExternalPids.size >= MAX_SAMPLED_DESCENDANTS) {
+        this.nestedIncomplete = true;
+        return;
+      }
+      this.observedExternalPids.add(entry.pid);
+    }
+    // Keep the in-memory candidate set at the sampled-pid bound, not the
+    // smaller persistence bound: every observed external pid must reach
+    // `prepareNested`, which fails closed above the 32-target signal bound.
+    if (
+      this.observedExternal.has(entry.pid) ||
+      this.observedExternal.size < MAX_SAMPLED_DESCENDANTS
+    ) {
+      this.observedExternal.set(entry.pid, copyIdentity(entry));
+    }
+    if (
+      this.trackedDescendants.has(entry.pid) ||
+      this.trackedDescendants.size < MAX_TRACKED_DESCENDANTS
+    ) {
+      this.trackedDescendants.set(entry.pid, copyIdentity(entry));
+    }
   }
 
   /**
    * Build the bounded snapshot from tracked external observations. Returns
-   * `undefined` until something external was observed or a walk was
-   * incomplete (an empty snapshot is not evidence).
+   * `undefined` until something external was observed or a bound was exceeded
+   * (an empty snapshot is not evidence).
    */
   private buildNestedSnapshot(): WorkerNestedProcesses | undefined {
     const observedCount = this.observedExternalPids.size;
-    if (observedCount === 0 && !this.nestedIncomplete) return undefined;
+    const groups = [...this.observedGroups.values()]
+      .sort((first, second) => first.pgid - second.pgid)
+      .slice(0, MAX_NESTED_GROUPS)
+      .map(copyNestedGroup);
+    if (
+      observedCount === 0 &&
+      groups.length === 0 &&
+      !this.nestedIncomplete
+    ) {
+      return undefined;
+    }
     return {
       version: 1,
       host: this.manager.inspector.host,
@@ -755,7 +926,9 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
         this.nestedIncomplete ||
         observedCount > MAX_PERSISTED_EXTERNAL_DESCENDANTS,
       lastObservedAt: this.nestedObservedAt ?? this.startedAt,
+      groups,
       identities: [...this.observedExternal.values()]
+        .filter((identity) => !this.observedGroups.has(identity.pgid))
         .sort((first, second) => first.pid - second.pid)
         .slice(0, MAX_PERSISTED_EXTERNAL_DESCENDANTS)
         .map(copyIdentity),
@@ -766,64 +939,67 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
   private publishNestedSnapshot(): void {
     const candidate = this.buildNestedSnapshot();
     if (!candidate) return;
-    const key = nestedSnapshotKey(candidate);
-    if (key === this.nestedSnapshotKey) return;
+    if (nestedSnapshotKey(candidate) === this.nestedSnapshotKey) return;
+    const snapshot = this.snapshotNow();
+    if (!snapshot) return;
+    for (const listener of [...this.nestedSnapshotListeners]) {
+      void this.notifyNestedListener(listener, snapshot);
+    }
+  }
+
+  /** Replace the current snapshot and stamp its observation time. */
+  private snapshotNow(): WorkerNestedProcesses | undefined {
+    const candidate = this.buildNestedSnapshot();
+    if (!candidate) return undefined;
     const observedAt = new Date().toISOString();
     const snapshot: WorkerNestedProcesses = {
       ...candidate,
       lastObservedAt: observedAt,
     };
     this.nestedObservedAt = observedAt;
-    this.nestedSnapshotKey = key;
+    this.nestedSnapshotKey = nestedSnapshotKey(snapshot);
     this.nestedSnapshot = snapshot;
-    for (const listener of [...this.nestedSnapshotListeners]) {
-      try {
-        listener(copyNestedProcesses(snapshot));
-      } catch {
-        // A subscriber failure must never break cleanup or the sampler.
-      }
+    return snapshot;
+  }
+
+  private async notifyNestedListener(
+    listener: (snapshot: WorkerNestedProcesses) => void | Promise<void>,
+    snapshot: WorkerNestedProcesses,
+  ): Promise<void> {
+    try {
+      await listener(copyNestedProcesses(snapshot));
+    } catch {
+      // A subscriber failure must never break cleanup or the sampler.
     }
   }
 
-  private noteDescendant(
-    entry: ProcessTableEntry,
-    managedPgid: number,
-  ): void {
-    // A row with pgid 0 is a kernel thread (Linux). It cannot be a user
-    // descendant and cannot carry a revalidatable identity, so it never
-    // enters the tracked/signal candidate set.
-    if (!isProcessPid(entry.pgid)) return;
-    if (isProcessPid(entry.pid) && entry.pid > 1 && entry.pid !== process.pid) {
-      if (
-        this.trackedDescendants.has(entry.pid) ||
-        this.trackedDescendants.size < MAX_TRACKED_DESCENDANTS
-      ) {
-        this.trackedDescendants.set(entry.pid, copyIdentity(entry));
-      }
+  /**
+   * Re-notify observers with the freshest registry and await their durable
+   * persistence before any nested signal. Sampler emissions are fire-and-
+   * forget; this is the only awaited path.
+   */
+  private async flushNestedSnapshot(): Promise<
+    { ok: true } | { ok: false; failure: string }
+  > {
+    const snapshot = this.snapshotNow();
+    if (!snapshot) return { ok: true };
+    const failures: string[] = [];
+    await Promise.all(
+      [...this.nestedSnapshotListeners].map(async (listener) => {
+        try {
+          await listener(copyNestedProcesses(snapshot));
+        } catch (error) {
+          failures.push(errorText(error));
+        }
+      }),
+    );
+    if (failures.length > 0) {
+      return {
+        ok: false,
+        failure: `nested evidence could not be persisted: ${failures[0]}`,
+      };
     }
-    if (entry.pgid === managedPgid) return;
-    if (!isProcessPid(entry.pid) || entry.pid <= 1 || entry.pid === process.pid) {
-      return;
-    }
-    if (this.observedExternalPids.size < MAX_SAMPLED_DESCENDANTS) {
-      this.observedExternalPids.add(entry.pid);
-    }
-    // Keep the in-memory candidate set at the sampled-pid bound, not the
-    // smaller persistence bound: every observed external pid must reach
-    // `prepareNested`, which fails closed when more than the 32-target signal
-    // bound exist. Persistence is sliced separately in `build`.
-    if (
-      this.observedExternal.has(entry.pid) ||
-      this.observedExternal.size < MAX_SAMPLED_DESCENDANTS
-    ) {
-      this.observedExternal.set(entry.pid, copyIdentity(entry));
-    }
-    if (
-      this.observedExternalGroupIds.has(entry.pgid) ||
-      this.observedExternalGroupIds.size < MAX_PERSISTED_EXTERNAL_GROUPS
-    ) {
-      this.observedExternalGroupIds.add(entry.pgid);
-    }
+    return { ok: true };
   }
 
   /**
@@ -853,8 +1029,8 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
         return {
           refreshed: true,
           failure:
-            `descendant snapshot exceeds ${MAX_SAMPLED_DESCENDANTS} related ` +
-            "processes; refusing an incomplete nested cleanup",
+            "descendant snapshot exceeded a bounded nested registry limit; " +
+            "refusing an incomplete nested cleanup",
         };
       }
       // The snapshot did not contain the leader. Distinguish "already exited"
@@ -907,6 +1083,9 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     const candidates: RuntimeProcessIdentity[] = [];
     for (const identity of union.values()) {
       if (identity.pgid === managedPgid) continue;
+      // Members (and the leader) of a proven external group are one bounded
+      // group unit; they are never individual exact-pid targets.
+      if (this.observedGroups.has(identity.pgid)) continue;
       if (identity.pid === process.pid || identity.pid <= 1) continue;
       candidates.push(copyIdentity(identity));
     }
@@ -1079,6 +1258,368 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     }
   }
 
+  /**
+   * Clean every exact-led external group as one guarded unit. Groups run
+   * concurrently so the bounded term/kill grace applies once, not once per
+   * group. Any group that cannot be proven gone stays residual.
+   */
+  private async cleanNestedGroups(
+    managedPgid: number,
+    skipReason: string | undefined,
+  ): Promise<NestedGroupCleanupOutcome> {
+    const groups = [...this.observedGroups.values()].sort(
+      (first, second) => first.pgid - second.pgid,
+    );
+    if (groups.length === 0) {
+      return { observed: 0, signalled: 0, residual: 0 };
+    }
+    if (skipReason !== undefined) {
+      for (const group of groups) this.residualGroupIds.add(group.pgid);
+      return {
+        observed: groups.length,
+        signalled: 0,
+        residual: groups.length,
+        failure: skipReason,
+      };
+    }
+    let ownGroupId: number | undefined;
+    try {
+      ownGroupId = await this.manager.ownGroupId();
+    } catch {
+      ownGroupId = undefined;
+    }
+    const results = await Promise.all(
+      groups.map((group) =>
+        this.cleanNestedGroup(group, managedPgid, ownGroupId),
+      ),
+    );
+    let signalled = 0;
+    let residual = 0;
+    let failure: string | undefined;
+    results.forEach((result, index) => {
+      if (result.signalled) signalled += 1;
+      if (!result.gone) {
+        residual += 1;
+        const group = groups[index];
+        if (group) this.residualGroupIds.add(group.pgid);
+      }
+      failure ??= result.failure;
+    });
+    return {
+      observed: groups.length,
+      signalled,
+      residual,
+      ...(failure !== undefined ? { failure } : {}),
+    };
+  }
+
+  private async cleanNestedGroup(
+    group: WorkerNestedGroup,
+    managedPgid: number,
+    ownGroupId: number | undefined,
+  ): Promise<{ gone: boolean; signalled: boolean; failure?: string }> {
+    const pgid = group.pgid;
+    let leader: RuntimeProcessIdentity | undefined;
+    try {
+      leader = await this.manager.inspector.capture(group.leader.pid);
+    } catch (error) {
+      return {
+        gone: false,
+        signalled: false,
+        failure:
+          `cannot revalidate external group ${pgid} leader: ${errorText(error)}`,
+      };
+    }
+    if (!leader) {
+      // An absent leader never authorizes a group signal. Verify whether any
+      // exact member remains so the outcome is evidence, not a guess.
+      try {
+        const members = await this.manager.listMembers(pgid);
+        if (members.length === 0) return { gone: true, signalled: false };
+        return {
+          gone: false,
+          signalled: false,
+          failure:
+            `external group ${pgid} leader is absent while ` +
+            `${members.length} member(s) remain`,
+        };
+      } catch (error) {
+        return {
+          gone: false,
+          signalled: false,
+          failure:
+            `external group ${pgid} could not be inspected after its leader ` +
+            `disappeared: ${errorText(error)}`,
+        };
+      }
+    }
+    if (
+      compareProcessIdentity(group.leader, leader) !== "match" ||
+      leader.pid !== leader.pgid
+    ) {
+      return {
+        gone: false,
+        signalled: false,
+        failure:
+          `external group ${pgid} leader identity changed or was reused; ` +
+          "refusing a group signal",
+      };
+    }
+
+    let members: ProcessGroupMember[];
+    try {
+      members = await this.manager.listMembers(pgid);
+    } catch (error) {
+      return {
+        gone: false,
+        signalled: false,
+        failure:
+          `cannot inspect external group ${pgid}: ${errorText(error)}`,
+      };
+    }
+    if (members.length === 0) return { gone: true, signalled: false };
+
+    const guard = await this.nestedGroupSignalAllowed(
+      group.leader,
+      leader,
+      members,
+      managedPgid,
+      ownGroupId,
+    );
+    if (!guard.ok) {
+      return { gone: false, signalled: false, failure: guard.reason };
+    }
+
+    const term = this.signalNestedGroup(pgid, "SIGTERM");
+    if (term === "error") {
+      return {
+        gone: false,
+        signalled: false,
+        failure: `SIGTERM to external group ${pgid} failed`,
+      };
+    }
+    if (term === "gone") {
+      try {
+        members = await this.manager.listMembers(pgid);
+      } catch (error) {
+        return {
+          gone: false,
+          signalled: false,
+          failure:
+            `external group ${pgid} disappeared and could not be ` +
+            `re-inspected: ${errorText(error)}`,
+        };
+      }
+      if (members.length === 0) return { gone: true, signalled: false };
+      return {
+        gone: false,
+        signalled: false,
+        failure:
+          `external group ${pgid} disappeared while member(s) remain`,
+      };
+    }
+    try {
+      members = await this.waitForEmpty(pgid, this.manager.termGraceMs);
+    } catch (error) {
+      return {
+        gone: false,
+        signalled: true,
+        failure:
+          `external group ${pgid} became uninspectable after SIGTERM: ` +
+          errorText(error),
+      };
+    }
+    if (members.length === 0) return { gone: true, signalled: true };
+
+    // Escalation needs the same fresh exact leader guard, not the evidence
+    // that authorized SIGTERM.
+    let revalidated: RuntimeProcessIdentity | undefined;
+    try {
+      revalidated = await this.manager.inspector.capture(group.leader.pid);
+    } catch (error) {
+      return {
+        gone: false,
+        signalled: true,
+        failure:
+          `cannot revalidate external group ${pgid} leader after SIGTERM: ` +
+          errorText(error),
+      };
+    }
+    if (
+      !revalidated ||
+      compareProcessIdentity(group.leader, revalidated) !== "match"
+    ) {
+      return {
+        gone: false,
+        signalled: true,
+        failure:
+          `external group ${pgid} leader identity is no longer exact after ` +
+          "SIGTERM; refusing SIGKILL",
+      };
+    }
+    const killGuard = await this.nestedGroupSignalAllowed(
+      group.leader,
+      revalidated,
+      members,
+      managedPgid,
+      ownGroupId,
+    );
+    if (!killGuard.ok) {
+      return { gone: false, signalled: true, failure: killGuard.reason };
+    }
+    const kill = this.signalNestedGroup(pgid, "SIGKILL");
+    if (kill === "error") {
+      return {
+        gone: false,
+        signalled: true,
+        failure: `SIGKILL to external group ${pgid} failed`,
+      };
+    }
+    if (kill === "gone") {
+      try {
+        members = await this.manager.listMembers(pgid);
+      } catch (error) {
+        return {
+          gone: false,
+          signalled: true,
+          failure:
+            `external group ${pgid} disappeared and could not be ` +
+            `re-inspected after SIGKILL: ${errorText(error)}`,
+        };
+      }
+      if (members.length === 0) return { gone: true, signalled: true };
+      return {
+        gone: false,
+        signalled: true,
+        failure:
+          `external group ${pgid} disappeared while member(s) remain`,
+      };
+    }
+    try {
+      members = await this.waitForEmpty(pgid, this.manager.killGraceMs);
+    } catch (error) {
+      return {
+        gone: false,
+        signalled: true,
+        failure:
+          `external group ${pgid} became uninspectable after SIGKILL: ` +
+          errorText(error),
+      };
+    }
+    if (members.length === 0) return { gone: true, signalled: true };
+    return {
+      gone: false,
+      signalled: true,
+      failure:
+        `external group ${pgid} still has ${members.length} member(s) ` +
+        "after SIGKILL",
+    };
+  }
+
+  /**
+   * A negative-pgid signal is allowed only when the persisted leader, a fresh
+   * capture and a fresh membership listing all prove the same exact group,
+   * and the group is provably not cliyard's or the recovery process's.
+   */
+  private async nestedGroupSignalAllowed(
+    expected: RuntimeProcessIdentity,
+    observed: RuntimeProcessIdentity,
+    members: readonly ProcessGroupMember[],
+    managedPgid: number,
+    ownGroupId: number | undefined,
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const pgid = expected.pgid;
+    if (
+      !isProcessPid(pgid) ||
+      pgid <= 1 ||
+      expected.pid !== pgid ||
+      observed.pid !== pgid ||
+      observed.pgid !== pgid
+    ) {
+      return {
+        ok: false,
+        reason: "refusing an invalid or non-exact nested group leader",
+      };
+    }
+    if (pgid === process.pid) {
+      return { ok: false, reason: "refusing cliyard's own process id as a group" };
+    }
+    if (pgid === managedPgid) {
+      return {
+        ok: false,
+        reason: "refusing the managed worker group as a nested group",
+      };
+    }
+    if (!isProcessPid(ownGroupId) || ownGroupId === pgid) {
+      return {
+        ok: false,
+        reason:
+          "cannot prove the nested group differs from cliyard's process group",
+      };
+    }
+    if (compareProcessIdentity(expected, observed) !== "match") {
+      return {
+        ok: false,
+        reason: "the nested group leader identity no longer matches",
+      };
+    }
+    if (members.length === 0) {
+      return { ok: false, reason: "nested group membership disappeared" };
+    }
+    if (members.some((member) => member.pgid !== pgid)) {
+      return {
+        ok: false,
+        reason: "nested group membership is inconsistent with the group id",
+      };
+    }
+    if (members.some((member) => member.pid === process.pid || member.pid <= 1)) {
+      return {
+        ok: false,
+        reason: "refusing a nested group that contains cliyard itself",
+      };
+    }
+    const leader = members.find((member) => member.pid === pgid);
+    if (!leader || compareProcessIdentity(expected, leader) !== "match") {
+      return {
+        ok: false,
+        reason: "the exact nested group leader is absent from fresh membership",
+      };
+    }
+    return { ok: true };
+  }
+
+  private signalNestedGroup(
+    pgid: number,
+    signal: "SIGTERM" | "SIGKILL",
+  ): "sent" | "gone" | "error" {
+    if (!isProcessPid(pgid) || pgid <= 1 || pgid === process.pid) {
+      return "error";
+    }
+    try {
+      process.kill(-pgid, signal);
+      this.signalledGroupIds.add(pgid);
+      this.recordSignal({
+        signal,
+        scope: "nested-process-group",
+        pgid,
+        at: new Date().toISOString(),
+        result: "sent",
+      });
+      return "sent";
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return "gone";
+      this.recordSignal({
+        signal,
+        scope: "nested-process-group",
+        pgid,
+        at: new Date().toISOString(),
+        result: "failed",
+        detail: boundDetail(errorText(error)),
+      });
+      return "error";
+    }
+  }
+
   private async run(reason: WorkerCleanupReason): Promise<WorkerProcessCleanupOutcome> {
     const pid = this.child.pid;
     if (!isProcessPid(pid)) {
@@ -1160,8 +1701,14 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     // sample already in flight is awaited so its last observation is included.
     await this.stopSampler();
     const refresh = await this.refreshDescendants(identity, pgid);
-    const nestedPriorFailure =
-      refresh.failure ?? (refresh.refreshed ? undefined : this.samplerError);
+    // The refreshed group/fallback registry must be durable before any nested
+    // signal. A failed flush keeps nested signals unsent and fails closed while
+    // the top-level managed group is still cleaned.
+    const flush = await this.flushNestedSnapshot();
+    const nestedPriorFailure = combineDetail(
+      refresh.failure ?? (refresh.refreshed ? undefined : this.samplerError),
+      flush.ok ? undefined : flush.failure,
+    );
 
     let members: ProcessGroupMember[];
     try {
@@ -1180,22 +1727,37 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     // descendant that leaves the group during group cleanup is still covered.
     const candidates = this.externalCandidates(pgid);
     let plan: NestedPlan;
-    try {
-      plan = await this.prepareNested(candidates, pgid, pid, nestedPriorFailure);
-    } catch (error) {
+    if (!flush.ok) {
       plan = {
         targets: [],
         refused: candidates,
-        failure: `nested cleanup crashed: ${errorText(error)}`,
+        failure: nestedPriorFailure,
       };
+    } else {
+      try {
+        plan = await this.prepareNested(candidates, pgid, pid, nestedPriorFailure);
+      } catch (error) {
+        plan = {
+          targets: [],
+          refused: candidates,
+          failure: `nested cleanup crashed: ${errorText(error)}`,
+        };
+      }
     }
 
+    // External groups are one guarded unit each; their members never enter the
+    // exact-pid plan above.
+    const nestedGroups = await this.cleanNestedGroups(
+      pgid,
+      flush.ok ? undefined : flush.failure,
+    );
     const group = await this.cleanManagedGroup(pgid, pid, identity, members);
     const nested = await this.settleNested({
       targets: plan.targets,
       refused: plan.refused,
       managedPgid: pgid,
       failure: plan.failure,
+      nestedGroups,
     });
     this.nestedCleanup = nested.evidence;
 
@@ -1331,17 +1893,22 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     refused: readonly RuntimeProcessIdentity[];
     managedPgid: number;
     failure?: string;
+    nestedGroups: NestedGroupCleanupOutcome;
   }): Promise<{
     evidence?: WorkerNestedCleanupEvidence;
     failure?: string;
   }> {
-    let failure = options.failure;
+    let failure = combineDetail(
+      options.failure,
+      options.nestedGroups.failure,
+    );
     const residual = new Set<number>();
     for (const identity of options.refused) {
       if (this.manager.isAlive(identity.pid)) residual.add(identity.pid);
     }
     const hadNestedWork =
       this.observedExternalPids.size > 0 ||
+      this.observedGroups.size > 0 ||
       options.targets.length > 0 ||
       options.refused.length > 0 ||
       failure !== undefined;
@@ -1413,12 +1980,15 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
 
     const observedDescendants = this.observedExternalPids.size;
     const signalledDescendants = this.signalledDescendantPids.size;
+    const observedGroups = this.observedGroups.size;
+    const signalledGroups = this.signalledGroupIds.size;
+    const residualGroups = this.residualGroupIds.size;
     const state: WorkerNestedCleanupState =
       failure !== undefined
         ? "failed"
-        : observedDescendants === 0
+        : observedDescendants === 0 && observedGroups === 0
           ? "none"
-          : signalledDescendants === 0
+          : signalledDescendants === 0 && signalledGroups === 0
             ? "clean"
             : "terminated";
     return {
@@ -1427,6 +1997,9 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
         observedDescendants,
         signalledDescendants,
         residualDescendants: residual.size,
+        ...(observedGroups > 0
+          ? { observedGroups, signalledGroups, residualGroups }
+          : {}),
         ...(failure !== undefined ? { detail: boundDetail(failure) } : {}),
       },
       ...(failure !== undefined ? { failure } : {}),
@@ -1748,9 +2321,10 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     // cleanup instead of emitting evidence the record parser must reject
     // (external evidence and `nestedCleanup` are all-or-nothing).
     const observedExternal = this.observedExternalPids.size;
+    const observedGroups = this.observedGroups.size;
     const nestedCleanup =
       this.nestedCleanup ??
-      (observedExternal > 0
+      (observedExternal > 0 || observedGroups > 0
         ? {
             state: "failed" as const,
             observedDescendants: observedExternal,
@@ -1759,6 +2333,14 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
               0,
               observedExternal - this.signalledDescendantPids.size,
             ),
+            ...(observedGroups > 0
+              ? {
+                  observedGroups,
+                  signalledGroups: this.signalledGroupIds.size,
+                  // No group was verified gone on this early path.
+                  residualGroups: observedGroups,
+                }
+              : {}),
             detail: boundDetail("nested cleanup did not complete"),
           }
         : undefined);
@@ -1775,16 +2357,25 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
       signals: this.signals.map((signal) => ({ ...signal })),
       residualMembers: this.residualMembers.map((member) => ({ ...member })),
       residualCount: this.residualCount,
-      ...(this.observedExternalPids.size > 0
+      ...(this.observedExternalPids.size > 0 ||
+      this.observedExternalGroupIds.size > 0
         ? {
-            observedExternalDescendants: [...this.observedExternal.values()]
-              .sort((first, second) => first.pid - second.pid)
-              .slice(0, MAX_PERSISTED_EXTERNAL_DESCENDANTS)
-              .map((identity) => copyIdentity(identity)),
-            observedExternalDescendantCount: this.observedExternalPids.size,
-            observedExternalGroups: [...this.observedExternalGroupIds].sort(
-              (first, second) => first - second,
-            ),
+            ...(this.observedExternalPids.size > 0
+              ? {
+                  observedExternalDescendants: [...this.observedExternal.values()]
+                    .filter(
+                      (identity) => !this.observedGroups.has(identity.pgid),
+                    )
+                    .sort((first, second) => first.pid - second.pid)
+                    .slice(0, MAX_PERSISTED_EXTERNAL_DESCENDANTS)
+                    .map((identity) => copyIdentity(identity)),
+                  observedExternalDescendantCount:
+                    this.observedExternalPids.size,
+                }
+              : {}),
+            observedExternalGroups: [...this.observedExternalGroupIds]
+              .sort((first, second) => first - second)
+              .slice(0, MAX_PERSISTED_EXTERNAL_GROUPS),
           }
         : {}),
       ...(nestedCleanup !== undefined
@@ -1943,7 +2534,11 @@ export function parseWorkerProcessRecord(
     external.count !== undefined,
   );
   if (externalGroups === null) return undefined;
-  const nested = parseNestedCleanup(value.nestedCleanup, external.count);
+  const nested = parseNestedCleanup(
+    value.nestedCleanup,
+    external.count,
+    externalGroups !== undefined,
+  );
   if (nested === null) return undefined;
 
   if (!isTimestamp(value.startedAt)) return undefined;
@@ -1981,17 +2576,16 @@ export function parseWorkerProcessRecord(
     signals,
     residualMembers: residual,
     residualCount: value.residualCount,
-    ...(external.count !== undefined &&
-    external.descendants !== undefined &&
-    externalGroups !== undefined &&
-    nested !== undefined
+    ...(external.count !== undefined && external.descendants !== undefined
       ? {
           observedExternalDescendants: external.descendants,
           observedExternalDescendantCount: external.count,
-          observedExternalGroups: externalGroups,
-          nestedCleanup: nested,
         }
       : {}),
+    ...(externalGroups !== undefined
+      ? { observedExternalGroups: externalGroups }
+      : {}),
+    ...(nested !== undefined ? { nestedCleanup: nested } : {}),
     ...(exitCode !== undefined ? { exitCode } : {}),
     ...(exitSignal !== undefined ? { exitSignal } : {}),
     startedAt: value.startedAt,
@@ -2015,17 +2609,26 @@ function parseSignals(raw: unknown): WorkerProcessSignalRecord[] | undefined {
       (signal !== "SIGTERM" && signal !== "SIGKILL") ||
       (scope !== "process-group" &&
         scope !== "pid" &&
-        scope !== "descendant-pid") ||
+        scope !== "descendant-pid" &&
+        scope !== "nested-process-group") ||
       (result !== "sent" && result !== "failed") ||
       !isTimestamp(value.at)
     ) {
       return undefined;
     }
     let pid: number | undefined;
+    let pgid: number | undefined;
     if (scope === "descendant-pid") {
-      if (!isProcessPid(value.pid)) return undefined;
+      if (!isProcessPid(value.pid) || value.pgid !== undefined) {
+        return undefined;
+      }
       pid = value.pid;
-    } else if (value.pid !== undefined) {
+    } else if (scope === "nested-process-group") {
+      if (!isProcessPid(value.pgid) || value.pgid <= 1 || value.pid !== undefined) {
+        return undefined;
+      }
+      pgid = value.pgid;
+    } else if (value.pid !== undefined || value.pgid !== undefined) {
       return undefined;
     }
     let detail: string | undefined;
@@ -2037,6 +2640,7 @@ function parseSignals(raw: unknown): WorkerProcessSignalRecord[] | undefined {
       signal,
       scope,
       ...(pid !== undefined ? { pid } : {}),
+      ...(pgid !== undefined ? { pgid } : {}),
       at: value.at,
       result,
       ...(detail !== undefined ? { detail } : {}),
@@ -2106,7 +2710,6 @@ function parseExternalGroups(
   required: boolean,
 ): number[] | null | undefined {
   if (raw === undefined) return required ? null : undefined;
-  if (!required) return null;
   if (
     !Array.isArray(raw) ||
     raw.length === 0 ||
@@ -2128,9 +2731,15 @@ function parseExternalGroups(
 function parseNestedCleanup(
   raw: unknown,
   externalCount: number | undefined,
+  groupsPresent: boolean,
 ): WorkerNestedCleanupEvidence | null | undefined {
-  if (raw === undefined) return externalCount === undefined ? undefined : null;
-  if (externalCount === undefined || !isRecord(raw)) return null;
+  const externalPresent = externalCount !== undefined;
+  const groupsOnly = !externalPresent && groupsPresent;
+  if (raw === undefined) {
+    return externalPresent || groupsOnly ? null : undefined;
+  }
+  if (!externalPresent && !groupsPresent) return null;
+  if (!isRecord(raw)) return null;
   if (typeof raw.state !== "string" || !NESTED_STATES.has(raw.state)) {
     return null;
   }
@@ -2141,7 +2750,7 @@ function parseNestedCleanup(
   if (
     typeof observed !== "number" ||
     !Number.isInteger(observed) ||
-    observed !== externalCount ||
+    observed !== (externalCount ?? 0) ||
     typeof signalled !== "number" ||
     !Number.isInteger(signalled) ||
     signalled < 0 ||
@@ -2153,11 +2762,43 @@ function parseNestedCleanup(
   ) {
     return null;
   }
+  const hasGroupCounters =
+    raw.observedGroups !== undefined ||
+    raw.signalledGroups !== undefined ||
+    raw.residualGroups !== undefined;
+  let observedGroups: number | undefined;
+  let signalledGroups: number | undefined;
+  let residualGroups: number | undefined;
+  if (hasGroupCounters) {
+    if (!groupsPresent) return null;
+    observedGroups = raw.observedGroups as number;
+    signalledGroups = raw.signalledGroups as number;
+    residualGroups = raw.residualGroups as number;
+    if (
+      !Number.isInteger(observedGroups) ||
+      observedGroups < 1 ||
+      observedGroups > MAX_NESTED_GROUPS ||
+      !Number.isInteger(signalledGroups) ||
+      signalledGroups < 0 ||
+      signalledGroups > observedGroups ||
+      !Number.isInteger(residualGroups) ||
+      residualGroups < 0 ||
+      residualGroups > observedGroups
+    ) {
+      return null;
+    }
+  } else if (groupsOnly) {
+    // A group-only record must carry its bounded group counters; legacy
+    // records with exact-pid evidence stay readable without them.
+    return null;
+  }
+  const signalledTotal = signalled + (signalledGroups ?? 0);
+  const residualTotal = residual + (residualGroups ?? 0);
   if (
-    state === "none" ||
-    (state === "terminated" && signalled === 0) ||
-    (state === "clean" && signalled !== 0) ||
-    (state !== "failed" && residual !== 0)
+    (state === "none" && (observed !== 0 || (observedGroups ?? 0) !== 0)) ||
+    (state === "terminated" && signalledTotal === 0) ||
+    (state === "clean" && signalledTotal !== 0) ||
+    (state !== "failed" && residualTotal !== 0)
   ) {
     return null;
   }
@@ -2171,6 +2812,13 @@ function parseNestedCleanup(
     observedDescendants: observed,
     signalledDescendants: signalled,
     residualDescendants: residual,
+    ...(observedGroups !== undefined
+      ? {
+          observedGroups,
+          signalledGroups: signalledGroups as number,
+          residualGroups: residualGroups as number,
+        }
+      : {}),
     ...(detail !== undefined ? { detail } : {}),
   };
 }
@@ -2190,6 +2838,15 @@ function copyIdentity(identity: RuntimeProcessIdentity): RuntimeProcessIdentity 
   };
 }
 
+function copyNestedGroup(group: WorkerNestedGroup): WorkerNestedGroup {
+  return {
+    pgid: group.pgid,
+    leader: copyIdentity(group.leader),
+    observedMemberCount: group.observedMemberCount,
+    lastObservedAt: group.lastObservedAt,
+  };
+}
+
 function copyNestedProcesses(
   snapshot: WorkerNestedProcesses,
 ): WorkerNestedProcesses {
@@ -2199,6 +2856,9 @@ function copyNestedProcesses(
     observedCount: snapshot.observedCount,
     truncated: snapshot.truncated,
     lastObservedAt: snapshot.lastObservedAt,
+    ...(snapshot.groups !== undefined
+      ? { groups: snapshot.groups.map(copyNestedGroup) }
+      : {}),
     identities: snapshot.identities.map(copyIdentity),
   };
 }
@@ -2208,6 +2868,13 @@ function nestedSnapshotKey(snapshot: WorkerNestedProcesses): string {
     snapshot.host,
     snapshot.observedCount,
     snapshot.truncated,
+    (snapshot.groups ?? []).map((group) => [
+      group.pgid,
+      group.leader.pid,
+      group.leader.pgid,
+      group.leader.startedAt,
+      group.observedMemberCount,
+    ]),
     snapshot.identities.map((identity) => [
       identity.pid,
       identity.pgid,

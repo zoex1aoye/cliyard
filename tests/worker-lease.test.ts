@@ -243,7 +243,9 @@ function fakeManaged(options: {
   const cleanupReasons: Array<
     WorkerProcessCleanupOutcome["record"]["cleanupReason"]
   > = [];
-  const nestedListeners = new Set<(snapshot: WorkerNestedProcesses) => void>();
+  const nestedListeners = new Set<
+    (snapshot: WorkerNestedProcesses) => void | Promise<void>
+  >();
   let currentNested: WorkerNestedProcesses | undefined;
   const managed: ManagedWorkerProcess = {
     child: { pid: options.pid } as unknown as ChildProcess,
@@ -269,7 +271,13 @@ function fakeManaged(options: {
   if (options.observable) {
     managed.observeExternalDescendants = (listener) => {
       nestedListeners.add(listener);
-      if (currentNested) listener(structuredClone(currentNested));
+      // Mirror the real observer: async listener failures are surfaced through
+      // the lease's own persistence-health path, never as unhandled rejections.
+      if (currentNested) {
+        void Promise.resolve(listener(structuredClone(currentNested))).catch(
+          () => {},
+        );
+      }
       return () => {
         nestedListeners.delete(listener);
       };
@@ -281,7 +289,9 @@ function fakeManaged(options: {
     emitNested(snapshot) {
       currentNested = structuredClone(snapshot);
       for (const listener of [...nestedListeners]) {
-        listener(structuredClone(snapshot));
+        void Promise.resolve(listener(structuredClone(snapshot))).catch(
+          () => {},
+        );
       }
     },
   };
@@ -1241,13 +1251,26 @@ setInterval(() => {}, 1000);
 );
 
 posixTest(
-  "recover-workers kills only a controller-death fixture's exact nested helper",
+  "recover-workers recovers a controller-death fixture's 512-member nested group",
   async () => {
     const repo = tempDir("real-nested-recovery");
     const readyPath = join(repo, "ready.json");
     const workerReady = join(repo, "worker-ready.json");
     const helperFixture = join(repo, "nested-helper.mjs");
     writeFileSync(helperFixture, "setInterval(() => {}, 1000);\n", "utf8");
+    // A real detached nested group: a leader plus 512 members in its process
+    // group. The member count intentionally exceeds the old 256 related-pid
+    // sampling bound.
+    writeFileSync(
+      helperFixture,
+      `import { spawn } from "node:child_process";
+for (let index = 0; index < 512; index += 1) {
+  spawn("/bin/sleep", ["600"], { stdio: "ignore" });
+}
+setInterval(() => {}, 1000);
+`,
+      "utf8",
+    );
     const workerScript = join(repo, "nested-worker.mjs");
     writeFileSync(
       workerScript,
@@ -1299,22 +1322,30 @@ const handle = await attach({
 while (!existsSync(workerReady)) await sleep(20);
 const { helperPid } = JSON.parse(readFileSync(workerReady, "utf8"));
 const deadline = Date.now() + 15000;
-let observed = false;
+let observedCount = 0;
 while (Date.now() < deadline) {
   const lease = readLeaseFile(handle.path);
-  if (lease?.nestedProcesses?.identities.some((entry) => entry.pid === helperPid)) {
-    observed = true;
-    break;
+  const group = lease?.nestedProcesses?.groups?.find(
+    (entry) => entry.pgid === helperPid,
+  );
+  if (group) {
+    observedCount = group.observedMemberCount;
+    if (observedCount >= 513) break;
   }
   await sleep(50);
 }
-if (!observed) throw new Error("nested helper evidence was not persisted");
+if (observedCount < 513) {
+  throw new Error(
+    \`nested group evidence was not complete: \${observedCount} members\`,
+  );
+}
 writeFileSync(
   readyPath,
   JSON.stringify({
     controllerPid: process.pid,
     workerPid: worker.pid,
     helperPid,
+    observedCount,
     leasePath: handle.path,
   }),
 );
@@ -1346,24 +1377,34 @@ setInterval(() => {}, 1000);
         controllerPid: number;
         workerPid: number;
         helperPid: number;
+        observedCount: number;
         leasePath: string;
       };
       liveFixturePids.add(ready.workerPid);
       liveFixturePids.add(ready.helperPid);
       assert.ok(realInspector.isAlive(ready.workerPid));
       assert.ok(realInspector.isAlive(ready.helperPid));
+      assert.ok(ready.observedCount >= 513);
       const leaseBefore = readLeaseFile(ready.leasePath);
       assert.equal(leaseBefore?.state, "active");
       assert.equal(leaseBefore?.nestedProcesses?.truncated, false);
+      const groupBefore = leaseBefore?.nestedProcesses?.groups?.find(
+        (entry) => entry.pgid === ready.helperPid,
+      );
       assert.ok(
-        leaseBefore?.nestedProcesses?.identities.some(
-          (entry) => entry.pid === ready.helperPid,
-        ),
-        "nested helper identity is durable before controller death",
+        groupBefore,
+        "nested group evidence is durable before controller death",
+      );
+      assert.equal(groupBefore.leader.pid, ready.helperPid);
+      assert.equal(groupBefore.leader.pgid, ready.helperPid);
+      assert.ok(groupBefore.observedMemberCount >= 513);
+      assert.ok(
+        (await realInspector.listGroupMembers(ready.helperPid)).length >= 513,
+        "the real nested group has at least 512 members",
       );
 
       // Kill the controller and then the top-level leader. Only the detached
-      // nested helper remains; the lease is the only durable evidence for it.
+      // nested group remains; the lease is the only durable evidence for it.
       process.kill(ready.controllerPid, "SIGKILL");
       await waitFor(
         () => !realInspector.isAlive(ready.controllerPid),
@@ -1375,6 +1416,9 @@ setInterval(() => {}, 1000);
         "worker leader death",
       );
       assert.equal(realInspector.isAlive(ready.helperPid), true);
+      assert.ok(
+        (await realInspector.listGroupMembers(ready.helperPid)).length >= 513,
+      );
 
       const cli = spawnSync(
         process.execPath,
@@ -1402,6 +1446,7 @@ setInterval(() => {}, 1000);
           signals: Array<{
             scope: string;
             pid?: number;
+            pgid?: number;
             signal: string;
           }>;
         }>;
@@ -1414,24 +1459,37 @@ setInterval(() => {}, 1000);
       assert.ok(
         signals.every(
           (signal) =>
-            signal.scope === "descendant-pid" &&
-            signal.pid === ready.helperPid,
+            signal.scope === "nested-process-group" &&
+            signal.pgid === ready.helperPid &&
+            signal.pid === undefined,
         ),
-        "only the exact nested pid was signalled",
+        "the whole nested group was signalled as one owned unit",
+      );
+      const groupDeadline = Date.now() + 8_000;
+      while (
+        (await realInspector.listGroupMembers(ready.helperPid)).length > 0 &&
+        Date.now() < groupDeadline
+      ) {
+        await delay(20);
+      }
+      assert.deepEqual(
+        await realInspector.listGroupMembers(ready.helperPid),
+        [],
+        "every member of the recovered nested group is gone",
       );
       await waitFor(
         () => !realInspector.isAlive(ready.helperPid),
-        "nested helper death",
+        "nested group leader death",
       );
       const leaseAfter = readLeaseFile(ready.leasePath);
       assert.equal(leaseAfter?.state, "released");
       assert.equal(leaseAfter?.cleanupReason, "recovery");
       assert.equal(leaseAfter?.recovery?.[0]?.outcome, "recovered");
       assert.ok(
-        leaseAfter?.nestedProcesses?.identities.some(
-          (entry) => entry.pid === ready.helperPid,
+        leaseAfter?.nestedProcesses?.groups?.some(
+          (entry) => entry.pgid === ready.helperPid,
         ),
-        "refreshed target set remains durable",
+        "refreshed group registry remains durable",
       );
       assert.equal(existsSync(join(repo, ".cliyard", "runs")), false);
       liveFixturePids.delete(ready.workerPid);
@@ -1737,6 +1795,60 @@ test("nested lease evidence is all-or-nothing and backward compatible", () => {
   assert.equal(truncated.nestedProcesses?.truncated, true);
 });
 
+test("nested group evidence round-trips and rejects unsafe group shapes", () => {
+  const group = {
+    pgid: 75_000,
+    leader: identity(75_000),
+    observedMemberCount: 512,
+    lastObservedAt: "2026-01-01T00:00:02.000Z",
+  };
+  const snapshot = nestedSnapshot([identity(75_100)], { groups: [group] });
+  const lease = baseLease({ nestedProcesses: snapshot });
+  const parsed = parseWorkerLease(lease);
+  assert.ok(parsed);
+  assert.deepEqual(parsed.nestedProcesses?.groups, [group]);
+  assert.equal(parsed.nestedProcesses?.identities[0]?.pid, 75_100);
+  // Legacy exact-pid-only evidence (no groups field) stays readable.
+  assert.ok(
+    parseWorkerLease(baseLease({ nestedProcesses: nestedSnapshot([identity(75_101)]) })),
+  );
+
+  const malformedGroups: unknown[] = [
+    [{ ...group, pgid: 75_001 }],
+    [{ ...group, leader: { ...group.leader, pid: 75_002 } }],
+    [{ ...group, leader: { ...group.leader, pgid: 75_002 } }],
+    [group, group],
+    [{ ...group, observedMemberCount: 0 }],
+    [{ ...group, observedMemberCount: 100_001 }],
+    [{ ...group, lastObservedAt: "not-a-time" }],
+    Array.from({ length: 17 }, (_, index) => ({
+      ...group,
+      pgid: 75_000 + index,
+      leader: identity(75_000 + index),
+    })),
+  ];
+  for (const groups of malformedGroups) {
+    assert.equal(
+      parseWorkerLease({
+        ...lease,
+        nestedProcesses: { ...snapshot, groups } as WorkerNestedProcesses,
+      }),
+      undefined,
+    );
+  }
+  // A fallback identity must not duplicate a proven group as an exact pid.
+  assert.equal(
+    parseWorkerLease({
+      ...lease,
+      nestedProcesses: {
+        ...snapshot,
+        identities: [identity(75_000)],
+      },
+    }),
+    undefined,
+  );
+});
+
 test("status exposes bounded nested registry presence and exact liveness", async () => {
   const repo = tempDir("nested-status");
   const fake = new FakeInspector();
@@ -1929,6 +2041,129 @@ test("a present leader cleans the guarded group and escalates exact nested pids"
         signal.scope === "descendant-pid" && signal.pid === helper.pid,
     ),
   );
+});
+
+test("recovery terminates a persisted nested group through one guarded negative-pgid signal", async () => {
+  const repo = tempDir("nested-group-present");
+  const fake = new FakeInspector();
+  const leader = identity(61_400);
+  const member = { ...identity(61_401), pgid: leader.pgid };
+  fake.add(leader);
+  fake.add(member);
+  const lease = baseLease({
+    taskId: "task-group-present",
+    nestedProcesses: nestedSnapshot([], {
+      groups: [
+        {
+          pgid: leader.pgid,
+          leader,
+          observedMemberCount: 2,
+          lastObservedAt: "2026-01-01T00:00:02.000Z",
+        },
+      ],
+    }),
+  });
+  const path = writeLease(repo, lease);
+  const { report, calls, pidCalls } = await recoverWith(repo, fake);
+  assert.deepEqual(calls, [{ pgid: leader.pgid, signal: "SIGTERM" }]);
+  assert.deepEqual(pidCalls, []);
+  assert.equal(report.recovered, 1);
+  assert.equal(report.needsHuman, 0);
+  assert.equal(report.entries[0]?.action, "terminated");
+  assert.deepEqual(
+    report.entries[0]?.signals.map((signal) => ({
+      scope: signal.scope,
+      pid: signal.pid,
+      pgid: signal.pgid,
+      signal: signal.signal,
+    })),
+    [
+      {
+        scope: "nested-process-group",
+        pid: undefined,
+        pgid: leader.pgid,
+        signal: "SIGTERM",
+      },
+    ],
+  );
+  assert.equal(fake.isAlive(leader.pid), false);
+  assert.equal(fake.isAlive(member.pid), false);
+  const updated = readLeaseFile(path)!;
+  assert.equal(updated.state, "released");
+  assert.equal(updated.nestedProcesses?.groups?.[0]?.pgid, leader.pgid);
+});
+
+test("recovery never signals a reused nested group leader", async () => {
+  const repo = tempDir("nested-group-reused-leader");
+  const fake = new FakeInspector();
+  const recorded = identity(61_500);
+  const reused = { ...identity(61_500), startedAt: "Tue Jan  2 00:00:00 2024" };
+  const member = { ...identity(61_501), pgid: recorded.pgid };
+  fake.add(reused);
+  fake.add(member);
+  const lease = baseLease({
+    taskId: "task-group-reused",
+    nestedProcesses: nestedSnapshot([], {
+      groups: [
+        {
+          pgid: recorded.pgid,
+          leader: recorded,
+          observedMemberCount: 2,
+          lastObservedAt: "2026-01-01T00:00:02.000Z",
+        },
+      ],
+    }),
+  });
+  const path = writeLease(repo, lease);
+  const { report, calls, pidCalls } = await recoverWith(repo, fake);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(pidCalls, []);
+  assert.equal(fake.isAlive(reused.pid), true);
+  assert.equal(fake.isAlive(member.pid), true);
+  assert.equal(report.needsHuman, 1);
+  assert.equal(report.recovered, 0);
+  assert.equal(report.entries[0]?.action, "preserved");
+  assert.match(report.entries[0]?.reason ?? "", /leader/i);
+  const updated = readLeaseFile(path)!;
+  assert.equal(updated.state, "active");
+  assert.equal(updated.recovery?.[0]?.outcome, "needs_human");
+});
+
+test("an absent nested group leader never authorizes a group signal", async () => {
+  const repo = tempDir("nested-group-absent-leader");
+  const fake = new FakeInspector();
+  const recorded = identity(61_600);
+  const residual = { ...identity(61_601), pgid: recorded.pgid };
+  const helper = identity(61_602);
+  fake.add(residual);
+  fake.add(helper);
+  const lease = baseLease({
+    taskId: "task-group-absent",
+    nestedProcesses: nestedSnapshot([helper], {
+      groups: [
+        {
+          pgid: recorded.pgid,
+          leader: recorded,
+          observedMemberCount: 2,
+          lastObservedAt: "2026-01-01T00:00:02.000Z",
+        },
+      ],
+    }),
+  });
+  const path = writeLease(repo, lease);
+  const { report, calls, pidCalls } = await recoverWith(repo, fake);
+  // The unproven group is never signalled; only the complete exact-pid
+  // fallback identity is eligible.
+  assert.deepEqual(calls, []);
+  assert.deepEqual(pidCalls, [{ pid: helper.pid, signal: "SIGTERM" }]);
+  assert.equal(fake.isAlive(helper.pid), false);
+  assert.equal(fake.isAlive(residual.pid), true);
+  assert.equal(report.needsHuman, 1);
+  assert.equal(report.entries[0]?.action, "preserved");
+  assert.equal(report.entries[0]?.residualCount, 1);
+  const updated = readLeaseFile(path)!;
+  assert.equal(updated.recovery?.[0]?.outcome, "needs_human");
+  assert.equal(updated.nestedProcesses?.groups?.[0]?.pgid, recorded.pgid);
 });
 
 test("recovery never signals a reused nested pid", async () => {

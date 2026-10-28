@@ -80,13 +80,17 @@ const ignoreTerm = process.argv[5] === "ignore";
 const childIgnoreTerm = process.argv[6] === "ignore";
 const detachHelper = process.argv[7] === "detach";
 const staggerMs = Number(process.argv[8] ?? "0");
+const largeGroup = process.argv[9] === "large-group";
 
 if (ignoreTerm) process.on("SIGTERM", () => {});
 const pids = [];
 const spawnChild = () => {
   const child = spawn(
     process.execPath,
-    [${JSON.stringify(helperFixture)}, childIgnoreTerm ? "ignore" : "term"],
+    [
+      ${JSON.stringify(helperFixture)},
+      largeGroup ? "large-group" : childIgnoreTerm ? "ignore" : "term",
+    ],
     { stdio: "ignore", detached: detachHelper },
   );
   pids.push(child.pid);
@@ -107,7 +111,15 @@ setTimeout(() => process.exit(0), holdMs);
 
 writeFileSync(
   helperFixture,
-  `if (process.argv[2] === "ignore") process.on("SIGTERM", () => {});
+  `import { spawn } from "node:child_process";
+if (process.argv[2] === "ignore") process.on("SIGTERM", () => {});
+// A detached nested group with 512 lightweight members. Every member inherits
+// the helper's dedicated process group, so cleanup must treat it as one unit.
+if (process.argv[2] === "large-group") {
+  for (let index = 0; index < 512; index += 1) {
+    spawn("/bin/sleep", ["600"], { stdio: "ignore" });
+  }
+}
 setInterval(() => {}, 1000);
 `,
   "utf8",
@@ -256,6 +268,7 @@ function spawnLeader(
     childIgnoreTerm?: boolean;
     detachHelper?: boolean;
     staggerMs?: number;
+    largeGroup?: boolean;
   } = {},
 ) {
   const managed = tree.spawn(
@@ -269,6 +282,7 @@ function spawnLeader(
       options.childIgnoreTerm ? "ignore" : "term",
       options.detachHelper ? "detach" : "same-group",
       String(options.staggerMs ?? 0),
+      options.largeGroup ? "large-group" : "regular",
     ],
     { stdio: ["ignore", "ignore", "ignore"] },
   );
@@ -494,18 +508,23 @@ for (const reason of ["timeout", "cancel"] as const) {
         assert.equal(record.cleanupReason, reason);
         assert.equal(record.cleanupState, "terminated");
         assert.equal(record.nestedCleanup?.state, "terminated");
-        assert.ok((record.nestedCleanup?.observedDescendants ?? 0) >= 1);
+        assert.ok((record.nestedCleanup?.observedGroups ?? 0) >= 1);
+        assert.ok((record.nestedCleanup?.signalledGroups ?? 0) >= 1);
+        assert.equal(record.nestedCleanup?.residualGroups, 0);
         assert.equal(record.nestedCleanup?.residualDescendants, 0);
-        assert.ok(
-          record.observedExternalDescendants?.some(
+        assert.equal(
+          (record.observedExternalDescendants ?? []).some(
             (identity) => identity.pid === helperPid,
           ),
+          false,
+          "members of a proven group are not duplicated as fallback pids",
         );
         assert.ok(record.observedExternalGroups?.includes(helperPid));
         assert.ok(
           record.signals.some(
             (signal) =>
-              signal.scope === "descendant-pid" && signal.pid === helperPid,
+              signal.scope === "nested-process-group" &&
+              signal.pgid === helperPid,
           ),
         );
         // The top-level group and the exact nested group are both gone.
@@ -551,11 +570,13 @@ posixTest(
       assert.equal(record.cleanupReason, "child-close");
       assert.equal(record.cleanupState, "terminated");
       assert.equal(record.nestedCleanup?.state, "terminated");
-      assert.ok((record.nestedCleanup?.signalledDescendants ?? 0) >= 1);
+      assert.ok((record.nestedCleanup?.observedGroups ?? 0) >= 1);
+      assert.ok((record.nestedCleanup?.signalledGroups ?? 0) >= 1);
       assert.ok(
         record.signals.some(
           (signal) =>
-            signal.scope === "descendant-pid" && signal.pid === helperPid,
+            signal.scope === "nested-process-group" &&
+            signal.pgid === helperPid,
         ),
       );
       await waitFor(
@@ -569,6 +590,195 @@ posixTest(
         } catch {
           // Already gone.
         }
+      }
+    }
+  },
+);
+
+posixTest(
+  "cleans a 512-member detached nested group as one bounded unit",
+  async () => {
+    const tree = manager({ descendantPollMs: 250 });
+    const pidFile = nextPidFile("nested-group-512");
+    const managed = spawnLeader(tree, pidFile, {
+      children: 1,
+      detachHelper: true,
+      largeGroup: true,
+    });
+    const [groupPid] = await readHelperPids(pidFile);
+    const snapshots: WorkerNestedProcesses[] = [];
+    const unsubscribe = managed.observeExternalDescendants!((snapshot) => {
+      snapshots.push(snapshot);
+    });
+    try {
+      // Sampling must report the whole owned group (leader plus >=512
+      // members) without truncating at the old 256 related-process bound.
+      await waitFor(
+        () =>
+          snapshots.some((snapshot) =>
+            snapshot.groups?.some(
+              (group) =>
+                group.pgid === groupPid && group.observedMemberCount >= 513,
+            ),
+          ),
+        "512-member nested group observation",
+        15_000,
+      );
+      const observed = snapshots.find((snapshot) =>
+        snapshot.groups?.some(
+          (group) => group.pgid === groupPid && group.observedMemberCount >= 513,
+        ),
+      )!;
+      assert.equal(observed.truncated, false);
+      assert.equal(observed.identities.length, 0);
+      const before = await inspector.listGroupMembers(groupPid);
+      assert.ok(before.length >= 513);
+      for (const member of before) trackFixture(member);
+
+      const outcome = await managed.cleanup("timeout");
+      assert.equal(outcome.treeOk, true);
+      assert.equal(outcome.record.cleanupState, "terminated");
+      assert.equal(outcome.record.nestedCleanup?.state, "terminated");
+      assert.ok((outcome.record.nestedCleanup?.observedGroups ?? 0) >= 1);
+      assert.ok((outcome.record.nestedCleanup?.signalledGroups ?? 0) >= 1);
+      assert.equal(outcome.record.nestedCleanup?.residualGroups, 0);
+      assert.equal(outcome.record.nestedCleanup?.observedDescendants, 0);
+      assert.ok(outcome.record.observedExternalGroups?.includes(groupPid));
+      assert.equal(outcome.record.observedExternalDescendants?.length ?? 0, 0);
+      assert.ok(
+        outcome.record.signals.some(
+          (signal) =>
+            signal.scope === "nested-process-group" &&
+            signal.pgid === groupPid,
+        ),
+      );
+      await waitFor(
+        async () => (await inspector.listGroupMembers(groupPid)).length === 0,
+        "512-member nested group death",
+        15_000,
+      );
+      assert.equal(inspector.isAlive(groupPid), false);
+      for (const member of before) liveFixtures.delete(member.pid);
+    } finally {
+      unsubscribe();
+      if (inspector.isAlive(groupPid)) {
+        try {
+          process.kill(-groupPid, "SIGKILL");
+        } catch {
+          // Already gone.
+        }
+      }
+    }
+  },
+);
+
+posixTest(
+  "cleans a nested group and an ungrouped fallback with distinct signal scopes",
+  async () => {
+    const foreign = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      { detached: true, stdio: "ignore", windowsHide: true },
+    );
+    await once(foreign, "spawn");
+    const foreignPid = foreign.pid;
+    assert.ok(foreignPid);
+    const foreignIdentity = await inspector.capture(foreignPid);
+    assert.ok(foreignIdentity);
+    assert.equal(foreignIdentity.pgid, foreignPid);
+
+    // Present the real foreign process as an external descendant whose pgid
+    // has no observed leader row: exactly the ungrouped fallback shape. The
+    // signal itself still targets the real exact pid.
+    const forgedPgid = 8_888_881;
+    let managedPid: number | undefined;
+    const mixedInspector: WorkerProcessTreeInspector = {
+      get host() {
+        return inspector.host;
+      },
+      get supported() {
+        return inspector.supported;
+      },
+      isAlive: (pid) => inspector.isAlive(pid),
+      async capture(pid) {
+        if (pid === foreignPid && inspector.isAlive(foreignPid)) {
+          const real = await inspector.capture(foreignPid);
+          return real ? { ...real, pgid: forgedPgid } : undefined;
+        }
+        return inspector.capture(pid);
+      },
+      listGroupMembers: (pgid) => inspector.listGroupMembers(pgid),
+      async snapshotProcessTable(options) {
+        const table = await inspector.snapshotProcessTable(options);
+        if (
+          managedPid === undefined ||
+          !inspector.isAlive(foreignPid) ||
+          !inspector.isAlive(managedPid)
+        ) {
+          return table;
+        }
+        const rows = table.filter((entry) => entry.pid !== foreignPid);
+        rows.push({
+          pid: foreignPid,
+          ppid: managedPid,
+          pgid: forgedPgid,
+          startedAt: foreignIdentity.startedAt,
+        });
+        rows.sort((first, second) => first.pid - second.pid);
+        return rows;
+      },
+    };
+
+    const tree = manager({ inspector: mixedInspector });
+    const pidFile = nextPidFile("nested-mixed");
+    const managed = spawnLeader(tree, pidFile, {
+      children: 1,
+      detachHelper: true,
+    });
+    managedPid = managed.pid;
+    const [groupPid] = await readHelperPids(pidFile);
+    try {
+      const outcome = await managed.cleanup("cancel");
+      const record = outcome.record;
+      assert.equal(outcome.treeOk, true);
+      assert.equal(record.cleanupState, "terminated");
+      assert.equal(record.nestedCleanup?.state, "terminated");
+      assert.ok((record.nestedCleanup?.observedGroups ?? 0) >= 1);
+      assert.ok((record.nestedCleanup?.signalledGroups ?? 0) >= 1);
+      assert.ok((record.nestedCleanup?.observedDescendants ?? 0) >= 1);
+      assert.ok((record.nestedCleanup?.signalledDescendants ?? 0) >= 1);
+      assert.ok(
+        record.signals.some(
+          (signal) =>
+            signal.scope === "nested-process-group" &&
+            signal.pgid === groupPid,
+        ),
+      );
+      assert.ok(
+        record.signals.some(
+          (signal) =>
+            signal.scope === "descendant-pid" && signal.pid === foreignPid,
+        ),
+      );
+      assert.ok(
+        record.observedExternalDescendants?.some(
+          (identity) =>
+            identity.pid === foreignPid && identity.pgid === forgedPgid,
+        ),
+      );
+      await waitFor(
+        () => !inspector.isAlive(foreignPid),
+        "ungrouped fallback death",
+      );
+      await waitFor(
+        async () => (await inspector.listGroupMembers(groupPid)).length === 0,
+        "mixed nested group death",
+      );
+    } finally {
+      try {
+        process.kill(-foreignPid, "SIGKILL");
+      } catch {
+        // Already gone.
       }
     }
   },
@@ -628,14 +838,16 @@ posixTest(
       assert.equal(outcome.treeOk, false);
       assert.equal(record.cleanupState, "failed");
       assert.equal(record.nestedCleanup?.state, "failed");
-      assert.ok((record.nestedCleanup?.residualDescendants ?? 0) >= 1);
-      assert.ok(
-        record.observedExternalDescendants?.some(
-          (identity) => identity.pid === unrelatedPid,
-        ),
-      );
+      assert.ok((record.nestedCleanup?.residualGroups ?? 0) >= 1);
+      assert.equal(record.nestedCleanup?.residualDescendants, 0);
+      assert.ok(record.observedExternalGroups?.includes(unrelatedPid));
+      assert.equal(record.observedExternalDescendants?.length ?? 0, 0);
       assert.equal(
-        record.signals.some((signal) => signal.scope === "descendant-pid"),
+        record.signals.some(
+          (signal) =>
+            signal.scope === "nested-process-group" ||
+            signal.scope === "descendant-pid",
+        ),
         false,
       );
       assert.match(record.detail ?? "", /changed or was reused/);
@@ -744,16 +956,17 @@ posixTest(
       assert.equal(outcome.treeOk, false);
       assert.equal(record.cleanupState, "failed");
       assert.equal(record.nestedCleanup?.state, "failed");
-      assert.ok((record.nestedCleanup?.observedDescendants ?? 0) >= 1);
-      assert.ok(
-        (record.observedExternalDescendants ?? []).some(
-          (identity) => identity.pid === helperPid,
-        ),
-      );
+      assert.ok((record.nestedCleanup?.observedGroups ?? 0) >= 1);
+      assert.ok((record.nestedCleanup?.residualGroups ?? 0) >= 1);
+      assert.ok(record.observedExternalGroups?.includes(helperPid));
       assert.match(record.detail ?? "", /cannot inspect the managed process group/);
-      // No identity was revalidated and no exact-pid signal was authorized.
+      // No identity was revalidated and no nested signal was authorized.
       assert.equal(
-        record.signals.some((signal) => signal.scope === "descendant-pid"),
+        record.signals.some(
+          (signal) =>
+            signal.scope === "nested-process-group" ||
+            signal.scope === "descendant-pid",
+        ),
         false,
       );
       assert.deepEqual(parseWorkerProcessRecord(record), record);
@@ -1171,6 +1384,71 @@ test("legacy process-tree records stay readable and nested evidence is validated
   };
   assert.deepEqual(parseWorkerProcessRecord(nested), nested);
 
+  // Group-only evidence round-trips without inventing fallback pids.
+  const grouped: WorkerProcessRecord = {
+    ...legacy,
+    observedExternalGroups: [12_500],
+    nestedCleanup: {
+      state: "terminated",
+      observedDescendants: 0,
+      signalledDescendants: 0,
+      residualDescendants: 0,
+      observedGroups: 1,
+      signalledGroups: 1,
+      residualGroups: 0,
+    },
+    signals: [
+      ...legacy.signals,
+      {
+        signal: "SIGTERM",
+        scope: "nested-process-group",
+        pgid: 12_500,
+        at: "2026-01-01T00:00:01.500Z",
+        result: "sent",
+      },
+    ],
+  };
+  assert.deepEqual(parseWorkerProcessRecord(grouped), grouped);
+  const groupedBase = grouped as unknown as Record<string, unknown>;
+  const groupedSignal = (grouped.signals.at(-1) ?? {}) as Record<string, unknown>;
+  const groupedCleanup = grouped.nestedCleanup as unknown as Record<string, unknown>;
+  for (const bad of [
+    {
+      ...groupedBase,
+      signals: [...grouped.signals.slice(0, -1), { ...groupedSignal, pgid: undefined }],
+    },
+    {
+      ...groupedBase,
+      signals: [...grouped.signals.slice(0, -1), { ...groupedSignal, pid: 12_500 }],
+    },
+    {
+      ...groupedBase,
+      nestedCleanup: { ...groupedCleanup, observedGroups: 0 },
+    },
+    {
+      ...groupedBase,
+      nestedCleanup: { ...groupedCleanup, signalledGroups: 2 },
+    },
+    {
+      ...groupedBase,
+      nestedCleanup: {
+        ...groupedCleanup,
+        state: "clean",
+        signalledDescendants: 0,
+        signalledGroups: 1,
+      },
+    },
+    {
+      ...groupedBase,
+      observedExternalGroups: Array.from(
+        { length: 17 },
+        (_, index) => 12_500 + index,
+      ),
+    },
+  ]) {
+    assert.equal(parseWorkerProcessRecord(bad), undefined);
+  }
+
   const base = nested as unknown as Record<string, unknown>;
   const signals = base.signals as Record<string, unknown>[];
   const nestedCleanup = base.nestedCleanup as Record<string, unknown>;
@@ -1336,8 +1614,8 @@ posixTest(
     });
     try {
       await waitFor(
-        () => snapshots.some((snapshot) => snapshot.identities.length === 1),
-        "first external descendant snapshot",
+        () => snapshots.some((snapshot) => snapshot.groups.length === 1),
+        "first external group snapshot",
         10_000,
       );
       await waitFor(() => {
@@ -1349,8 +1627,8 @@ posixTest(
       }, "second helper pid");
       const helperPids = await readHelperPids(pidFile);
       await waitFor(
-        () => snapshots.some((snapshot) => snapshot.identities.length === 2),
-        "updated external descendant snapshot",
+        () => snapshots.some((snapshot) => snapshot.groups.length === 2),
+        "updated external group snapshot",
         10_000,
       );
 
@@ -1358,14 +1636,16 @@ posixTest(
       assert.equal(latest.version, 1);
       assert.equal(latest.host, inspector.host);
       assert.equal(latest.truncated, false);
-      assert.equal(latest.observedCount, 2);
-      assert.equal(latest.identities.length, 2);
+      assert.equal(latest.observedCount, 0);
+      assert.equal(latest.groups.length, 2);
+      assert.equal(latest.identities.length, 0);
       assert.ok(!Number.isNaN(Date.parse(latest.lastObservedAt)));
       for (const pid of helperPids) {
-        assert.ok(
-          latest.identities.some((identity) => identity.pid === pid),
-          `snapshot contains helper ${pid}`,
-        );
+        const group = latest.groups.find((entry) => entry.pgid === pid);
+        assert.ok(group, `snapshot contains group ${pid}`);
+        assert.equal(group.leader.pid, pid);
+        assert.equal(group.leader.pgid, pid);
+        assert.equal(group.observedMemberCount, 1);
         // Observation is read-only: every helper is still running.
         assert.equal(inspector.isAlive(pid), true);
       }
@@ -1377,7 +1657,7 @@ posixTest(
         replayed.push(snapshot);
       });
       assert.equal(replayed.length, 1);
-      assert.equal(replayed[0]?.identities.length, 2);
+      assert.equal(replayed[0]?.groups.length, 2);
       off();
       const delivered = replayed.length;
       await delay(350);
