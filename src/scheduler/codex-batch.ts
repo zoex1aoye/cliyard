@@ -35,6 +35,7 @@ import {
 import { collectChangedPaths } from "../agents/git-paths.js";
 import { auditPathScope } from "../agents/path-scope.js";
 import type { WorkerProcessRecord } from "../agents/process-tree.js";
+import { createWorkerLeaseAttacher } from "../agents/worker-lease.js";
 import {
   isWorkerProgressEvent,
   type AgentAdapter,
@@ -672,6 +673,14 @@ export async function runCodexBatch(
   }
 
   let checkpoint = requestedManifest;
+  // Lease tracking is run-scoped and exists only for Supervisor-backed runs.
+  // Standalone and mock batches keep their existing behavior.
+  const onWorkerLease = requestedManifest
+    ? createWorkerLeaseAttacher({
+        repoRoot,
+        runId: requestedManifest.runId,
+      })
+    : undefined;
   const integration = checkpoint
     ? await ensureIntegrationWorktree(repoRoot, checkpoint, log)
     : await addWorktree({
@@ -902,6 +911,7 @@ export async function runCodexBatch(
                     ),
                 }
               : {}),
+            ...(onWorkerLease ? { onWorkerLease } : {}),
           });
         }),
       );
