@@ -48,7 +48,6 @@
         "controller-death-nested-core"
       ],
       "readPaths": [
-        "design/controller-death-nested-processes-v1.md",
         "design/worker-process-tree-v1.md",
         "docs/evidence/WORKER_PROCESS_TREE.md",
         "docs/evidence/WORKER_LEASE.md",
