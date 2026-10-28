@@ -113,6 +113,13 @@ interface WorkerHarness {
   fail: ReadonlySet<string>;
   /** Task ids whose worker mutates the authority checkout. */
   mutateAuthority: ReadonlySet<string>;
+  /**
+   * Absolute paths the worker appends to during collect. This simulates a
+   * control-plane checkpoint (deadline/budget extension) landing mid-wave.
+   */
+  mutatePaths?: ReadonlySet<string>;
+  /** Paths actually mutated, so a test can prove the write happened. */
+  mutations?: string[];
 }
 
 function fixtureWorker(cwd: string, harness: WorkerHarness): AgentAdapter {
@@ -157,6 +164,16 @@ function fixtureWorker(cwd: string, harness: WorkerHarness): AgentAdapter {
           "written by worker\n",
           "utf8",
         );
+      }
+      for (const path of harness.mutatePaths ?? []) {
+        // A real checkpoint rewrites valid JSON atomically. Keep the fixture
+        // parseable and make the content observably different.
+        const current = JSON.parse(readFileSync(path, "utf8")) as {
+          updatedAt?: string;
+        };
+        current.updatedAt = new Date(Date.now() + 60_000).toISOString();
+        writeFileSync(path, `${JSON.stringify(current, null, 2)}\n`, "utf8");
+        harness.mutations?.push(path);
       }
       const file = `${contract.taskId}.txt`;
       writeFileSync(join(cwd, file), "done\n", "utf8");
@@ -313,6 +330,10 @@ test("clean wave accepts every task and persists guard-only clean records", asyn
       observation.policies[0]!.ledgerPath,
       join(repo, ".cliyard", "ledger.json"),
     );
+    // Exactly the active manifest is excluded; not the whole runs directory.
+    assert.deepEqual(observation.policies[0]!.excludedPaths, [
+      runManifestPath(repo, manifest.runId),
+    ]);
 
     const saved = loadRunManifest(repo, manifest.runId);
     for (const id of ["task-a", "task-b"]) {
@@ -335,6 +356,162 @@ test("clean wave accepts every task and persists guard-only clean records", asyn
       assert.ok(Date.parse(record!.comparedAt) >= Date.parse(record!.capturedAt));
     }
     assert.equal(saved.status, "completed");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("the active RunManifest may change during a wave without failing the boundary", async () => {
+  const repo = initRepo();
+  try {
+    const base = runGit(repo, ["rev-parse", "HEAD"]);
+    const contractsPath = writeContracts(repo, ["task-a"], base);
+    const manifest = createRunManifest(repo, {
+      planId: "active-manifest",
+      contractsPath,
+      baseCommit: base,
+      integrationBranch: "cliyard/integration/active-manifest",
+      tasks: ["task-a"],
+    });
+    const manifestPath = runManifestPath(repo, manifest.runId);
+    const harness: WorkerHarness = {
+      repo,
+      started: [],
+      fail: new Set(),
+      mutateAuthority: new Set(),
+      // The control plane legitimately checkpoints extension grants into the
+      // active manifest while the worker is still running.
+      mutatePaths: new Set([manifestPath]),
+      mutations: [],
+    };
+
+    const result = await runCodexBatch(
+      batchOptions(repo, contractsPath, manifest, harness),
+    );
+
+    assert.deepEqual(
+      harness.mutations,
+      [manifestPath],
+      "the fixture must have changed the active manifest during the wave",
+    );
+    assert.equal(result.allAccepted, true);
+    assert.equal(result.results[0]!.verdict, "accepted");
+    const saved = loadRunManifest(repo, manifest.runId);
+    assert.equal(saved.tasks["task-a"]!.accepted, true);
+    assert.equal(saved.tasks["task-a"]!.workspaceBoundary?.status, "clean");
+    // The legitimate checkpoint survives final acceptance.
+    assert.ok(existsSync(manifestPath));
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("another RunManifest change during a wave is still a violation", async () => {
+  const repo = initRepo();
+  try {
+    const base = runGit(repo, ["rev-parse", "HEAD"]);
+    const contractsPath = writeContracts(repo, ["task-a"], base);
+    const manifest = createRunManifest(repo, {
+      planId: "active-manifest-guarded",
+      contractsPath,
+      baseCommit: base,
+      integrationBranch: "cliyard/integration/active-manifest-guarded",
+      tasks: ["task-a"],
+    });
+    const other = createRunManifest(repo, {
+      runId: "other-run",
+      activate: false,
+      planId: "other-plan",
+      contractsPath,
+      baseCommit: base,
+      integrationBranch: "cliyard/integration/other-run",
+      tasks: ["task-a"],
+    });
+    const otherPath = runManifestPath(repo, other.runId);
+    const harness: WorkerHarness = {
+      repo,
+      started: [],
+      fail: new Set(),
+      mutateAuthority: new Set(),
+      mutatePaths: new Set([otherPath]),
+      mutations: [],
+    };
+
+    const result = await runCodexBatch(
+      batchOptions(repo, contractsPath, manifest, harness),
+    );
+
+    assert.deepEqual(harness.mutations, [otherPath]);
+    assert.equal(result.allAccepted, false);
+    assert.equal(result.integration.head, base);
+    const saved = loadRunManifest(repo, manifest.runId);
+    const task = saved.tasks["task-a"]!;
+    assert.equal(task.accepted, false);
+    assert.equal(task.failure?.code, "workspace_boundary_violation");
+    const record = task.workspaceBoundary!;
+    assert.equal(record.status, "violation");
+    const changed = record.changes.find(
+      (change) => change.path === ".cliyard/runs/other-run.json",
+    );
+    assert.ok(changed, "only the active manifest may be excluded");
+    assert.equal(changed!.rootIndex, 0);
+    assert.equal(changed!.change, "modified");
+    assert.equal(changed!.kind, "file");
+    assert.ok(changed!.beforeDigest);
+    assert.ok(changed!.afterDigest);
+    assert.notEqual(changed!.beforeDigest, changed!.afterDigest);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("a plain batch without a requested manifest does not exclude RunManifests", async () => {
+  const repo = initRepo();
+  try {
+    const base = runGit(repo, ["rev-parse", "HEAD"]);
+    const contractsPath = writeContracts(repo, ["task-a"], base);
+    // A manifest exists on disk, but this batch is not bound to it.
+    const plain = createRunManifest(repo, {
+      runId: "plain-run",
+      activate: false,
+      planId: "plain-plan",
+      contractsPath,
+      baseCommit: base,
+      integrationBranch: "cliyard/integration/plain-run",
+      tasks: ["task-a"],
+    });
+    const plainPath = runManifestPath(repo, plain.runId);
+    const harness: WorkerHarness = {
+      repo,
+      started: [],
+      fail: new Set(),
+      mutateAuthority: new Set(),
+      mutatePaths: new Set([plainPath]),
+      mutations: [],
+    };
+
+    const result = await runCodexBatch({
+      contractsPath,
+      repoRoot: repo,
+      ledgerPath: join(repo, ".cliyard", "ledger.json"),
+      worker: "codex",
+      dryRun: false,
+      keepWorktrees: false,
+      workerFactory: (_worker: "codex" | "claude", cwd: string) =>
+        fixtureWorker(cwd, harness),
+    });
+
+    assert.deepEqual(harness.mutations, [plainPath]);
+    assert.equal(result.allAccepted, false);
+    assert.equal(result.results.length, 1);
+    assert.equal(result.results[0]!.verdict, "rejected");
+    assert.equal(
+      result.results[0]!.failure?.code,
+      "workspace_boundary_violation",
+      "a plain batch must keep every RunManifest guarded",
+    );
+    assert.match(result.results[0]!.reason ?? "", /workspace boundary violation/);
+    assert.equal(result.integration.head, base);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
@@ -528,6 +705,59 @@ test("capture failure before dispatch skips workers and fails every task closed"
       assert.equal(record.status, "inspection_error");
       assert.match(record.error ?? "", /injected capture failure/);
     }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("compare failure after the wave fails closed with bounded evidence", async () => {
+  const repo = initRepo();
+  try {
+    const base = runGit(repo, ["rev-parse", "HEAD"]);
+    const contractsPath = writeContracts(repo, ["task-a"], base);
+    const manifest = createRunManifest(repo, {
+      planId: "compare-failure",
+      contractsPath,
+      baseCommit: base,
+      integrationBranch: "cliyard/integration/compare-failure",
+      tasks: ["task-a"],
+    });
+    const harness: WorkerHarness = {
+      repo,
+      started: [],
+      fail: new Set(),
+      mutateAuthority: new Set(),
+    };
+
+    const result = await runCodexBatch(
+      batchOptions(
+        repo,
+        contractsPath,
+        manifest,
+        harness,
+        injectedGuardFactory({ kind: "compare_throw" }),
+      ),
+    );
+
+    // Capture succeeded, so the worker ran; the throw happens on compare and
+    // must still fail the whole wave closed before acceptance or merge.
+    assert.deepEqual(harness.started, ["task-a"]);
+    assert.equal(result.allAccepted, false);
+    assert.equal(result.integration.head, base);
+    const saved = loadRunManifest(repo, manifest.runId);
+    const task = saved.tasks["task-a"]!;
+    assert.equal(task.accepted, false);
+    assert.equal(task.status, "blocked");
+    assert.equal(task.failure?.code, "workspace_boundary_inspection_failed");
+    const record = task.workspaceBoundary!;
+    assert.equal(record.status, "inspection_error");
+    assert.match(record.error ?? "", /injected compare failure/);
+    assert.deepEqual(record.changes, []);
+    assert.equal(
+      runGit(repo, ["rev-list", "--count", `${base}..HEAD`]),
+      "0",
+      "the authority branch must not advance",
+    );
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

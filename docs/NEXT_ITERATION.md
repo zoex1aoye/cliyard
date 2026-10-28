@@ -9,8 +9,9 @@
 > **Plan-backed Chained Queue Base v0（单条线性依赖）**、
 > **Chained Read Context v0（readPaths 对齐 pinned base）**、
 > **ControlSnapshot/event/resource v0**、
-> **Worker Failure Taxonomy / Cost Truth v0**，以及
-> **WorkerLease v1（same-host controller owner-death recovery）** 均已实现。
+> **Worker Failure Taxonomy / Cost Truth v0**、
+> **WorkerLease v1（same-host controller owner-death recovery）**，以及
+> **WorkspaceBoundary v1（guard-only detection）** 均已实现。
 > 最终实测（2026-10-27，failure/cost 工作树，代码 HEAD `69f62de`）：
 > `npm run build` exit `0`；failure taxonomy focused **14/14**（85.7 ms）、
 > Claude failure/cost **17/17**（11694.1 ms）、supervisor failure/cost
@@ -167,10 +168,50 @@
 > 保留，不声称进程组等价。证据见
 > [evidence/WORKER_LEASE.md](evidence/WORKER_LEASE.md)。
 >
+> **2026-10-28 WorkspaceBoundary v1 closure（guard-only detection）：**
+> 每个并行 ready wave 在 worker 启动前捕获 authority checkout 与显式 extra
+> roots 的确定性快照，并在任何结果被 accepted/merged 之前比较。regular file
+> 使用 SHA-256 content digest、symlink 使用 link target、directory 使用布局
+> 变化判定；full snapshot 只在内存中，RunManifest 只保存 bounded
+> path-level changes 与 digests。dirty 或 inspection_failed 会使整个 wave
+> 的所有任务以 `workspace_boundary_violation` /
+> `workspace_boundary_inspection_failed` 阻塞，不 merge、不删除、不回滚任何
+> 证据；已失败的 worker 保留原 structured failure。**active RunManifest
+> 例外：** deadline/budget extension checkpoint 会在 wave 运行期间合法重写
+> `.cliyard/runs/<runId>.json`，因此 policy 只排除
+> `requestedManifest.runId` 对应的精确绝对路径；其他 RunManifest、
+> `queue.json`、plans/contracts、authority source 和受保护 Git state 仍全部
+> 受 guard 约束；没有 `runManifest` 的 plain batch 不获得任何
+> `.cliyard/runs` 排除。core 同时收紧 fail-closed：所有 control character
+> 都被替换（不止第一个），snapshot Map 中的 null/undefined/非对象值返回
+> bounded inspection failure，而不是未受控的 TypeError；SIGKILL fixture 的
+> marker/call log 移入已排除的 `.cliyard/logs`，原有恢复断言不变。实测
+> （2026-10-28，macOS，Node `v20.20.2`）：`npm run build` exit 0；5 个
+> focused 文件 **76/76**（24799.9 / 24715.8 / 24734.4 ms；另一次宿主高负载
+> 下 74/76，2 个失败均为既有 deadline-extension timing 测试）；完整套件
+> 两次 **432/432**（25866.4 / 25941.0 ms，0 fail）。另两次重复完整运行各
+> 失败 1 个，仍是
+> deadline-extension timing（`maxTotalTimeoutMs`、`collect waits for an
+> in-flight grant checkpoint past child exit`）；该文件单独重跑 6 次也有 1 次
+> 2 个 timing 失败，说明与本切片无关。上一次 verifier 的唯一失败同样属于该
+> 既有 deadline-extension timing flake，所有 WorkspaceBoundary 测试均通过；
+> 不据此声明 flake rate。**限制：** 这是 guard-only detection；
+> active RunManifest 是 trusted control-plane state，排除在 in-flight
+> comparison 之外；guard 不解析 `.gitignore`，ignored dependency/build
+> trees 需要显式 protected roots 或未来 prevention；已回滚的写入不可见；
+> 同一 wave 内的并发变化被有意归因于整个 wave；这不是 OS sandbox、
+> credential isolation 或 network isolation。**下一安全任务是
+> provider-neutral `SandboxProvider` 写防护**。本切片未添加 sandbox/provider
+> 依赖，未改 Node 或 package 依赖，也未自动 revert、删除或隐藏证据。证据见
+> [evidence/WORKSPACE_BOUNDARY.md](evidence/WORKSPACE_BOUNDARY.md)。
+>
 > 当前已完成能力仍不包含 daemon/后台服务、跨主机回收、浏览器证据、SQLite、
 > 有界并行准入和多父 integration/merge queue；WorkerLease v1 只覆盖
 > same-host POSIX group，不包含 stdout 重接、Windows Job Objects 或自动
-> resume。其中 **CLI + 模型路由、有界
+> resume。WorkspaceBoundary v1 已实现为 guard-only detection，但 OS 级
+> write prevention（provider-neutral `SandboxProvider`）仍未实现，不能据此
+> 声称 containment、credential isolation 或 network isolation。其中
+> **CLI + 模型路由、有界
 > 并行派发和 EvidenceBundle 已升级为下一阶段目标**，不代表当前已经实现。
 > 自动 push 或自动合入 main 仍是长期人工门禁。
 > attempt reuse 只是 worktree 连续性（不是 provider 会话续跑）；worker

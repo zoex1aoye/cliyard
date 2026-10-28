@@ -1,10 +1,12 @@
 # WorkspaceBoundary v1
 
-> Status: implementation contract
+> Status: **implemented — guard-only detection** (2026-10-28)
 >
 > Date: 2026-10-28
 >
 > Priority: P0 safety prerequisite for parallel and unattended delivery
+>
+> Evidence: [../docs/evidence/WORKSPACE_BOUNDARY.md](../docs/evidence/WORKSPACE_BOUNDARY.md)
 
 ## Problem
 
@@ -52,6 +54,15 @@ excluded from comparison:
 - `.cliyard/queue-events/`;
 - `.cliyard/logs/`;
 - the configured ledger path.
+
+For a Supervisor-backed batch, the **exact active RunManifest** path
+(`runManifestPath(repoRoot, requestedManifest.runId)`) is also excluded from
+the in-flight comparison: deadline and budget extension checkpoints
+legitimately rewrite it while workers run. This is a trusted control-plane
+path, not worker evidence, and the exclusion is one exact file. Every other
+RunManifest, the runs directory layout, `queue.json`, plans/contracts,
+authority source and protected Git state remain guarded. A plain batch without
+a requested manifest gains no `.cliyard/runs` exclusion.
 
 No result may infer safety from a clean task worktree alone.
 
@@ -117,6 +128,41 @@ Required evidence:
 - manifest round-trip and legacy-manifest compatibility;
 - human and JSON status projections;
 - `npm run build` and the complete test suite.
+
+## Implementation status
+
+Implemented on 2026-10-28:
+
+- protected-root snapshot/compare core in
+  `src/agents/workspace-boundary.ts` with content digests, symlink-target
+  digests, directory layout, deterministic ordering, bounded evidence and
+  fail-closed caps;
+- per-wave capture/compare in `src/scheduler/codex-batch.ts`, bounded
+  `WorkspaceBoundaryRecord` persistence for every task in the wave, stable
+  policy failure codes and status projection;
+- exact active RunManifest exclusion for `requestedManifest.runId`; a sibling
+  RunManifest change is still a violation and a plain batch has no
+  `.cliyard/runs` exclusion;
+- fail-closed hardening: every control character is sanitized (not only the
+  first), and null/undefined/non-object snapshot map values return a bounded
+  inspection failure instead of an uncontrolled `TypeError`;
+- deterministic integration coverage for active-manifest changes, sibling
+  manifest changes, plain batches, dirty/inspection-error waves, capture and
+  compare failures, and the production guard.
+
+Measured evidence and exact limitations:
+[../docs/evidence/WORKSPACE_BOUNDARY.md](../docs/evidence/WORKSPACE_BOUNDARY.md).
+Focused boundary set 76/76 in clean repeated runs; complete suite 432/432
+green. Repeated local full runs hit only pre-existing
+`deadline-extension.test.ts` timing flakes, which reproduce with that file run
+alone and are unrelated to this slice; no workspace-boundary test failed.
+
+The remaining safety gap is **prevention**. A future provider-neutral
+`SandboxProvider` (Codex Sandbox, Anthropic Sandbox Runtime,
+bubblewrap/Landlock or a container) must wrap worker processes behind a
+separate normalized interface and must not change this evidence model. Until
+then this slice is detection only, not OS sandboxing, credential isolation or
+network isolation.
 
 ## Non-goals
 

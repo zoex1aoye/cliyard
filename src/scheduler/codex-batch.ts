@@ -595,11 +595,24 @@ function createWorkspaceBoundaryGuard(
 function workspaceBoundaryPolicy(
   repoRoot: string,
   ledgerPath: string,
+  requestedRunId: string | undefined,
 ): WorkspaceBoundaryPolicy {
   // Default exclusions cover the mutable control plane (worktrees, runtime,
   // worker/queue events, leases, logs) and the ledger; the authority checkout
   // source, important Git state and control authority files stay protected.
-  return { authorityRoot: repoRoot, ledgerPath };
+  //
+  // The control plane legitimately checkpoints the *active* RunManifest while
+  // a wave runs (deadline and budget extension grants). Exclude exactly that
+  // manifest path and nothing else: every other RunManifest under
+  // `.cliyard/runs` stays guarded, and a plain batch without a requested
+  // manifest gains no `.cliyard/runs` exclusion at all.
+  return {
+    authorityRoot: repoRoot,
+    ledgerPath,
+    ...(requestedRunId !== undefined
+      ? { excludedPaths: [runManifestPath(repoRoot, requestedRunId)] }
+      : {}),
+  };
 }
 
 /**
@@ -1045,7 +1058,7 @@ export async function runCodexBatch(
       // worker is dispatched.
       const boundaryGuard = createWorkspaceBoundaryGuard(
         opts,
-        workspaceBoundaryPolicy(repoRoot, ledgerPath),
+        workspaceBoundaryPolicy(repoRoot, ledgerPath, requestedManifest?.runId),
       );
       const boundaryCapturedAt = new Date().toISOString();
       const boundaryPreError = await captureWorkspaceBoundaryGuard(
