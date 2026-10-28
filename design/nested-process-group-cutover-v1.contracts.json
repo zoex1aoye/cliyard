@@ -1,0 +1,44 @@
+{
+  "planId": "nested-process-group-cutover-v1",
+  "contracts": [
+    {
+      "taskId": "nested-process-group-cutover-evidence",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Document and measure the reviewed nested process-group implementation from reviewed cutover base a9d6e00 per design/nested-process-group-cutover-v1.md. Make documentation-only changes: add docs/evidence/NESTED_PROCESS_GROUP_OWNERSHIP.md and update design/worker-process-tree-v1.md, README.md and docs/NEXT_STEP_CONTROLLER.md. Run the focused worker/process-tree and worker-lease tests, build and complete suite from this exact worktree; record exact pass counts, durations and commands. Explain the reviewed two-attempt provenance, exact group-leader registry, guarded negative-pgid cleanup, exact-pid fallback, controller-death recovery, 512-member real fixtures, parser/status evidence and the fact that this cutover run is the first outer Worker lifecycle using the new manager. Preserve explicit limits for Windows, cross-host, never-observed descendants, OS write sandboxing and the separate verifier timeout-margin gap. Do not modify source or test files; do not claim acceptance, merge or that the earlier blocked runs succeeded."
+      ],
+      "nonGoals": [
+        "Do not modify source or tests.",
+        "Do not claim Windows or cross-host process ownership.",
+        "Do not claim recovery for descendants that were never observed before controller death.",
+        "Do not change verifier timeout policy.",
+        "Do not merge or push the reviewed draft."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/worker-process-tree-v1.md",
+        "docs/evidence/WORKER_PROCESS_TREE.md",
+        "docs/evidence/WORKER_LEASE.md",
+        "src/agents/process-tree.ts",
+        "src/agents/worker-lease.ts",
+        "tests/worker-process-tree.test.ts",
+        "tests/worker-lease.test.ts"
+      ],
+      "writePaths": [
+        "README.md",
+        "design/worker-process-tree-v1.md",
+        "docs/NEXT_STEP_CONTROLLER.md",
+        "docs/evidence/NESTED_PROCESS_GROUP_OWNERSHIP.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "a9d6e0072703bd805d7eb33b629f0f9337337cb3",
+      "verifyCommands": [
+        "npx tsx --test tests/worker-process-tree.test.ts tests/worker-lease.test.ts",
+        "npm run build",
+        "npm test"
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
