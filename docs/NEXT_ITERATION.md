@@ -96,9 +96,11 @@
 > `OperatorResolution` 记录 reviewed commit、冻结 contracts identity、复核
 > evidence hash、批准人和原因。动态评分必须晚于真实 profile 激活和准入，
 > 否则只是在尚未实际切换 binding 的情况下选择一个标签。cliyard 自身
-> SIGKILL 后的 same-host worker 组恢复已由 WorkerLease v1 覆盖；Windows
-> 完整进程树仍归入未实现的 `ProcessOwnerProvider` / Job Object 边界。具体
-> 决定见 [execution-authority-v1.md](../design/execution-authority-v1.md)。
+> SIGKILL 后的 same-host worker 组恢复已由 WorkerLease v1 覆盖，但仅限
+> top-level dedicated group；worker 用 `setsid` 创建的 nested group 不在
+> lease 记录中，仍是未闭合缺口。Windows 完整进程树仍归入未实现的
+> `ProcessOwnerProvider` / Job Object 边界。具体决定见
+> [execution-authority-v1.md](../design/execution-authority-v1.md)。
 >
 > **2026-10-28 queue adoption closure：** `manual-queue-adoption`
 > (`b7f7d9e`) 与 `deadline-fixture-stability` (`c57d591`) 已合入
@@ -205,9 +207,36 @@
 > 依赖，未改 Node 或 package 依赖，也未自动 revert、删除或隐藏证据。证据见
 > [evidence/WORKSPACE_BOUNDARY.md](evidence/WORKSPACE_BOUNDARY.md)。
 >
+> **2026-10-28 worker-process-tree v1.1 closure（in-process nested groups）：**
+> 在 v1 dedicated group 基础上，`ProcessInspector.snapshotProcessTable()`
+> 提供 bounded（8,192 行，malformed row/duplicate pid 均 fail closed）的
+> pid/ppid/pgid/lstart 快照；worker manager 在 leader 存活期间以 ≥250ms
+> 低频采样跟踪后代，并在 timeout/cancel/child-close 时停止采样、合并一份
+> root 身份仍精确匹配的新快照；对 `pgid` 不同于 managed group 的后代逐个
+> re-read `(pid,pgid,lstart)`，只有精确匹配才用 exact pid 发送
+> SIGTERM → SIGKILL。同组 descendants 继续走原有 group SIGTERM → SIGKILL，
+> 未改 group 路径。拒绝 pid 1、cliyard 自身/自身 group、身份变化/复用、
+> malformed rows 和超界 targets；over-bound 或无法 revalidate 的证据使
+> 结果 fail closed。记录仍为 version 1，新增字段全部 optional，旧记录可读。
+> 实测（2026-10-28，macOS，Node `v20.20.2`）：`npm run build` exit 0；
+> focused `tests/worker-process-tree.test.ts` **22/22**（7741.68 ms），其中
+> 真实 detached helper 位于独立 POSIX group，timeout/cancel 均清理 top-level
+> 与 nested group；leader 被 SIGKILL 后 sampler evidence 仍能清理 nested
+> helper；伪造 `lstart` 的无关进程不被 signal；nested cleanup 无法完成时
+> 结果 fail closed 且记录仍可 round-trip；完整 `npm test` **440/440**
+> （25853.11 ms，0 fail）。**限制：** 只覆盖 controller 存活期间的清理。
+> WorkerLease v1 仍只持久化 top-level group；controller 被 SIGKILL 后，
+> nested `setsid` group 无法从 lease/recovery 得知，因此 **controller-death
+> 的 nested group recovery 未闭合**，是下一 process-ownership follow-up。
+> 不包含 Windows Job Object、pkill/process-name matching/broad scan、跨主机
+> 信号或自动 resume。证据见
+> [evidence/WORKER_PROCESS_TREE.md](evidence/WORKER_PROCESS_TREE.md)。
+>
 > 当前已完成能力仍不包含 daemon/后台服务、跨主机回收、浏览器证据、SQLite、
 > 有界并行准入和多父 integration/merge queue；WorkerLease v1 只覆盖
-> same-host POSIX group，不包含 stdout 重接、Windows Job Objects 或自动
+> same-host POSIX group，worker-process-tree v1.1 也只在 controller 存活时
+> 清理 nested group，controller-death 的 nested recovery 仍未闭合，且不含
+> stdout 重接、Windows Job Objects 或自动
 > resume。WorkspaceBoundary v1 已实现为 guard-only detection，但 OS 级
 > write prevention（provider-neutral `SandboxProvider`）仍未实现，不能据此
 > 声称 containment、credential isolation 或 network isolation。其中
