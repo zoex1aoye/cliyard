@@ -18,6 +18,7 @@ import {
   parseWorkerProcessRecord,
   type WorkerProcessRecord,
 } from "../agents/process-tree.js";
+import type { WorkerLeaseAttacher } from "../agents/worker-lease.js";
 import type { Verifier } from "../verification/verifier.js";
 import {
   aggregateCostTruth,
@@ -61,6 +62,11 @@ export interface LoopOptions {
   onExtension?: (
     extension: TaskExtensionRecord,
   ) => void | Promise<void>;
+  /**
+   * Run-scoped worker lease sink. Standalone loops leave this unset; the
+   * Supervisor-backed batch supplies it so every spawned worker is tracked.
+   */
+  onWorkerLease?: WorkerLeaseAttacher;
 }
 
 export interface LoopResult {
@@ -171,6 +177,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
       priorFailure,
       ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
       ...(onExtension ? { onExtension } : {}),
+      ...(opts.onWorkerLease ? { onWorkerLease: opts.onWorkerLease } : {}),
     });
     const agentResult = await worker.collect(sessionId);
     for (const extension of agentResult.extensions ?? []) {

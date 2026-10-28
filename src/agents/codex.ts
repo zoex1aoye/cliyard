@@ -3,6 +3,7 @@
  * Default model: deepseek-v4-pro (DeepSeek provider via Codex login).
  */
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { collectChangedPaths } from "./git-paths.js";
 import {
@@ -24,6 +25,18 @@ import type {
   AgentResult,
   AgentStartInput,
 } from "./types.js";
+import type {
+  WorkerLeaseAttacher,
+  WorkerLeaseHandle,
+} from "./worker-lease.js";
+
+interface LeaseInvocation {
+  attacher: WorkerLeaseAttacher;
+  taskId: string;
+  attempt: number;
+  invocationId: string;
+  workspace: string;
+}
 
 export interface CodexWorkerOptions {
   /** Working directory (worktree path). Required for real runs. */
@@ -57,6 +70,7 @@ function runCodex(
   timeoutMs: number,
   processTree: WorkerProcessTreeManager,
   onSpawn: (managed: ManagedWorkerProcess) => void,
+  lease?: LeaseInvocation,
 ): Promise<{
   code: number;
   stdout: string;
@@ -74,6 +88,39 @@ function runCodex(
     });
     const child = managed.child;
     onSpawn(managed);
+    let leaseHandle: WorkerLeaseHandle | undefined;
+    let leaseError: Error | undefined;
+    const leaseAttached = (async (): Promise<void> => {
+      if (!lease) return;
+      try {
+        leaseHandle = await lease.attacher({
+          taskId: lease.taskId,
+          attempt: lease.attempt,
+          invocationId: lease.invocationId,
+          workspace: lease.workspace,
+          managed,
+        });
+      } catch (error) {
+        leaseError = error instanceof Error ? error : new Error(String(error));
+        // The attacher stops the worker on persistence failure; repeat the
+        // idempotent cleanup so every adapter path is fail-closed.
+        const outcome = await managed.cleanup("spawn-error");
+        leaseError = attachProcessTreeEvidence(leaseError, outcome);
+      }
+    })();
+    const finishLease = async (
+      outcome: Parameters<WorkerLeaseHandle["update"]>[0],
+    ): Promise<Error | undefined> => {
+      await leaseAttached;
+      if (leaseError) return leaseError;
+      if (!leaseHandle) return undefined;
+      try {
+        await leaseHandle.update(outcome);
+        return undefined;
+      } catch (error) {
+        return attachProcessTreeEvidence(error, outcome);
+      }
+    };
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -93,7 +140,12 @@ function runCodex(
       clearTimeout(timer);
       void (async () => {
         const outcome = await managed.cleanup("spawn-error");
-        reject(attachProcessTreeEvidence(err, outcome));
+        const leaseFailure = await finishLease(outcome);
+        reject(
+          leaseFailure
+            ? leaseFailure
+            : attachProcessTreeEvidence(err, outcome),
+        );
       })();
     });
     child.on("close", (code, signal) => {
@@ -102,6 +154,11 @@ function runCodex(
         const outcome = await managed.cleanup(
           timedOut ? "timeout" : "child-close",
         );
+        const leaseFailure = await finishLease(outcome);
+        if (leaseFailure) {
+          reject(leaseFailure);
+          return;
+        }
         resolvePromise({
           code: timedOut ? 124 : (code ?? 1),
           stdout,
@@ -244,6 +301,15 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
             (managed) => {
               managers.set(sessionId, managed);
             },
+            input.onWorkerLease
+              ? {
+                  attacher: input.onWorkerLease,
+                  taskId: input.contract.taskId,
+                  attempt: input.attempt,
+                  invocationId: randomUUID(),
+                  workspace: opts.cwd,
+                }
+              : undefined,
           );
           recordWorkerProcessTree(processTrees, res.processTree);
           let changed: Awaited<ReturnType<typeof collectChangedPaths>>;
