@@ -1,0 +1,66 @@
+---
+description: CLI/模型可替换路由、两级并行和动态准入的执行原则
+alwaysApply: true
+---
+
+# 路由与并行准入
+
+## 两级并行
+
+```text
+多条 queue item / branch                  # inter-item
+  └─ 单 item 内 Plan task DAG ready wave  # intra-item
+```
+
+两级都必须受同一套资源真相约束。单分支内能并行，不代表多分支可以同时无条件启动。
+
+并行成立的最小条件：
+
+- 每条线有独立 runId、worktree、branch、evidence 和 runtime identity；
+- 同一基线 wave 的 write paths 不重叠；
+- 依赖基于已接受上游 integration commit；
+- 全局限制同时覆盖 queue item、task、runtime、visual/browser、CPU/RAM、磁盘和 provider；
+- sibling failure 不覆盖已接受 sibling 的证据；
+- parallel accepted branches 不自动相互合并。
+
+## CLI + Model 不是绑定标签
+
+必须分别表达 Runtime/CLI、Model、Provider、Endpoint/Account binding 与 capabilities。
+
+至少处理三种现实：
+
+1. 一个订阅/API 暴露多个模型，多种 CLI 可消费；
+2. 一个订阅/API 暴露多个模型，但只有一种 CLI 可消费；
+3. 只有一个模型可用，但有多种可配置的 CLI。
+
+路由依据是任务所需能力、上下文、视觉、工具、会话恢复、速度、成功率、成本和当前可用性，
+不是固定认为某个 CLI 永远更强。
+
+## 未知和观测
+
+- provider 并发、quota、balance、pricing、observed latency 和 pass rate 没测到就保持 `unknown/null`。
+- 不能把公开名义限额、另一个账号的配置、一次成功请求或订阅名称当作当前 binding 的证据。
+- 未知 ExecutionProfile 初始只放 1 个 in-flight probe。
+- `maxParallelItems=3` / `maxParallelTasksPerItem=3` 是 warm start 或设计样例，不是永久硬编码上限。
+- 429、rate-limit headers、provider error、实际用量和余额只能在绑定/账号可验证时成为观测。
+
+## 准入闸门
+
+派发前至少检查：
+
+- 设计/Plan 已确认，契约已冻结且字节未变；
+- 依赖已接受，base commit 可达且 lineage 正确；
+- 能力与 ExecutionProfile 兼容；
+- host CPU/RAM/disk、runtime/port/browser slot 可容纳；
+- provider binding 已知容量或允许一个 probe；
+- budget/time/attempt/continuation policy 有界且可审计；
+- 验收命令、运行证据和清理方式已定义。
+
+未知或缺失信息不能自动变成“无限”；只能 blocked、needs_human 或有明确依据的单 probe。
+
+## 禁止
+
+- 以固定 3、固定 9080 或固定模型名称代替实际准入。
+- 用端口不冲突证明可以无限增加浏览器、测试进程或 provider 请求。
+- 为追求并行把共享迁移、共享 fixture、同一文件编辑或共享数据库放进独立 worktree。
+- 在 ProfileCatalog、真实 binding activation 和固定分层 admission 未完成前宣称已具备动态路由或全量并行。

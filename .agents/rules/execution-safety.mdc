@@ -1,0 +1,48 @@
+---
+description: worktree、文件边界、进程身份、端口 lease 和运行现场的精确安全纪律
+alwaysApply: true
+---
+
+# 执行安全
+
+## 写入边界
+
+- Worker 只允许改冻结契约的 `writePaths`；所有路径必须是仓库相对路径，拒绝绝对路径、`..` 和符号链接逃逸。
+- 每次 Worker exit 都做 path audit，包括非零退出、预算耗尽和超时；accepted 前还要有最终 artifact 审核。
+- 发现越界文件时 fail closed，保留现场并报告；不要自动删除归属不确定的 temp、cache 或 untracked 文件。
+- 主控制仓库是受保护根。WorkspaceBoundary 的 snapshot 是检测和兜底，不是 OS 写保护。
+- 不得把 `WorkspaceBoundary=clean` 描述成 sandbox、credential isolation 或 network isolation。
+- 新增 OS 写保护时通过可替换 `SandboxProvider`/adapter 接入，不依赖某个 Agent CLI 的私有内部 API。
+
+## Worktree 与 lineage
+
+- 每个并行 task 使用独立 worktree、branch、base commit 和 run/task identity。
+- 同一 wave 的并行任务必须 write-path 不重叠，并基于同一个 integration head。
+- 上游依赖完成后，下游 base 必须是已接受并集成后的 commit，不能只是“队列上看起来轮到它了”。
+- rejected attempt 默认保留 dirty worktree；resume 前重新做 path audit，身份不符则停。
+- integration merge 后重新执行必要的 smoke/visual regression；不能把任务级 green 当作合并后 green。
+
+## 进程所有权
+
+- 回收进程必须持久化并重验精确身份：`pid + pgid + OS lstart/start identity`，必要时加 workspace cwd 证据。
+- 正常退出、超时、cancel、spawn error 和 controller death 都是不同生命周期，必须分别记录证据。
+- 只清理仍被证明属于该 run 的进程组；身份缺失、宿主不同、记录冲突或关系模糊时返回 `needs_human`。
+- 禁止按进程名、端口、模糊 `ps` 结果或“看起来像孤儿”做 broad kill。
+- CLI 或 test runner 可能创建 nested group/session；不能假设顶层 worker group 自动拥有全部后代。
+- 当前 controller-death nested-group recovery 尚未闭环，报告中不得声称已覆盖。
+
+## 运行与端口
+
+- 项目默认端口（如 `9080`）只是开发便利值，不是并行运行身份。
+- 验收服务由 RuntimeManager/Port Allocator 分配独立 `127.0.0.1` 端口并持久化 lease；
+  默认没有安全理由不监听 `0.0.0.0`。
+- 服务、数据库、缓存、上传目录、browser profile、临时数据按 run/runtime 隔离。
+- 启动成功不等于 ready；必须检查进程存活、端口监听、readiness URL 和依赖状态，禁止用固定 sleep 替代。
+- cleanup 使用 `finally` 语义：停止完整进程树、等待端口释放、保存日志和截图、再释放 lease。
+- 端口 lease、runtime slot、browser/visual slot、provider permit 是不同资源，不能互相替代。
+
+## 凭据与日志
+
+- 不把 API key、token、cookie、完整 provider transcript 或未脱敏环境变量写入 RunManifest、queue event、lease 或 Skill 文件。
+- 现场证据允许有界摘要；敏感值必须通过引用或脱敏字段表达。
+- 不通过搜索 shell 配置、历史文件或进程环境来“找回”密钥。

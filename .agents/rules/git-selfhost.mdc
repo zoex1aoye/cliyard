@@ -1,0 +1,55 @@
+---
+description: 分支、提交、worktree、自举来源和已知缺口的执行纪律
+alwaysApply: true
+---
+
+# Git 与自举纪律
+
+## 工作树
+
+- 开工先跑 `git status --short --branch`，保留用户已有修改；不得 reset、checkout、clean 或覆盖不相关内容。
+- 所有 Git 命令显式针对目标仓库；跨仓库任务先确认 root。
+- 默认分支前缀遵循 `codex/`；cliyard 自动生成的 integration/task branch 保持现有命名语义。
+- accepted integration、dirty rejected attempt、临时 worktree 都是证据；清理前先确认 ownership 和审查状态。
+
+## 提交与不可逆操作
+
+- 没有用户明确指令，不 commit、不 push、不 merge、不 rebase 共享历史、不删除分支。
+- 用户要求完成 self-host 派发时，Plan/gap 文档必须先形成独立提交，contracts 再作为独立提交；
+  不能把 Plan、contracts 和实现产物混成一个不可审计提交。
+- 提交信息使用现有约定，例如 `docs: ...`、`chore: ...`、`merge: ...`；历史重写仅限用户明确授权且分支未被共享。
+- push 前核对 remote、branch 和 ahead/behind；失败时先判断网络/代理，不盲目重试或改写历史。
+
+## 自举来源
+
+用 cliyard 迭代 cliyard 时：
+
+1. 确定最新且已验收的 integration worktree；
+2. 在该 worktree 的代码上编译/启动控制面；
+3. 目标仓库仍是主 checkout；
+4. 契约 base 必须来自已验收 integration commit，而不是仍在实现中的 task branch；
+5. RunManifest 必须能证明本次 run 使用了新能力，例如非空 workspaceBoundary；
+6. 保留 task/integration worktree，人工审 diff、测试、进程和证据后才决定合入。
+
+正在任务的 worktree 中新增的控制面代码，不能被同一 run 描述成“已经用自己的新版本执行”。
+
+## 自举顺序
+
+- 先记录缺口与设计判断。
+- 写并提交 Plan/gap docs。
+- 从 accepted integration base 冻结并单独提交 contracts。
+- 从 accepted integration code 启动 Supervisor/queue。
+- 用 evidence 判断 accepted/rejected；不用聊天判断。
+- 失败时保留历史和现场；不得自动改写为成功或自动 adopt。
+
+## 当前下一层
+
+截至 2026-10-28，下一轮安全顺序是：
+
+1. controller-death nested process ownership；
+2. provider-neutral `SandboxProvider`，实现 OS 写预防；
+3. secret-free `ProfileCatalog` + 真实 binding activation；
+4. per-run ownership 与 fixed hierarchical admission；
+5. 版本化 Control API/event stream。
+
+这是优先级，不是已实现声明。动态路由评分、Windows Job Object parity、daemon 和长时间 soak 仍在其后。

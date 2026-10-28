@@ -1,0 +1,57 @@
+---
+description: cliyard 的设计权威、Plan-first、控制面真相和人机权限边界
+alwaysApply: true
+---
+
+# 控制面权威
+
+## 角色
+
+- 人拥有设计方向、关键取舍、Plan 批准、最终证据签收与不可逆操作权。
+- Master/Planner 把设计与现状整理成 Plan；Gateway/Supervisor 做机械准入、状态与恢复。
+- Worker 只实现；Verifier 从精确代码快照独立重跑；Integration 只在明确人工决定后发生。
+- GUI 与 DSH 只消费控制面，不能成为任务、契约、lease 或证据的唯一存储。
+
+## 真相链
+
+```text
+已确认设计
+  → 已审阅 Plan
+  → frozen TaskContract
+  → queue item / attempt
+  → RunManifest
+  → exact artifact + evidence
+  → verdict
+  → human integration decision
+```
+
+- `Plan` 解决“为什么做、怎么拆、改哪里、怎样算过、不做什么”。
+- `TaskContract` 是 Worker 的执行边界，不是 UI 草稿。
+- queue 是派发协调，不是任务 accepted 的权威。
+- `RunManifest` 是 task/run 状态权威；不得为了“看起来成功”重写历史。
+- Worker progress、heartbeat、controller event 和 cost 是观测信号，永不授予 acceptance。
+- Git commit、base 与 ancestry 是代码 lineage 证据；聊天摘要不是。
+
+## Plan-first
+
+- 未审阅的 Plan 不冻结、不派发。
+- 同一需求进入执行前，至少明确：目标、non-goals、允许写路径、验收命令、依赖、运行/视觉证据、风险与预算策略。
+- 任务依赖必须表达真实代码依赖；`dependsOn` 不能只被当成启动顺序装饰。
+- Plan 和契约发生实质修改时，创建新版本并重新审查；禁止在派发后静默改字节。
+
+## 权限边界
+
+以下动作必须有用户明确授权，并在回复中说明将发生什么：
+
+- Plan 批准或替代人做关键产品取舍；
+- 冻结 contracts、将 task 置为 ready、启动真实 worker；
+- commit、push、merge、rebase、删除分支/worktree、清理不确定归属的数据；
+- 接管 blocked/interrupted 结果为 accepted；
+- 声明可以无人值守 24 小时运行或无限并行。
+
+## 当前实现边界
+
+- Supervisor 是前台执行，单仓库锁；没有 daemon、look-ahead controller 或 24h 连续运行保证。
+- queue 当前顺序派发；intra-item DAG ready wave 的并行能力不等于已具备全局并行准入。
+- Plan、Contract、RunManifest、Evidence 模型仍在演进；不能把未来目标写成当前能力。
+- DSH 是 MVP cockpit，不是稳定产品边界；稳定入口目标是版本化本地 Control API。

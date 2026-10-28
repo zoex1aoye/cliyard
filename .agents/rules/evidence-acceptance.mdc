@@ -1,0 +1,67 @@
+---
+description: 独立验收、证据分级、成本真相、续期与人工裁决规则
+alwaysApply: true
+---
+
+# 证据与验收
+
+## 基本判断
+
+Worker 说完成、进程 exit 0、progress 活跃、heartbeat 新鲜，都不等于 accepted。
+
+`accepted` 至少要求：
+
+- 绑定精确 Plan/Contract、base 和 artifact commit；
+- write-path/path audit 无越界，或越界已被明确拒绝；
+- 契约规定的 build、unit、integration、runtime、视觉/a11y 门禁有真实结果；
+- 运行服务从 exact snapshot 启动，readiness 通过，结束后无遗留进程和端口 lease；
+- 失败、未知、未执行项被明确标出；
+- 裁决只覆盖契约事实，不扩大到未验证能力。
+
+没有目标视口的真实渲染对照时，最多 `accepted_with_gap` 或 `needs_human`，不能宣称视觉验收完成。
+
+## Evidence Bundle
+
+证据至少能回答：
+
+```text
+design revision / Plan hash / contracts hash
+base commit / task branch / artifact or integration commit
+commands and exit status
+focused/full test results
+write-path audit
+runtime manifest, leased ports, readiness and logs
+screenshots / a11y / visual diff when applicable
+failure taxonomy and cost truth
+unverified items and P0/P1 findings
+verdict and reason
+```
+
+证据保留在磁盘，并在交付中给路径或稳定引用；不要把整份日志无界粘贴进对话。
+
+## 失败与续期
+
+- `timeout`、`budget_exhausted`、`provider_transient`、`verifier_rejected` 等必须分类，不能都压成 exit 1。
+- deadline extension 只允许在进程仍活、有真实 progress、没有错误风暴且 bounds 允许时持久化后继续。
+- budget continuation 只在 profile 支持 provider-session resume、失败类型明确、attempt/guard 上界允许时发生。
+- guard budget 是护栏，不是实际花费；Claude CLI `total_cost_usd` 是非权威估计。
+- 缺失 cost 是 `unavailable`，不是 `$0`。
+- 自动 retry/续期必须比通用 retry 更窄，并有 reason、attempt bound 和 durable audit。
+
+## blocked 与 adoption
+
+- blocked/interrupted RunManifest 是历史真相，不改写成成功。
+- 人工接管必须写独立、版本化的 `OperatorResolution`/adoption；不得把原 tasks 标记 accepted。
+- adoption 必须绑定 exact run、契约/Plan hash、完整 reviewed commit、lineage、证据和批准人。
+- queue completed(adopted) 与 verifier accepted 是不同事实，状态展示不得混淆。
+
+## 裁决词汇
+
+- `accepted`：契约内证据充分，可进入人工 diff 审查/集成决定。
+- `accepted_with_gap`：主功能可审，但有明确未验证或非阻断缺口。
+- `rejected`：实现或 verifier 门禁失败，需要 repair/retry。
+- `blocked`：依赖、策略、资源或前置条件不满足。
+- `needs_human`：身份、证据、设计或权限存在歧义，系统不得猜。
+- `cancelled`：明确终止，不表示成功。
+
+最终 merge/push 仍是人的不可逆决定。
