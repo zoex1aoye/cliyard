@@ -1,0 +1,87 @@
+{
+  "planId": "adoption-journal-unification-v1",
+  "tasks": [
+    {
+      "taskId": "unify-adoption-journal",
+      "goal": "Repay the adoption event split-brain recorded in design/adoption-journal-unification-v1.md. Extend src/orchestration/event-journal.ts with the first-class `queue.item.adopted` event type and optional bounded adoption fields: sourceManifestStatus, baseCommit, reviewedCommit, contractsHash, reviewEvidencePath, reviewEvidenceHash and approvedBy; reuse existing itemId, runId, status and reason where appropriate. Enforce a strict event-specific contract: all required adoption fields must be present for queue.item.adopted, while adoption-only fields must be absent from every unrelated event type. Validate full commit ids, SHA-256 hashes, sourceManifestStatus blocked|interrupted, status completed, bounded text/path and no secret-bearing values. Change queue adoption to append through the existing best-effort `tryAppendQueueEvent` path and remove the dedicated adoption event constants, writer, reader, summary and adoptions.jsonl protocol. Preserve OperatorResolution as queue authority and preserve best-effort semantics if journal append fails. Change ControlSnapshot's queue.adoptionEvents projection to filter adoption events from the unified journal rather than reading a separate file; preserve a bounded convenience summary and ensure filtering counts latest adoption events correctly even if unrelated recent events fill the normal display window. Keep human status output meaningful. Update tests/queue-adoption.test.ts and tests/queue-control-snapshot.test.ts plus any event-journal test coverage needed to prove: exactly one queue.item.adopted line is appended to events.jsonl; no adoptions.jsonl is created; adoption fields round-trip and malformed/missing/extra-in-wrong-type fields fail closed; secret-bearing fields are rejected; adoption summary derives from the unified journal; malformed lines and unrelated events do not alter adoption authority; queue.json remains valid when journal append fails. Do not change adoption preconditions, lineage, RunManifest behavior or CLI arguments.",
+      "nonGoals": [
+        "Do not read or write a second adoption event stream.",
+        "Do not mutate RunManifest authority.",
+        "Do not change OperatorResolution fields or adoption semantics.",
+        "Do not add log rotation, retention or Control API work.",
+        "Do not weaken best-effort journal semantics."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        ".",
+        "design/adoption-journal-unification-v1.md",
+        "design/queue-adoption-v1.md"
+      ],
+      "writePaths": [
+        "src/orchestration/event-journal.ts",
+        "src/orchestration/queue-store.ts",
+        "src/orchestration/control-snapshot.ts",
+        "src/orchestration/cli.ts",
+        "tests/queue-adoption.test.ts",
+        "tests/queue-control-snapshot.test.ts"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "node --import tsx --test tests/queue-adoption.test.ts tests/queue-control-snapshot.test.ts"
+      ],
+      "deliverables": [
+        "Adoption events use the one unified queue journal.",
+        "The status adoption view is derived from that journal.",
+        "Event-specific validation rejects malformed split fields or secrets.",
+        "OperatorResolution remains the durable authority."
+      ],
+      "forbidden": [
+        "Do not touch files outside writePaths.",
+        "Do not add a compatibility read of adoptions.jsonl.",
+        "Do not grant acceptance from observability events.",
+        "Do not change queue adopt CLI behavior."
+      ],
+      "maxRepairs": 2
+    },
+    {
+      "taskId": "adoption-journal-evidence",
+      "goal": "After unify-adoption-journal is accepted, update only documentation to close the adoption event split-brain debt. Update design/queue-adoption-v1.md, README.md, docs/NEXT_ITERATION.md, docs/NEXT_STEP_CONTROLLER.md and docs/evidence/QUEUE_ADOPTION.md so they state that new queue.item.adopted records live only in .cliyard/queue-events/events.jsonl, while queue status derives its adoptionEvents view from that journal. Remove all claims that adoptions.jsonl is still written or read. Record the event-specific validation/bounds and measured focused/full test counts from the integrated HEAD. Preserve all adoption, RunManifest and lineage semantics. Then run the complete test suite on the integrated base and document only measured results. State that WorkerLease at spawn plus controller owner-death recovery remains the next implementation slice.",
+      "nonGoals": [
+        "No source or test behavior changes.",
+        "No invented evidence.",
+        "No claim of WorkerLease, profile activation, admission, daemon or Windows parity.",
+        "No automatic push or main merge."
+      ],
+      "dependsOn": [
+        "unify-adoption-journal"
+      ],
+      "readPaths": [
+        ".",
+        "design/adoption-journal-unification-v1.md",
+        "design/queue-adoption-v1.md"
+      ],
+      "writePaths": [
+        "design/queue-adoption-v1.md",
+        "README.md",
+        "docs/NEXT_ITERATION.md",
+        "docs/NEXT_STEP_CONTROLLER.md",
+        "docs/evidence/QUEUE_ADOPTION.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npm test"
+      ],
+      "deliverables": [
+        "Documentation names exactly one queue journal.",
+        "Measured test counts and limits are recorded.",
+        "The next WorkerLease prerequisite is unchanged."
+      ],
+      "forbidden": [
+        "Do not edit source or tests.",
+        "Do not touch files outside writePaths.",
+        "Do not claim unmeasured behavior."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
