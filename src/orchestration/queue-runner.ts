@@ -12,8 +12,9 @@
  */
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { compilePlan, parsePlanJson } from "../planner/plan.js";
 import { runSupervisorCli } from "../supervisor/cli.js";
 import {
   getActiveRunId,
@@ -30,10 +31,12 @@ import {
 } from "../failures.js";
 import {
   materializePlan,
+  materializedContractsPath,
   type PlanUpstreamEvidence,
 } from "./plan-materializer.js";
 import {
   checkQueueContracts,
+  isAdoptedQueueItem,
   isPlanBackedQueueItem,
   loadQueue,
   queueCounts,
@@ -41,6 +44,7 @@ import {
   QueueValidationError,
   saveQueue,
   withQueueLockWait,
+  type OperatorResolution,
   type PlanBackedQueueItem,
   type QueueDocument,
   type QueueItem,
@@ -739,6 +743,9 @@ async function dispatchItem(
     ...(item.materialization !== undefined
       ? { materialization: { ...item.materialization } }
       : {}),
+    ...(item.resolution !== undefined
+      ? { resolution: { ...item.resolution } }
+      : {}),
   };
 
   let result: QueueSupervisorResult;
@@ -1191,6 +1198,15 @@ function createPlanMaterialization(
     );
   }
 
+  if (isAdoptedQueueItem(upstream)) {
+    return materializeAdoptedPlan(
+      repoRoot,
+      item,
+      dependencyId,
+      upstream,
+      materializedAt,
+    );
+  }
   const evidence: PlanUpstreamEvidence = {
     queueId: dependencyId,
     status: upstream.status,
@@ -1207,6 +1223,275 @@ function createPlanMaterialization(
     upstream: evidence,
     materializedAt,
   });
+}
+
+interface AdoptedBaseSelection {
+  baseCommit: string;
+  reviewedCommit: string;
+  upstreamRunId: string;
+  upstreamIntegrationHead?: string;
+}
+
+/**
+ * Select the base for a dependent whose upstream was completed by adoption.
+ *
+ * The adopted reviewed commit is the base unless the blocked run's manifest
+ * now carries a usable completed integration head: a full commit that still
+ * descends from its own base and contains the reviewed commit. An unusable
+ * head is ignored rather than trusted. The reviewed commit must always be a
+ * descendant of the operator-validated pinned base.
+ */
+function selectAdoptedUpstreamBase(
+  repoRoot: string,
+  dependencyId: string,
+  upstream: QueueItem & { resolution: OperatorResolution },
+): AdoptedBaseSelection {
+  const resolution = upstream.resolution;
+  if (resolution.queueItemId !== dependencyId) {
+    throw new Error(
+      `adoption resolution queueItemId ${JSON.stringify(
+        resolution.queueItemId,
+      )} does not match dependency ${JSON.stringify(dependencyId)}`,
+    );
+  }
+  const upstreamRunId = lastRunIdOf(upstream);
+  if (!upstreamRunId) {
+    throw new Error(
+      `adopted dependency ${JSON.stringify(dependencyId)} has no recorded ` +
+        "source run id",
+    );
+  }
+  if (upstreamRunId !== resolution.sourceRunId) {
+    throw new Error(
+      `adopted dependency ${JSON.stringify(dependencyId)} run ` +
+        `${JSON.stringify(upstreamRunId)} does not match its resolution ` +
+        `source run ${JSON.stringify(resolution.sourceRunId)}`,
+    );
+  }
+  const upstreamContracts = queueItemContractsIdentity(upstream);
+  if (
+    !upstreamContracts ||
+    upstreamContracts.contractsHash.toLowerCase() !==
+      resolution.contractsHash.toLowerCase()
+  ) {
+    throw new Error(
+      `adopted dependency ${JSON.stringify(dependencyId)} frozen contracts ` +
+        "identity does not match its adoption resolution",
+    );
+  }
+
+  const pinnedBase = resolveExactCommit(
+    repoRoot,
+    resolution.baseCommit,
+    "adoption resolution baseCommit",
+  );
+  const reviewedCommit = resolveExactCommit(
+    repoRoot,
+    resolution.reviewedCommit,
+    "adoption resolution reviewedCommit",
+  );
+  assertAncestorCommit(
+    repoRoot,
+    pinnedBase,
+    reviewedCommit,
+    `adopted reviewed commit ${reviewedCommit} is not a descendant of the ` +
+      `pinned source base ${pinnedBase}`,
+  );
+
+  let upstreamIntegrationHead: string | undefined;
+  let manifest: RunManifest | undefined;
+  try {
+    manifest = loadRunManifest(repoRoot, upstreamRunId);
+  } catch {
+    manifest = undefined;
+  }
+  if (
+    manifest !== undefined &&
+    manifest.runId === upstreamRunId &&
+    manifest.status === "completed" &&
+    resolve(manifest.repoRoot) === resolve(repoRoot) &&
+    resolve(manifest.contractsPath) ===
+      resolve(upstreamContracts.contractsPath) &&
+    manifest.contractsHash.toLowerCase() ===
+      upstreamContracts.contractsHash.toLowerCase()
+  ) {
+    try {
+      const head = resolveExactCommit(
+        repoRoot,
+        manifest.integrationHead,
+        "upstream manifest integrationHead",
+      );
+      const manifestBase = resolveExactCommit(
+        repoRoot,
+        manifest.baseCommit,
+        "upstream manifest baseCommit",
+      );
+      assertAncestorCommit(repoRoot, manifestBase, head);
+      assertAncestorCommit(
+        repoRoot,
+        reviewedCommit,
+        head,
+        `upstream integration head ${head} does not contain the adopted ` +
+          `reviewed commit ${reviewedCommit}`,
+      );
+      upstreamIntegrationHead = head;
+    } catch {
+      // The legacy head is not usable; fall back to the reviewed commit.
+      upstreamIntegrationHead = undefined;
+    }
+  }
+
+  return {
+    baseCommit: upstreamIntegrationHead ?? reviewedCommit,
+    reviewedCommit,
+    upstreamRunId,
+    ...(upstreamIntegrationHead !== undefined
+      ? { upstreamIntegrationHead }
+      : {}),
+  };
+}
+
+/**
+ * Materialize a dependent Plan at an adopted upstream base. This mirrors the
+ * deterministic artifact format of plan-materializer.ts but records explicit
+ * adopted lineage, because the source RunManifest stays blocked/interrupted
+ * and `materializePlan` only accepts completed upstream evidence.
+ */
+function materializeAdoptedPlan(
+  repoRoot: string,
+  item: PlanBackedQueueItem,
+  dependencyId: string,
+  upstream: QueueItem & { resolution: OperatorResolution },
+  materializedAt: string,
+): QueuePlanMaterialization {
+  const selection = selectAdoptedUpstreamBase(repoRoot, dependencyId, upstream);
+
+  const planBytes = readBytesOrThrow(item.planPath, "Plan file");
+  const planHash = sha256Hex(planBytes);
+  if (planHash !== item.planHash.toLowerCase()) {
+    throw new Error(
+      `Plan hash mismatch for ${item.planPath}: expected sha256 ` +
+        `${item.planHash}, found ${planHash}`,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = parsePlanJson(planBytes.toString("utf8"));
+  } catch (error) {
+    throw new Error(
+      `cannot parse Plan ${item.planPath}: ${errorMessage(error)}`,
+    );
+  }
+  let compiled: ReturnType<typeof compilePlan>;
+  try {
+    compiled = compilePlan(parsed, { baseCommit: selection.baseCommit });
+  } catch (error) {
+    throw new Error(
+      `invalid Plan ${item.planPath}: ${errorMessage(error)}`,
+    );
+  }
+  if (compiled.planId !== item.planId) {
+    throw new Error(
+      `Plan id mismatch: Plan declares ${JSON.stringify(compiled.planId)}, ` +
+        `queue item expects ${JSON.stringify(item.planId)}`,
+    );
+  }
+
+  const provenance = {
+    queueId: item.id,
+    planPath: resolve(item.planPath),
+    planHash,
+    planId: compiled.planId,
+    baseCommit: selection.baseCommit,
+    upstreamQueueId: dependencyId,
+    upstreamRunId: selection.upstreamRunId,
+    ...(selection.upstreamIntegrationHead !== undefined
+      ? { upstreamIntegrationHead: selection.upstreamIntegrationHead }
+      : {}),
+    upstreamAdoptedCommit: selection.reviewedCommit,
+  };
+  const artifact = {
+    planId: compiled.planId,
+    contracts: compiled.contracts,
+    provenance,
+  };
+  const expectedBytes = Buffer.from(
+    `${JSON.stringify(artifact, null, 2)}\n`,
+    "utf8",
+  );
+  const contractsPath = materializedContractsPath(
+    repoRoot,
+    item.id,
+    selection.baseCommit,
+    planHash,
+  );
+  const artifactBytes = writeOrVerifyAdoptedArtifact(
+    contractsPath,
+    expectedBytes,
+  );
+
+  return {
+    planPath: resolve(item.planPath),
+    planHash,
+    planId: compiled.planId,
+    baseCommit: selection.baseCommit,
+    upstreamQueueId: dependencyId,
+    upstreamRunId: selection.upstreamRunId,
+    ...(selection.upstreamIntegrationHead !== undefined
+      ? { upstreamIntegrationHead: selection.upstreamIntegrationHead }
+      : {}),
+    upstreamAdoptedCommit: selection.reviewedCommit,
+    contractsPath,
+    contractsHash: sha256Hex(artifactBytes),
+    materializedAt,
+  };
+}
+
+/** Exclusive-create or byte-verify an adopted materialization artifact. */
+function writeOrVerifyAdoptedArtifact(
+  path: string,
+  expectedBytes: Buffer,
+): Buffer {
+  let existing: Buffer | undefined;
+  try {
+    existing = readFileSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new Error(
+        `cannot read materialized contracts artifact ${path}: ` +
+          `${errorMessage(error)}`,
+      );
+    }
+  }
+  if (existing !== undefined) {
+    if (!existing.equals(expectedBytes)) {
+      throw new Error(
+        `materialized contracts artifact changed or is ambiguous: ${path}; ` +
+          "refusing to overwrite",
+      );
+    }
+    return existing;
+  }
+
+  mkdirSync(dirname(path), { recursive: true });
+  try {
+    writeFileSync(path, expectedBytes, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+      throw new Error(
+        `cannot write materialized contracts artifact ${path}: ` +
+          `${errorMessage(error)}`,
+      );
+    }
+  }
+  const written = readBytesOrThrow(path, "materialized contracts artifact");
+  if (!written.equals(expectedBytes)) {
+    throw new Error(
+      `materialized contracts artifact changed or is ambiguous: ${path}; ` +
+        "refusing to overwrite",
+    );
+  }
+  return written;
 }
 
 /**
@@ -1303,6 +1588,15 @@ function verifyRecordedUpstreamEvidence(
   materialization: QueuePlanMaterialization,
   byId: ReadonlyMap<string, QueueItem>,
 ): void {
+  if (materialization.upstreamAdoptedCommit !== undefined) {
+    verifyRecordedAdoptedUpstreamEvidence(
+      repoRoot,
+      item,
+      materialization,
+      byId,
+    );
+    return;
+  }
   const dependencyId = item.dependsOn[0];
   if (item.dependsOn.length !== 1 || dependencyId === undefined) {
     throw new Error(
@@ -1426,6 +1720,219 @@ function verifyRecordedUpstreamEvidence(
     "upstream manifest baseCommit",
   );
   assertAncestorCommit(repoRoot, manifestBase, manifestHead);
+}
+
+/**
+ * Verify a recorded materialization whose upstream was completed by adoption.
+ * The reviewed commit remains the explicit lineage anchor; an integration
+ * head is accepted only when it contains that commit.
+ */
+function verifyRecordedAdoptedUpstreamEvidence(
+  repoRoot: string,
+  item: PlanBackedQueueItem,
+  materialization: QueuePlanMaterialization,
+  byId: ReadonlyMap<string, QueueItem>,
+): void {
+  const dependencyId = item.dependsOn[0];
+  if (item.dependsOn.length !== 1 || dependencyId === undefined) {
+    throw new Error(
+      `dependent plan-backed item ${JSON.stringify(item.id)} must have ` +
+        "exactly one dependency",
+    );
+  }
+  const upstream = byId.get(dependencyId);
+  if (!upstream) {
+    throw new Error(
+      `dependency ${JSON.stringify(dependencyId)} is missing from the queue`,
+    );
+  }
+  if (upstream.status !== "completed") {
+    throw new Error(
+      `dependency ${JSON.stringify(dependencyId)} is not completed ` +
+        `(status: ${upstream.status})`,
+    );
+  }
+  if (!isAdoptedQueueItem(upstream)) {
+    throw new Error(
+      `dependency ${JSON.stringify(dependencyId)} no longer records an ` +
+        "OperatorResolution",
+    );
+  }
+  const resolution = upstream.resolution;
+  const upstreamRunId = lastRunIdOf(upstream);
+  if (!upstreamRunId) {
+    throw new Error(
+      `dependency ${JSON.stringify(dependencyId)} has no completed run id`,
+    );
+  }
+  if (resolution.queueItemId !== dependencyId) {
+    throw new Error(
+      `adoption resolution queueItemId ${JSON.stringify(
+        resolution.queueItemId,
+      )} does not match the item dependency ${JSON.stringify(dependencyId)}`,
+    );
+  }
+  if (resolution.sourceRunId !== upstreamRunId) {
+    throw new Error(
+      `adoption resolution source run ${JSON.stringify(
+        resolution.sourceRunId,
+      )} does not match the upstream item run ${JSON.stringify(upstreamRunId)}`,
+    );
+  }
+  if (materialization.upstreamQueueId !== dependencyId) {
+    throw new Error(
+      `recorded materialization upstream ${String(
+        materialization.upstreamQueueId,
+      )} does not match the item dependency ${JSON.stringify(dependencyId)}`,
+    );
+  }
+  if (materialization.upstreamRunId !== upstreamRunId) {
+    throw new Error(
+      `recorded materialization upstream run ${String(
+        materialization.upstreamRunId,
+      )} does not match the upstream item run ${upstreamRunId}`,
+    );
+  }
+
+  const adoptedCommitField = materialization.upstreamAdoptedCommit;
+  if (adoptedCommitField === undefined) {
+    throw new Error("recorded materialization is missing upstreamAdoptedCommit");
+  }
+  const adoptedCommit = adoptedCommitField.toLowerCase();
+  const reviewedCommit = resolveExactCommit(
+    repoRoot,
+    adoptedCommit,
+    "materialization upstreamAdoptedCommit",
+  );
+  if (reviewedCommit !== resolution.reviewedCommit.toLowerCase()) {
+    throw new Error(
+      `recorded materialization adopted commit ${reviewedCommit} does not ` +
+        `match the adoption resolution reviewed commit ` +
+        `${resolution.reviewedCommit}`,
+    );
+  }
+  const pinnedBase = resolveExactCommit(
+    repoRoot,
+    resolution.baseCommit,
+    "adoption resolution baseCommit",
+  );
+  assertAncestorCommit(
+    repoRoot,
+    pinnedBase,
+    reviewedCommit,
+    `adopted reviewed commit ${reviewedCommit} is not a descendant of the ` +
+      `pinned source base ${pinnedBase}`,
+  );
+
+  if (materialization.upstreamIntegrationHead !== undefined) {
+    const integrationHead = resolveExactCommit(
+      repoRoot,
+      materialization.upstreamIntegrationHead,
+      "materialization upstreamIntegrationHead",
+    );
+    if (integrationHead !== materialization.baseCommit.toLowerCase()) {
+      throw new Error(
+        `recorded materialization base ${materialization.baseCommit} does ` +
+          `not equal the recorded upstream integration head ` +
+          `${integrationHead}`,
+      );
+    }
+    assertAncestorCommit(
+      repoRoot,
+      reviewedCommit,
+      integrationHead,
+      `upstream integration head ${integrationHead} does not contain the ` +
+        `adopted reviewed commit ${reviewedCommit}`,
+    );
+    let manifest: RunManifest;
+    try {
+      manifest = loadRunManifest(repoRoot, upstreamRunId);
+    } catch (error) {
+      throw new Error(
+        `cannot load upstream RunManifest ${JSON.stringify(upstreamRunId)}: ` +
+          `${errorMessage(error)}`,
+      );
+    }
+    if (manifest.status !== "completed") {
+      throw new Error(
+        `upstream RunManifest ${JSON.stringify(upstreamRunId)} is not ` +
+          `completed (status: ${manifest.status}); its integration head ` +
+          "cannot remain an adopted base",
+      );
+    }
+    const manifestHead = resolveExactCommit(
+      repoRoot,
+      manifest.integrationHead,
+      "upstream manifest integrationHead",
+    );
+    if (manifestHead !== integrationHead) {
+      throw new Error(
+        `recorded materialization integration head ${integrationHead} does ` +
+          `not match upstream RunManifest ${JSON.stringify(upstreamRunId)}`,
+      );
+    }
+  } else if (materialization.baseCommit.toLowerCase() !== reviewedCommit) {
+    throw new Error(
+      `recorded materialization base ${materialization.baseCommit} is ` +
+        `neither the adopted reviewed commit ${reviewedCommit} nor a ` +
+        "recorded integration head",
+    );
+  }
+
+  const upstreamContracts = queueItemContractsIdentity(upstream);
+  if (
+    !upstreamContracts ||
+    upstreamContracts.contractsHash.toLowerCase() !==
+      resolution.contractsHash.toLowerCase()
+  ) {
+    throw new Error(
+      `dependency ${JSON.stringify(dependencyId)} frozen contracts ` +
+        "identity does not match its adoption resolution",
+    );
+  }
+  let manifest: RunManifest;
+  try {
+    manifest = loadRunManifest(repoRoot, upstreamRunId);
+  } catch (error) {
+    throw new Error(
+      `cannot load upstream RunManifest ${JSON.stringify(upstreamRunId)}: ` +
+        `${errorMessage(error)}`,
+    );
+  }
+  if (manifest.runId !== upstreamRunId) {
+    throw new Error(
+      `upstream RunManifest run id ${JSON.stringify(manifest.runId)} does ` +
+        `not match recorded lastRunId ${JSON.stringify(upstreamRunId)}`,
+    );
+  }
+  if (resolve(manifest.repoRoot) !== resolve(repoRoot)) {
+    throw new Error(
+      `upstream RunManifest ${JSON.stringify(upstreamRunId)} belongs to ` +
+        `${resolve(manifest.repoRoot)}, not ${repoRoot}`,
+    );
+  }
+  if (
+    resolve(manifest.contractsPath) !==
+      resolve(upstreamContracts.contractsPath) ||
+    manifest.contractsHash.toLowerCase() !==
+      upstreamContracts.contractsHash.toLowerCase()
+  ) {
+    throw new Error(
+      `upstream RunManifest ${JSON.stringify(upstreamRunId)} contracts ` +
+        "identity does not match the frozen upstream evidence",
+    );
+  }
+  if (
+    manifest.status !== "blocked" &&
+    manifest.status !== "interrupted" &&
+    manifest.status !== "completed"
+  ) {
+    throw new Error(
+      `upstream RunManifest ${JSON.stringify(upstreamRunId)} is ` +
+        `${manifest.status}; an adopted upstream must remain blocked, ` +
+        "interrupted or completed",
+    );
+  }
 }
 
 /** A resumed run must still describe this Plan item and its artifact/base. */
@@ -1581,11 +2088,16 @@ function verifyArtifactProvenance(
     provenance.upstreamIntegrationHead,
     "upstreamIntegrationHead",
   );
+  const upstreamAdoptedCommit = optionalArtifactString(
+    provenance.upstreamAdoptedCommit,
+    "upstreamAdoptedCommit",
+  );
   if (materialization.upstreamQueueId === undefined) {
     if (
       upstreamQueueId !== undefined ||
       upstreamRunId !== undefined ||
-      upstreamIntegrationHead !== undefined
+      upstreamIntegrationHead !== undefined ||
+      upstreamAdoptedCommit !== undefined
     ) {
       throw new Error(
         "materialized contracts artifact records upstream lineage for a " +
@@ -1596,7 +2108,45 @@ function verifyArtifactProvenance(
   }
   if (
     upstreamQueueId !== materialization.upstreamQueueId ||
-    upstreamRunId !== materialization.upstreamRunId ||
+    upstreamRunId !== materialization.upstreamRunId
+  ) {
+    throw new Error(
+      "materialized contracts artifact upstream provenance does not match " +
+        "the recorded materialization",
+    );
+  }
+  if (materialization.upstreamAdoptedCommit !== undefined) {
+    if (
+      upstreamAdoptedCommit === undefined ||
+      upstreamAdoptedCommit.toLowerCase() !==
+        materialization.upstreamAdoptedCommit.toLowerCase()
+    ) {
+      throw new Error(
+        "materialized contracts artifact adopted upstream provenance does " +
+          "not match the recorded materialization",
+      );
+    }
+    if (materialization.upstreamIntegrationHead === undefined) {
+      if (upstreamIntegrationHead !== undefined) {
+        throw new Error(
+          "materialized contracts artifact records an unused upstream " +
+            "integration head",
+        );
+      }
+    } else if (
+      upstreamIntegrationHead === undefined ||
+      upstreamIntegrationHead.toLowerCase() !==
+        materialization.upstreamIntegrationHead.toLowerCase()
+    ) {
+      throw new Error(
+        "materialized contracts artifact upstream provenance does not match " +
+          "the recorded materialization",
+      );
+    }
+    return;
+  }
+  if (
+    upstreamAdoptedCommit !== undefined ||
     upstreamIntegrationHead === undefined ||
     materialization.upstreamIntegrationHead === undefined ||
     upstreamIntegrationHead.toLowerCase() !==
@@ -1615,7 +2165,11 @@ function planLineage(item: PlanBackedQueueItem): string {
     materialization?.baseCommit ?? item.planBaseCommit ?? "<pending>";
   const upstream =
     materialization?.upstreamQueueId !== undefined
-      ? ` upstream ${materialization.upstreamQueueId}#${materialization.upstreamRunId ?? "-"} integrationHead ${materialization.upstreamIntegrationHead ?? "-"}`
+      ? ` upstream ${materialization.upstreamQueueId}#${materialization.upstreamRunId ?? "-"}` +
+        ` integrationHead ${materialization.upstreamIntegrationHead ?? "-"}` +
+        (materialization.upstreamAdoptedCommit !== undefined
+          ? ` adopted ${materialization.upstreamAdoptedCommit}`
+          : "")
       : "";
   const contracts = materialization
     ? ` contracts ${materialization.contractsPath} (sha256 ${materialization.contractsHash})`
@@ -1727,6 +2281,7 @@ function assertAncestorCommit(
   repoRoot: string,
   ancestor: string,
   descendant: string,
+  message?: string,
 ): void {
   const result = spawnSync(
     "git",
@@ -1741,8 +2296,9 @@ function assertAncestorCommit(
   }
   if (result.status === 1) {
     throw new Error(
-      `upstream manifest base ${ancestor} is not an ancestor of integration ` +
-        `head ${descendant}`,
+      message ??
+        `upstream manifest base ${ancestor} is not an ancestor of ` +
+          `integration head ${descendant}`,
     );
   }
   if (result.status !== 0) {
