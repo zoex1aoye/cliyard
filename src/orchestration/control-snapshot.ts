@@ -10,14 +10,14 @@ import {
   loadQueue,
   queueCounts,
   queueItemContractsIdentity,
-  readQueueAdoptionEvents,
-  type QueueAdoptionEventSummary,
   type QueueCounts,
   type QueueItem,
   type QueueLockInspection,
 } from "./queue-store.js";
 import {
+  readQueueAdoptionEvents,
   readQueueEventJournal,
+  type QueueAdoptionEventSummary,
   type QueueControlEvent,
   type QueueEventJournalSummary,
 } from "./event-journal.js";
@@ -173,7 +173,10 @@ export interface ControlSnapshot {
   queue: {
     updatedAt: string;
     lock: QueueLockInspection;
-    /** Bounded manual-adoption event stream (design/queue-adoption-v1.md). */
+    /**
+     * Bounded manual-adoption projection filtered from the unified queue
+     * journal (design/adoption-journal-unification-v1.md).
+     */
     adoptionEvents: QueueAdoptionEventSummary;
   };
   journal: QueueEventJournalSummary;
