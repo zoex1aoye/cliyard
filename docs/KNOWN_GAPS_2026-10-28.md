@@ -202,6 +202,40 @@ that reviewed draft:
 This is required to prove the new outer manager can own a high-fan-out Worker
 lifecycle. It does not retroactively accept the two blocked RunManifests.
 
+## Third cutover attempt and registry-boundary gap
+
+Cutover run `d4c96416-51b8-48b5-9f26-f1119f90784e` did load Supervisor from
+reviewed draft `a9d6e00`. Its documentation-only Worker passed focused 62/62,
+build and complete 461/461 in 25.999 seconds, changed only the four allowed
+documentation paths, and had a clean WorkspaceBoundary.
+
+It was still rejected because the live lease reached the bounded 16-group
+registry while the current process table was complete enough to enumerate the
+groups. The recorded outcome had zero residual processes and zero group
+signals:
+
+```text
+process_tree_cleanup_failed
+descendant snapshot exceeded a bounded nested registry limit
+residualCount=0
+signalledGroups=0
+```
+
+This exposes a P0 design error: live cleanup completeness and durable
+controller-death recovery completeness are not the same condition. The live
+cleanup may enumerate all currently reachable groups within the 8,192-row table
+cap, while the lease must remain bounded. A truncated lease can make future
+controller-death recovery `needs_human`; it must not by itself reject a live
+cleanup that proves all current groups gone.
+
+The next Plan is prepared but not dispatched:
+
+- [nested-registry-live-cleanup-v1.2.md](../design/nested-registry-live-cleanup-v1.2.md);
+- [nested-registry-live-cleanup-v1.2.plan.json](../design/nested-registry-live-cleanup-v1.2.plan.json).
+
+Before another paid self-host run, review whether this live-cleanup versus
+durable-recovery separation is the intended semantic boundary.
+
 ## Next-run execution rule
 
 For subsequent self-host runs:
