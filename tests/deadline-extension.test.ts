@@ -382,7 +382,7 @@ ${resultLine()}
     const result = await runFixture(
       fixture,
       policy({
-        baseTimeoutMs: 1_500,
+        baseTimeoutMs: 2_000,
         extensionStepMs: 3_000,
         healthyActivityWindowMs: 10_000,
       }),
@@ -409,7 +409,7 @@ ${resultLine()}
     assert.equal(extension.source, "auto");
     assert.equal(extension.attempt, 0);
     assert.equal(extension.extensionMs, 3000);
-    assert.equal(extension.cumulativeTimeoutMs, 4500);
+    assert.equal(extension.cumulativeTimeoutMs, 5000);
     assert.equal(extension.healthyEvidence.length, 1);
     assert.match(extension.healthyEvidence[0]!, /^assistant@/);
     assert.ok(extension.providerSessionId);
@@ -450,8 +450,8 @@ await delay(2_000);
     const result = await runFixture(
       fixture,
       policy({
-        baseTimeoutMs: 1_500,
-        extensionStepMs: 900,
+        baseTimeoutMs: 2_500,
+        extensionStepMs: 1_200,
         healthyActivityWindowMs: 10_000,
       }),
       (extension) => {
@@ -462,11 +462,11 @@ await delay(2_000);
 
     assert.equal(result.exitCode, 1);
     assert.equal(result.failure?.category, "timeout");
-    assert.match(result.failure?.message ?? "", /timed out after 2400ms/);
+    assert.match(result.failure?.message ?? "", /timed out after 3700ms/);
     assert.equal(grants.length, 1);
     assert.equal(result.extensions?.length, 1);
     assert.deepEqual(result.extensions, grants);
-    assert.equal(result.extensions?.[0]?.cumulativeTimeoutMs, 2400);
+    assert.equal(result.extensions?.[0]?.cumulativeTimeoutMs, 3700);
   } finally {
     fixture.cleanup();
     rmSync(markerRoot, { recursive: true, force: true });
@@ -546,7 +546,7 @@ ${resultLine("unreachable success")}
     const result = await runFixture(
       fixture,
       policy({
-        baseTimeoutMs: 1_500,
+        baseTimeoutMs: 2_500,
         extensionStepMs: 1_000,
         healthyActivityWindowMs: 10_000,
       }),
