@@ -1,0 +1,60 @@
+{
+  "planId": "workspace-boundary-v1-finish",
+  "tasks": [
+    {
+      "taskId": "workspace-boundary-integration-finish",
+      "goal": "Finish WorkspaceBoundary v1 from the reviewed rejected draft commit 3645c4c, without rewriting the original blocked run. Fix the active RunManifest false positive: the control plane legitimately updates the current run manifest while a worker is running for deadline and budget extension checkpoints. In src/scheduler/codex-batch.ts, extend the provider-neutral boundary policy for a wave so the exact active manifest path for requestedManifest.runId is excluded, while every other RunManifest, queue.json, plans/contracts, authority source and protected Git state remain guarded. A plain batch without a requested RunManifest must not gain a broad .cliyard/runs exclusion. Keep no silent disable path. Update tests/workspace-boundary-integration.test.ts with explicit coverage that the active manifest can change during the wave, another RunManifest change is still a violation, plain batches do not exclude all RunManifests, and capture/compare failure remains fail-closed. Harden the accepted core in src/agents/workspace-boundary.ts: sanitize every control character rather than only the first, and make validateSnapshot fail closed on a null/undefined/non-object map value instead of throwing an uncontrolled TypeError; add focused tests in tests/workspace-boundary.test.ts. In tests/supervisor-cli.test.ts, move the fake worker marker and call log from the authority checkout root into the excluded .cliyard/logs directory and create that directory before spawning; do not weaken the guard or exclude arbitrary test files. Preserve the existing expected SIGKILL recovery assertions. Run the exact focused test set repeatedly enough to catch the prior failures, then run the complete npm test suite and ensure it is green in the normal control-plane environment. Add docs/evidence/WORKSPACE_BOUNDARY.md with exact behavior, exclusions, fail-closed semantics, measured focused/full counts, and explicit limitations: guard-only detection; current active RunManifest is trusted control-plane state and excluded from the in-flight comparison; ignored dependency/build trees require explicit protected roots or future prevention; reverted writes are not detectable; concurrent wave changes are deliberately attributed to the whole wave; this is not OS sandboxing, credential isolation or network isolation. Update README.md, docs/NEXT_ITERATION.md, docs/NEXT_STEP_CONTROLLER.md and design/workspace-boundary-v1.md so WorkspaceBoundary v1 guard-only detection is marked implemented while the SandboxProvider/prevention gap remains the next safety task. Do not implement a sandbox provider, add dependencies, change Node, auto-revert files, auto-delete evidence or claim prevention.",
+      "nonGoals": [
+        "Do not rewrite or mark accepted the original blocked workspace-boundary-v1 run.",
+        "Do not add an OS sandbox, provider SPI, SRT, Codex Sandbox or container dependency.",
+        "Do not change Node version or package dependencies.",
+        "Do not exclude all RunManifests or all of .cliyard/runs.",
+        "Do not auto-delete, auto-revert or hide an unexpected authority-checkout change.",
+        "Do not claim detection equals prevention, credential isolation or network isolation."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        ".",
+        "design/workspace-boundary-v1.md",
+        "src/agents/workspace-boundary.ts",
+        "tests/workspace-boundary.test.ts",
+        "tests/workspace-boundary-integration.test.ts",
+        "tests/supervisor-cli.test.ts",
+        "tests/budget-continuation.test.ts",
+        "tests/deadline-extension.test.ts"
+      ],
+      "writePaths": [
+        "src/agents/workspace-boundary.ts",
+        "src/scheduler/codex-batch.ts",
+        "tests/workspace-boundary.test.ts",
+        "tests/workspace-boundary-integration.test.ts",
+        "tests/supervisor-cli.test.ts",
+        "docs/evidence/WORKSPACE_BOUNDARY.md",
+        "README.md",
+        "docs/NEXT_ITERATION.md",
+        "docs/NEXT_STEP_CONTROLLER.md",
+        "design/workspace-boundary-v1.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/workspace-boundary.test.ts tests/workspace-boundary-integration.test.ts tests/budget-continuation.test.ts tests/deadline-extension.test.ts tests/supervisor-cli.test.ts",
+        "npm test"
+      ],
+      "deliverables": [
+        "The exact active RunManifest may change for control-plane extension checkpoints without dirtying a wave.",
+        "All other RunManifests and authority state remain guarded.",
+        "Snapshot evidence validation is fully sanitized and cannot throw on malformed map values.",
+        "SIGKILL recovery fixtures write only to excluded control-plane paths.",
+        "The complete suite is green and evidence distinguishes detection from future prevention."
+      ],
+      "forbidden": [
+        "Do not touch files outside writePaths.",
+        "Do not weaken guard semantics to make tests pass.",
+        "Do not exclude the authority checkout, all of .cliyard or all RunManifests.",
+        "Do not alter the original blocked RunManifest.",
+        "Do not claim complete protection for reverted writes, ignored trees, reads or network access."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}
