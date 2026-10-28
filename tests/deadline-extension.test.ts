@@ -92,18 +92,31 @@ interface ClaudeFixture {
   cleanup: () => void;
 }
 
+type AssistantActivity = "none" | "once" | "continuous";
+
+interface ClaudeBinaryOptions {
+  /**
+   * Mapped assistant activity:
+   * - `none`: no mapped event (denial by missing mapped evidence);
+   * - `once`: one record immediately before the node runner starts;
+   * - `continuous`: a shell-level stream from process start until the fixture
+   *   leader exits, so evidence freshness never depends on Node startup.
+   */
+  assistant?: AssistantActivity;
+  /** Emit one unmapped thinking-token record before the node runner starts. */
+  thinkingPrelude?: boolean;
+  /** Emit one unresolved provider error before the node runner starts. */
+  errorPrelude?: boolean;
+}
+
 function claudeFixture(
   body: string,
   taskId = "deadline-fixture",
-  withAssistant = true,
+  options: ClaudeBinaryOptions = {},
 ): ClaudeFixture {
   const root = mkdtempSync(join(tmpdir(), "cliyard-deadline-bin-"));
   const repo = initRepo();
-  const { binary, argsPath } = writeClaudeBinary(
-    root,
-    body,
-    withAssistant,
-  );
+  const { binary, argsPath } = writeClaudeBinary(root, body, options);
   return {
     root,
     repo,
@@ -120,7 +133,7 @@ function claudeFixture(
 function writeClaudeBinary(
   root: string,
   body: string,
-  withAssistant: boolean,
+  options: ClaudeBinaryOptions = {},
 ): { binary: string; argsPath: string } {
   const binary = join(root, "fake-claude");
   const argsPath = join(root, "args.txt");
@@ -131,6 +144,16 @@ function writeClaudeBinary(
 const fs = require("node:fs");
 const path = require("node:path");
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Marker waits are bounded so a lost fixture signal becomes a visible test
+// failure instead of an indefinitely open child process.
+const waitForPath = async (file, timeoutMs = 10_000) => {
+  const until = Date.now() + timeoutMs;
+  while (!fs.existsSync(file)) {
+    if (Date.now() >= until) return false;
+    await delay(10);
+  }
+  return true;
+};
 fs.writeFileSync(${JSON.stringify(argsPath)}, process.argv.slice(2).join(" "));
 (async () => {
 ${body}
@@ -144,11 +167,47 @@ ${body}
       content: [{ type: "text", text: "working on allowed.ts" }],
     },
   });
+  const thinking = JSON.stringify({
+    type: "system",
+    subtype: "thinking_tokens",
+    thinking_tokens: { text: "not mapped to task progress" },
+  });
+  const providerError = JSON.stringify({
+    type: "error",
+    error: { message: "fixture provider error" },
+  });
+  const activity = options.assistant ?? "once";
+  /**
+   * The shell starts before the Node runner, so a continuous stream keeps
+   * mapped progress fresh through Node startup under suite-wide load. `$$` is
+   * the process-group leader (this shell, then the exec'd runner); the stream
+   * exits when the leader does, which lets the adapter observe close promptly.
+   */
+  const stream =
+    activity === "continuous"
+      ? `(
+  while kill -0 $$ 2>/dev/null; do
+    printf '%s\\n' ${shellQuote(assistant)}
+    sleep 0.05
+  done
+) &
+`
+      : "";
+  const prelude = [
+    activity === "none" ? "" : `printf '%s\\n' ${shellQuote(assistant)}`,
+    options.thinkingPrelude
+      ? `printf '%s\\n' ${shellQuote(thinking)}`
+      : "",
+    options.errorPrelude
+      ? `printf '%s\\n' ${shellQuote(providerError)}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
   writeFileSync(
     binary,
     `#!/bin/sh
-${withAssistant ? `printf '%s\\n' ${shellQuote(assistant)}` : ""}
-exec "${process.execPath}" ${shellQuote(runnerPath)} "$@"
+${stream}${prelude}${prelude ? "\n" : ""}exec "${process.execPath}" ${shellQuote(runnerPath)} "$@"
 `,
   );
   chmodSync(binary, 0o755);
@@ -214,16 +273,6 @@ function resultLine(result = "fixture complete"): string {
 }));`;
 }
 
-function assistantLine(text = "mapped fixture progress"): string {
-  return `console.log(JSON.stringify({
-  type: "assistant",
-  message: {
-    role: "assistant",
-    content: [{ type: "text", text: ${JSON.stringify(text)} }]
-  }
-}));`;
-}
-
 function extensionRecord(
   overrides: Partial<TaskExtensionRecord> = {},
 ): TaskExtensionRecord {
@@ -251,9 +300,10 @@ function delay(ms: number): Promise<void> {
 /**
  * Diagnostic bounds for event-driven fixture waits. These only decide how a
  * lost callback or a child that never exits is reported; they are never the
- * schedule under test, so they can be far longer than the policy timers.
+ * schedule under test, so they can be several times longer than the policy
+ * timers without extending a passing run.
  */
-const DIAGNOSTIC_WAIT_MS = 15_000;
+const DIAGNOSTIC_WAIT_MS = 10_000;
 
 function withDiagnosticDeadline<T>(
   label: string,
@@ -305,32 +355,35 @@ function isProcessAlive(pid: number): boolean {
 }
 
 /**
- * The child waits for a marker written by the grant callback instead of
- * racing a fixed schedule against the extension window. Process startup and
- * the child's own IO stay on the pre-grant side of the deadline, so the result
- * lands shortly after the grant rather than at the edge of the extended
- * deadline.
+ * Successful-extension fixtures use a shell-level continuous assistant stream
+ * and a grant-callback marker. The base deadline is only a startup margin (the
+ * shell streams from process start, before Node boots), so it can stay short;
+ * the extension step is a re-arm/completion margin and, when no test waits for
+ * the following deadline, does not lengthen a passing run. The exact policy
+ * values, cumulative bound and re-arm ordering remain the assertions under
+ * test.
  */
 test("healthy mapped activity persists one exact grant before extending", async () => {
   const markerRoot = mkdtempSync(
     join(tmpdir(), "cliyard-deadline-grant-marker-"),
   );
   const grantMarkerPath = join(markerRoot, "granted");
-  const fixture = claudeFixture(`
-${assistantLine("healthy fixture progress")}
-while (!fs.existsSync(${JSON.stringify(grantMarkerPath)})) {
-  await delay(10);
-}
+  const fixture = claudeFixture(
+    `
+await waitForPath(${JSON.stringify(grantMarkerPath)});
 fs.appendFileSync(path.join(process.cwd(), "allowed.ts"), "\\nexport const extended = true;\\n");
 ${resultLine()}
-`);
+`,
+    "deadline-fixture",
+    { assistant: "continuous" },
+  );
   const grants: TaskExtensionRecord[] = [];
   try {
     const result = await runFixture(
       fixture,
       policy({
-        baseTimeoutMs: 3_000,
-        extensionStepMs: 2_000,
+        baseTimeoutMs: 1_500,
+        extensionStepMs: 3_000,
         healthyActivityWindowMs: 10_000,
       }),
       (extension) => {
@@ -355,8 +408,8 @@ ${resultLine()}
     assert.equal(extension.kind, "deadline");
     assert.equal(extension.source, "auto");
     assert.equal(extension.attempt, 0);
-    assert.equal(extension.extensionMs, 2000);
-    assert.equal(extension.cumulativeTimeoutMs, 5000);
+    assert.equal(extension.extensionMs, 3000);
+    assert.equal(extension.cumulativeTimeoutMs, 4500);
     assert.equal(extension.healthyEvidence.length, 1);
     assert.match(extension.healthyEvidence[0]!, /^assistant@/);
     assert.ok(extension.providerSessionId);
@@ -376,23 +429,29 @@ test("a result after the extended deadline still loses to timeout", async () => 
     join(tmpdir(), "cliyard-deadline-late-marker-"),
   );
   const grantMarkerPath = join(markerRoot, "granted");
-  const fixture = claudeFixture(`
-${assistantLine("late fixture progress")}
-while (!fs.existsSync(${JSON.stringify(grantMarkerPath)})) {
-  await delay(10);
-}
-// The grant moves the deadline to 5s; this result would arrive at ~7s.
-await delay(4_000);
+  const fixture = claudeFixture(
+    `
+await waitForPath(${JSON.stringify(grantMarkerPath)});
+// The grant moves the deadline to base + step. Schedule the result after
+// that extended deadline and keep the child alive afterwards: even if the
+// host delays the deadline timer, the adapter must see a live child and a
+// result observed after the deadline, never a queued close that lets the
+// late result win.
+await delay(1_500);
 fs.appendFileSync(path.join(process.cwd(), "allowed.ts"), "\\nexport const tooLate = true;\\n");
 ${resultLine("too late")}
-`);
+await delay(2_000);
+`,
+    "deadline-fixture",
+    { assistant: "continuous" },
+  );
   const grants: TaskExtensionRecord[] = [];
   try {
     const result = await runFixture(
       fixture,
       policy({
-        baseTimeoutMs: 3_000,
-        extensionStepMs: 2_000,
+        baseTimeoutMs: 1_500,
+        extensionStepMs: 900,
         healthyActivityWindowMs: 10_000,
       }),
       (extension) => {
@@ -403,11 +462,11 @@ ${resultLine("too late")}
 
     assert.equal(result.exitCode, 1);
     assert.equal(result.failure?.category, "timeout");
-    assert.match(result.failure?.message ?? "", /timed out after 5000ms/);
+    assert.match(result.failure?.message ?? "", /timed out after 2400ms/);
     assert.equal(grants.length, 1);
     assert.equal(result.extensions?.length, 1);
     assert.deepEqual(result.extensions, grants);
-    assert.equal(result.extensions?.[0]?.cumulativeTimeoutMs, 5000);
+    assert.equal(result.extensions?.[0]?.cumulativeTimeoutMs, 2400);
   } finally {
     fixture.cleanup();
     rmSync(markerRoot, { recursive: true, force: true });
@@ -415,7 +474,10 @@ ${resultLine("too late")}
 });
 
 test("thinking-token and heartbeat traffic alone cannot extend a stale deadline", async () => {
-  const fixture = claudeFixture(`
+  // No mapped assistant is emitted by design: unmapped traffic must never
+  // qualify. The shell prelude proves the traffic exists before Node boots.
+  const fixture = claudeFixture(
+    `
 console.log(JSON.stringify({ type: "system", subtype: "init" }));
 for (let i = 0; i < 20; i += 1) {
   await delay(20);
@@ -425,9 +487,14 @@ for (let i = 0; i < 20; i += 1) {
     thinking_tokens: { text: "not mapped to task progress" }
   }));
 }
-await delay(2000);
+// Outlive the deadline by a wide bound so a lost kill cannot let this
+// fixture's late success result win; only missing mapped evidence denies.
+await delay(10_000);
 ${resultLine("too late")}
-`, "deadline-fixture", false);
+`,
+    "deadline-fixture",
+    { assistant: "none", thinkingPrelude: true },
+  );
   const grants: TaskExtensionRecord[] = [];
   try {
     const result = await runFixture(
@@ -452,7 +519,12 @@ ${resultLine("too late")}
 });
 
 test("an unresolved provider error storm denies extension", async () => {
-  const fixture = claudeFixture(`
+  // The prelude emits one mapped record and then an unresolved error before
+  // Node startup. The mapped record is still inside the healthy window at the
+  // deadline, so denial is caused by the unresolved error, not missing
+  // evidence or slow child startup.
+  const fixture = claudeFixture(
+    `
 for (let i = 0; i < 6; i += 1) {
   await delay(20);
   console.log(JSON.stringify({
@@ -460,14 +532,24 @@ for (let i = 0; i < 6; i += 1) {
     error: { message: "retry storm fixture " + i }
   }));
 }
-await delay(1000);
+// Outlive the deadline by a wide bound so the unresolved error, not a child
+// that finished early, is the reason no grant is made; the unreachable
+// success result stays below the diagnostic bound if the kill is lost.
+await delay(10_000);
 ${resultLine("unreachable success")}
-`);
+`,
+    "deadline-fixture",
+    { assistant: "once", errorPrelude: true },
+  );
   const grants: TaskExtensionRecord[] = [];
   try {
     const result = await runFixture(
       fixture,
-      policy({ baseTimeoutMs: 1_200, extensionStepMs: 1_000 }),
+      policy({
+        baseTimeoutMs: 1_500,
+        extensionStepMs: 1_000,
+        healthyActivityWindowMs: 10_000,
+      }),
       (extension) => {
         grants.push(extension);
       },
@@ -483,21 +565,24 @@ ${resultLine("unreachable success")}
 });
 
 test("maxExtensions bounds repeated healthy grants", async () => {
-  const fixture = claudeFixture(`
-await delay(1000);
-${assistantLine("max-extension fixture progress")}
-await delay(1500);
+  const fixture = claudeFixture(
+    `
+await delay(10_000);
 ${resultLine("unreachable success")}
-`);
+`,
+    "deadline-fixture",
+    { assistant: "continuous" },
+  );
   const grants: TaskExtensionRecord[] = [];
   try {
     const result = await runFixture(
       fixture,
       policy({
-        baseTimeoutMs: 1_200,
-        extensionStepMs: 400,
+        baseTimeoutMs: 1_500,
+        extensionStepMs: 600,
         maxExtensions: 1,
-        maxTotalTimeoutMs: 1_600,
+        maxTotalTimeoutMs: 2_100,
+        healthyActivityWindowMs: 10_000,
       }),
       (extension) => {
         grants.push(extension);
@@ -508,28 +593,31 @@ ${resultLine("unreachable success")}
     assert.equal(result.failure?.category, "timeout");
     assert.equal(grants.length, 1);
     assert.equal(result.extensions?.length, 1);
-    assert.equal(result.extensions?.[0]?.cumulativeTimeoutMs, 1600);
+    assert.equal(result.extensions?.[0]?.cumulativeTimeoutMs, 2100);
   } finally {
     fixture.cleanup();
   }
 });
 
 test("maxTotalTimeoutMs bounds cumulative healthy grants", async () => {
-  const fixture = claudeFixture(`
-await delay(1000);
-${assistantLine("max-total fixture progress")}
-await delay(1500);
+  const fixture = claudeFixture(
+    `
+await delay(10_000);
 ${resultLine("unreachable success")}
-`);
+`,
+    "deadline-fixture",
+    { assistant: "continuous" },
+  );
   const grants: TaskExtensionRecord[] = [];
   try {
     const result = await runFixture(
       fixture,
       policy({
-        baseTimeoutMs: 1_200,
-        extensionStepMs: 200,
+        baseTimeoutMs: 1_500,
+        extensionStepMs: 800,
         maxExtensions: 5,
-        maxTotalTimeoutMs: 1_600,
+        maxTotalTimeoutMs: 3_100,
+        healthyActivityWindowMs: 10_000,
       }),
       (extension) => {
         grants.push(extension);
@@ -541,7 +629,7 @@ ${resultLine("unreachable success")}
     assert.equal(grants.length, 2);
     assert.deepEqual(
       grants.map((item) => item.cumulativeTimeoutMs),
-      [1400, 1600],
+      [2300, 3100],
     );
     assert.equal(result.extensions?.length, 2);
   } finally {
@@ -550,30 +638,72 @@ ${resultLine("unreachable success")}
 });
 
 test("the same child timer is re-armed only after async persistence resolves", async () => {
-  const fixture = claudeFixture(`
-await delay(1000);
-${assistantLine("persistence fixture progress")}
-await delay(700);
+  const markerRoot = mkdtempSync(
+    join(tmpdir(), "cliyard-deadline-persistence-"),
+  );
+  const persistedMarkerPath = join(markerRoot, "persisted");
+  const fixture = claudeFixture(
+    `
+await waitForPath(${JSON.stringify(persistedMarkerPath)});
 fs.appendFileSync(path.join(process.cwd(), "allowed.ts"), "\\nexport const persistedFirst = true;\\n");
 ${resultLine()}
-`);
+`,
+    "deadline-fixture",
+    { assistant: "continuous" },
+  );
   const grants: TaskExtensionRecord[] = [];
   let callbackFinishedAt = 0;
+  let signalCallbackStarted: (() => void) | undefined;
+  const callbackStarted = new Promise<void>((resolvePromise) => {
+    signalCallbackStarted = resolvePromise;
+  });
+  let releasePersistence: (() => void) | undefined;
+  const persistence = new Promise<void>((resolvePromise) => {
+    releasePersistence = resolvePromise;
+  });
+  let collection: Promise<AgentResult> | undefined;
   try {
-    const result = await runFixture(
+    collection = runFixture(
       fixture,
       policy({
-        baseTimeoutMs: 1_200,
-        extensionStepMs: 1_500,
-        maxTotalTimeoutMs: 2_700,
+        baseTimeoutMs: 1_500,
+        extensionStepMs: 2_500,
+        healthyActivityWindowMs: 10_000,
       }),
       async (extension) => {
         grants.push(extension);
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
+        signalCallbackStarted!();
+        await persistence;
         callbackFinishedAt = Date.now();
+        // The child only finishes after persistence resolves; a timer armed
+        // before this point would kill it while collect is still pending.
+        writeFileSync(persistedMarkerPath, "persisted");
       },
     );
+    const collectionSettled = collection.then(
+      () => true,
+      () => true,
+    );
 
+    await withDiagnosticDeadline(
+      "extension callback start",
+      callbackStarted,
+    );
+    assert.equal(grants.length, 1);
+    assert.equal(grants[0]!.cumulativeTimeoutMs, 4_000);
+
+    const finishedEarly = await Promise.race([
+      collectionSettled,
+      delay(400).then(() => false),
+    ]);
+    assert.equal(
+      finishedEarly,
+      false,
+      "collect resolved while grant persistence was unresolved",
+    );
+
+    releasePersistence!();
+    const result = await collection;
     assert.equal(
       result.exitCode,
       0,
@@ -582,28 +712,23 @@ ${resultLine()}
     );
     assert.equal(result.failure, undefined);
     assert.equal(grants.length, 1);
-    // A timer armed before persistence would have fired at ~1600ms and killed
-    // this child before its ~1800ms result.
     assert.ok(callbackFinishedAt > 0);
+    assert.ok(Date.parse(grants[0]!.grantedAt) <= callbackFinishedAt);
+    assert.deepEqual(result.extensions, grants);
   } finally {
+    releasePersistence?.();
+    await collection?.catch(() => undefined);
     fixture.cleanup();
+    rmSync(markerRoot, { recursive: true, force: true });
   }
 });
 
 /**
  * The grant callback is the readiness signal; no fixed child schedule is
- * assumed. The fixture keeps emitting mapped assistant activity until that
- * callback writes a marker, so once the child is running:
- *
- * - a host-delayed deadline timer still finds fresh healthy evidence;
- * - the child cannot exit before the grant callback has started, so the only
- *   exit observed here happens with persistence still in flight.
- *
- * The base deadline is bounded by `maxTotalTimeoutMs` (2,600ms), so the startup
- * margin comes from choosing a base well above process startup (2,000ms) and a
- * smaller extension step (600ms). A fixture cannot emit provider output before
- * the OS schedules the child, so any base deadline still shares that one
- * unavoidable startup margin.
+ * assumed. The shell-level stream keeps mapped activity fresh from process
+ * start, so a host-delayed deadline timer still finds healthy evidence. The
+ * child cannot exit before the grant callback has started, so the only exit
+ * observed here happens with persistence still in flight.
  */
 test("collect waits for an in-flight grant checkpoint past child exit", async () => {
   const markerRoot = mkdtempSync(
@@ -612,15 +737,16 @@ test("collect waits for an in-flight grant checkpoint past child exit", async ()
   const grantMarkerPath = join(markerRoot, "granted");
   const childFinishedPath = join(markerRoot, "finished");
   const pidPath = join(markerRoot, "pid");
-  const fixture = claudeFixture(`
+  const fixture = claudeFixture(
+    `
 fs.writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
-while (!fs.existsSync(${JSON.stringify(grantMarkerPath)})) {
-  ${assistantLine("in-flight fixture progress")}
-  await delay(25);
-}
+await waitForPath(${JSON.stringify(grantMarkerPath)});
 fs.writeFileSync(${JSON.stringify(childFinishedPath)}, "finished");
 ${resultLine("finished while checkpoint was pending")}
-`);
+`,
+    "deadline-fixture",
+    { assistant: "continuous" },
+  );
   let releasePersistence: (() => void) | undefined;
   const persistence = new Promise<void>((resolvePromise) => {
     releasePersistence = resolvePromise;
@@ -635,9 +761,8 @@ ${resultLine("finished while checkpoint was pending")}
     collection = runFixture(
       fixture,
       policy({
-        baseTimeoutMs: 2_000,
-        extensionStepMs: 600,
-        maxTotalTimeoutMs: 2_600,
+        baseTimeoutMs: 1_500,
+        extensionStepMs: 2_500,
         healthyActivityWindowMs: 10_000,
       }),
       async (extension) => {
@@ -659,7 +784,7 @@ ${resultLine("finished while checkpoint was pending")}
       callbackStarted,
     );
     assert.equal(grants.length, 1);
-    assert.equal(grants[0]!.cumulativeTimeoutMs, 2_600);
+    assert.equal(grants[0]!.cumulativeTimeoutMs, 4_000);
 
     await waitForCondition(
       "fixture child pid",
@@ -690,7 +815,7 @@ ${resultLine("finished while checkpoint was pending")}
     assert.equal(result.exitCode, 0, result.logTail);
     assert.equal(result.failure, undefined);
     assert.equal(result.extensions?.length, 1);
-    assert.equal(result.extensions?.[0]?.cumulativeTimeoutMs, 2_600);
+    assert.equal(result.extensions?.[0]?.cumulativeTimeoutMs, 4_000);
     assert.deepEqual(result.extensions, grants);
   } finally {
     releasePersistence?.();
@@ -701,15 +826,23 @@ ${resultLine("finished while checkpoint was pending")}
 });
 
 test("a rejected persistence callback denies the grant", async () => {
-  const fixture = claudeFixture(`
-await delay(2500);
+  const fixture = claudeFixture(
+    `
+await delay(10_000);
 ${resultLine("unreachable success")}
-`);
+`,
+    "deadline-fixture",
+    { assistant: "continuous" },
+  );
   let callbackCalls = 0;
   try {
     const result = await runFixture(
       fixture,
-      policy({ baseTimeoutMs: 1_200, extensionStepMs: 1_000 }),
+      policy({
+        baseTimeoutMs: 1_500,
+        extensionStepMs: 2_000,
+        healthyActivityWindowMs: 10_000,
+      }),
       async () => {
         callbackCalls += 1;
         throw new Error("manifest checkpoint failed");
@@ -726,17 +859,23 @@ ${resultLine("unreachable success")}
 });
 
 test("the default policy remains disabled even when a callback exists", async () => {
-  const fixture = claudeFixture(`
-await delay(1600);
+  // Continuous mapped activity makes the disabled policy the only possible
+  // reason for denial; the callback is present but must never be called.
+  const fixture = claudeFixture(
+    `
+await delay(10_000);
 ${resultLine("too late")}
-`);
+`,
+    "deadline-fixture",
+    { assistant: "continuous" },
+  );
   let callbackCalls = 0;
   try {
     const defaultOff = {
       ...DEFAULT_DEADLINE_EXTENSION_POLICY,
       baseTimeoutMs: 1_200,
       maxTotalTimeoutMs: 1_200,
-      healthyActivityWindowMs: 2_000,
+      healthyActivityWindowMs: 10_000,
     };
     assert.equal(defaultOff.autoExtend, false);
     assert.equal(defaultOff.maxExtensions, 0);
@@ -917,21 +1056,38 @@ test("batch checkpoint precedes worker completion and status exposes extensions"
     const { binary } = writeClaudeBinary(
       binRoot,
       `
-  await delay(1000);
-  ${assistantLine("batch extension progress")}
-  await delay(500);
+  // Poll the run manifest until the Supervisor's grant checkpoint is
+  // observable. The shell-level activity stream keeps mapped evidence fresh
+  // throughout, so a slow checkpoint cannot be mistaken for worker silence.
+  let extensions = [];
+  {
+    const until = Date.now() + 10_000;
+    for (;;) {
+      try {
+        const manifest = JSON.parse(
+          fs.readFileSync(${JSON.stringify(manifestPath)}, "utf8")
+        );
+        extensions =
+          (manifest.tasks && manifest.tasks["batch-deadline"].extensions) || [];
+        if (extensions.length > 0) break;
+      } catch {
+        // The manifest is atomically replaced; a transient read may miss it.
+      }
+      if (Date.now() >= until) break;
+      await delay(20);
+    }
+  }
+  fs.writeFileSync(
+    ${JSON.stringify(markerPath)},
+    JSON.stringify(extensions)
+  );
   fs.appendFileSync(
     path.join(process.cwd(), "allowed.ts"),
     "\\nexport const batchExtended = true;\\n"
   );
-  const manifest = JSON.parse(fs.readFileSync(${JSON.stringify(manifestPath)}, "utf8"));
-  fs.writeFileSync(
-    ${JSON.stringify(markerPath)},
-    JSON.stringify(manifest.tasks["batch-deadline"].extensions)
-  );
 ${resultLine("batch fixture complete")}
 `,
-      true,
+      { assistant: "continuous" },
     );
     process.env.CLIYARD_CLAUDE_BINARY = binary;
 
@@ -947,16 +1103,16 @@ ${resultLine("batch fixture complete")}
         "--worker",
         "claude",
         "--timeout-ms",
-        "1200",
+        "1500",
         "--auto-extend-deadline",
         "--deadline-extension-ms",
         "3000",
         "--max-deadline-extensions",
         "1",
         "--max-total-timeout-ms",
-        "4200",
+        "4500",
         "--healthy-activity-window-ms",
-        "3000",
+        "10000",
       ],
       { log: (line) => out.push(line), signalHandling: false },
     );
@@ -968,7 +1124,7 @@ ${resultLine("batch fixture complete")}
     assert.equal(taskState.extensions?.length, 1);
     assert.equal(taskState.extensions?.[0]?.attempt, 0);
     assert.equal(taskState.extensions?.[0]?.extensionMs, 3000);
-    assert.equal(taskState.extensions?.[0]?.cumulativeTimeoutMs, 4200);
+    assert.equal(taskState.extensions?.[0]?.cumulativeTimeoutMs, 4500);
 
     assert.ok(existsSync(markerPath));
     const atResult = JSON.parse(
@@ -998,7 +1154,7 @@ ${resultLine("batch fixture complete")}
     );
     const human = statusHuman.join("\n");
     assert.match(human, /extensions=1/);
-    assert.match(human, /last deadline extension=.* \+3000ms cumulative=4200ms/);
+    assert.match(human, /last deadline extension=.* \+3000ms cumulative=4500ms/);
   } finally {
     if (previousBinary === undefined) {
       delete process.env.CLIYARD_CLAUDE_BINARY;
