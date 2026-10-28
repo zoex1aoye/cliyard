@@ -1,6 +1,7 @@
 import type { TaskContract } from "../contracts/schema.js";
 import type { CostTruth, FailureRecord } from "../failures.js";
 import type { TaskExtensionRecord } from "./continuation.js";
+import type { WorkerProcessRecord } from "./process-tree.js";
 
 export type AgentAdapterId = "mock" | "claude" | "codex" | "codebuddy";
 
@@ -156,6 +157,18 @@ export interface AgentResult {
   cost?: CostTruth;
   /** Deadline grants persisted during this worker attempt. */
   extensions?: TaskExtensionRecord[];
+  /**
+   * Bounded process-tree evidence for every CLI invocation this attempt
+   * started, including transient retries and budget continuations. An
+   * ambiguous or failed cleanup means the attempt must not be accepted.
+   */
+  processTrees?: WorkerProcessRecord[];
+  /**
+   * Structured resource-cleanup failure, kept separate from the worker's own
+   * failure record. Present only when process-tree cleanup did not finish
+   * cleanly (or the platform could not prove it did).
+   */
+  cleanupFailure?: FailureRecord;
 }
 
 export interface AgentAdapter {

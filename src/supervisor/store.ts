@@ -33,10 +33,15 @@ import {
   type TaskExtensionRecord,
 } from "../agents/continuation.js";
 import {
+  parseWorkerProcessRecord,
+  type WorkerProcessRecord,
+} from "../agents/process-tree.js";
+import {
   ACTIVE_RUN_VERSION,
   MAX_PATH_AUDITS,
   MAX_PATH_AUDIT_ERROR_LENGTH,
   MAX_PATH_AUDIT_PATHS,
+  MAX_PROCESS_TREES,
   RUN_MANIFEST_VERSION,
   type ActiveRunPointer,
   type PathAuditRecord,
@@ -829,6 +834,21 @@ function parseRunManifest(raw: unknown, source: string): RunManifest {
         `${source}: task ${key}.extensions`,
       );
     }
+    if (task.processTrees !== undefined) {
+      task.processTrees = parseProcessTrees(
+        task.processTrees,
+        `${source}: task ${key}.processTrees`,
+      );
+    }
+    if (task.cleanupFailure !== undefined) {
+      const cleanupFailure = parseFailureRecord(task.cleanupFailure);
+      if (!cleanupFailure) {
+        throw new RunManifestError(
+          `${source}: task ${key}.cleanupFailure is not a valid failure record`,
+        );
+      }
+      task.cleanupFailure = cleanupFailure;
+    }
   }
 
   return raw as unknown as RunManifest;
@@ -880,6 +900,33 @@ function parseTaskExtensions(
       continuationIndexes.add(key);
     }
     return extension;
+  });
+}
+
+/**
+ * Process-tree records are fail-closed: one malformed record rejects the
+ * manifest rather than silently hiding an unproven cleanup.
+ */
+function parseProcessTrees(
+  raw: unknown,
+  source: string,
+): WorkerProcessRecord[] {
+  if (!Array.isArray(raw)) {
+    throw new RunManifestError(`${source} must be an array`);
+  }
+  if (raw.length > MAX_PROCESS_TREES) {
+    throw new RunManifestError(
+      `${source} must contain at most ${MAX_PROCESS_TREES} records`,
+    );
+  }
+  return raw.map((value, index) => {
+    const record = parseWorkerProcessRecord(value);
+    if (!record) {
+      throw new RunManifestError(
+        `${source}[${index}] is not a valid worker process-tree record`,
+      );
+    }
+    return record;
   });
 }
 

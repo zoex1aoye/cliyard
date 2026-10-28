@@ -540,13 +540,35 @@ function printStatus(
   // printed only when observed; unavailable cost is never shown as $0.
   for (const task of status.tasks) {
     const extensions = task.extensions ?? [];
-    if (!task.failure && !task.cost && extensions.length === 0) continue;
+    const processTrees = task.processTrees ?? [];
+    if (
+      !task.failure &&
+      !task.cleanupFailure &&
+      !task.cost &&
+      extensions.length === 0 &&
+      processTrees.length === 0
+    ) {
+      continue;
+    }
     const parts = [`task ${task.taskId}: ${task.status}`];
     if (task.failure) {
       parts.push(`failure=${formatFailureObservation(task.failure)}`);
     }
+    if (task.cleanupFailure) {
+      parts.push(
+        `cleanup-failure=${formatFailureObservation(task.cleanupFailure)}`,
+      );
+    }
     if (task.cost) {
       parts.push(`cost=${formatCostObservation(task.cost)}`);
+    }
+    const lastTree = processTrees.at(-1);
+    if (lastTree) {
+      parts.push(
+        `process-tree=${lastTree.cleanupState}`,
+        `reason=${lastTree.cleanupReason}`,
+        `residual=${lastTree.residualCount}`,
+      );
     }
     if (extensions.length > 0) {
       parts.push(`extensions=${extensions.length}`);
