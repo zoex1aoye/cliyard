@@ -8,8 +8,9 @@
 > **Foreground Orchestration Queue v0（显式批准、前台队列）**、
 > **Plan-backed Chained Queue Base v0（单条线性依赖）**、
 > **Chained Read Context v0（readPaths 对齐 pinned base）**、
-> **ControlSnapshot/event/resource v0**，以及
-> **Worker Failure Taxonomy / Cost Truth v0** 均已实现。
+> **ControlSnapshot/event/resource v0**、
+> **Worker Failure Taxonomy / Cost Truth v0**，以及
+> **WorkerLease v1（same-host controller owner-death recovery）** 均已实现。
 > 最终实测（2026-10-27，failure/cost 工作树，代码 HEAD `69f62de`）：
 > `npm run build` exit `0`；failure taxonomy focused **14/14**（85.7 ms）、
 > Claude failure/cost **17/17**（11694.1 ms）、supervisor failure/cost
@@ -82,8 +83,8 @@
 > ```text
 > [已完成] queue adoption / OperatorResolution
 >   -> [已完成] deadline fixture stability
->   -> [下一步] WorkerLease persisted at spawn + controller-death policy
->   -> ProfileCatalog + real binding activation
+>   -> [已完成] WorkerLease persisted at spawn + same-host controller-death recovery
+>   -> [下一步] ProfileCatalog + real binding activation
 >   -> per-run Supervisor ownership + short control locks
 >   -> fixed hierarchical queue / Plan-wave admission
 >   -> Windows Job Object ProcessOwnerProvider
@@ -93,10 +94,10 @@
 > 人工 adopt 不得改写原 blocked RunManifest；它必须作为独立、不可变的
 > `OperatorResolution` 记录 reviewed commit、冻结 contracts identity、复核
 > evidence hash、批准人和原因。动态评分必须晚于真实 profile 激活和准入，
-> 否则只是在尚未实际切换 binding 的情况下选择一个标签。Windows 完整进程树
-> 与 cliyard 自身 SIGKILL 恢复都归入 `ProcessOwnerProvider` /
-> `WorkerLease` 边界；具体决定见
-> [execution-authority-v1.md](../design/execution-authority-v1.md)。
+> 否则只是在尚未实际切换 binding 的情况下选择一个标签。cliyard 自身
+> SIGKILL 后的 same-host worker 组恢复已由 WorkerLease v1 覆盖；Windows
+> 完整进程树仍归入未实现的 `ProcessOwnerProvider` / Job Object 边界。具体
+> 决定见 [execution-authority-v1.md](../design/execution-authority-v1.md)。
 >
 > **2026-10-28 queue adoption closure：** `manual-queue-adoption`
 > (`b7f7d9e`) 与 `deadline-fixture-stability` (`c57d591`) 已合入
@@ -112,10 +113,11 @@
 > 0 fail）。此前记录的 **361/362** 红门禁已关闭：stabilized fixture 改用
 > grant callback marker 握手，并新增一个 late-result 仍判 timeout 的测试。
 > adoption 不启用并行派发、动态路由、profile 激活、准入、Windows parity
-> 或 daemon。下一步顺序明确为 **WorkerLease at spawn + owner-death
+> 或 daemon。当时确定的顺序为 **WorkerLease at spawn + owner-death
 > recovery → ProfileCatalog + 真实 binding activation → per-run Supervisor
 > ownership + short control locks → fixed hierarchical admission → Windows
-> Job Object → telemetry-backed dynamic scoring**。证据见
+> Job Object → telemetry-backed dynamic scoring**；其中 WorkerLease 已完成，
+> 见下一条记录。证据见
 > [evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md)。
 >
 > **2026-10-28 adoption journal unification closure：** `unify-adoption-journal`
@@ -139,12 +141,36 @@
 > （24814.49 ms，0 fail）；更早一次完整运行退出非零但输出在汇总前被截断，
 > 未采用其计数。该 unification 切片未修改 deadline 代码；两次失败在单独
 > focused 运行和第二次捕获的完整运行中未复现，本轮不据此声明 flake 率或
-> 稳定绿色门禁。adoption、RunManifest 与 lineage 语义不变。下一步仍是
-> **WorkerLease at spawn + controller owner-death recovery**。证据见
+> 稳定绿色门禁。adoption、RunManifest 与 lineage 语义不变。当时下一步为
+> **WorkerLease at spawn + controller owner-death recovery**；该切片已完成，
+> 见下一条记录。证据见
 > [evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md)。
 >
+> **2026-10-28 WorkerLease v1 closure：** `worker-lease-core` 已合入
+> integrated HEAD `e6f922e`。Supervisor-backed Claude/Codex invocation 在
+> spawn 后立即写入 bounded、credential-free lease
+> （`.cliyard/worker-leases/<runId>/<taskId>/<leaseId>.json`），在结果可被
+> 接受前持久化精确 POSIX pid/pgid/osStartIdentity；normal close、timeout、
+> cancel、spawn-error 更新同一 lease，不重写不可变身份字段，短命 worker
+> 保持 `unknown`。`supervisor recover-workers --repo <path> [--run id]
+> [--json]` 仅在 same-host 上证明 controller 已死且 worker 精确身份匹配后，
+> 终止该专用 POSIX group（bounded SIGTERM → SIGKILL），追加 bounded
+> recovery evidence 并报告 resume-needed；live owner、foreign host、身份
+> 不匹配、未知身份、malformed lease 一律不发送信号。RunManifest 仍是 task
+> authority，recovery 不重写 run/task acceptance，也不自动 resume。实测
+> （2026-10-28，integrated HEAD `e6f922e`，macOS，Node `v20.20.2`）：
+> `npm run build` exit 0；worker-lease focused **19/19**（4652.98 ms），其中
+> 真实 SIGKILL controller-death fixture **1/1**（241.49 ms）；完整套件
+> **394/394**（25657.98 ms，0 fail）。此前记录的 375 加 19 个 lease 测试
+> 等于本轮 394。stdout 重接、Windows Job Objects、跨主机回收、自动 resume
+> 和 daemon 仍未实现；Windows `windows-exact-child` 只作为 `needs_human`
+> 保留，不声称进程组等价。证据见
+> [evidence/WORKER_LEASE.md](evidence/WORKER_LEASE.md)。
+>
 > 当前已完成能力仍不包含 daemon/后台服务、跨主机回收、浏览器证据、SQLite、
-> 有界并行准入和多父 integration/merge queue；其中 **CLI + 模型路由、有界
+> 有界并行准入和多父 integration/merge queue；WorkerLease v1 只覆盖
+> same-host POSIX group，不包含 stdout 重接、Windows Job Objects 或自动
+> resume。其中 **CLI + 模型路由、有界
 > 并行派发和 EvidenceBundle 已升级为下一阶段目标**，不代表当前已经实现。
 > 自动 push 或自动合入 main 仍是长期人工门禁。
 > attempt reuse 只是 worktree 连续性（不是 provider 会话续跑）；worker
@@ -504,9 +530,10 @@
   验证（原 control-checkout caveat 已修复，见
   [docs/evidence/CHAINED_READ_CONTEXT.md](evidence/CHAINED_READ_CONTEXT.md)）；
   manual adoption 只关闭一个已 blocked/interrupted 的 reviewed item，不自动
-  接受 task、不自动 retry、不启用并行；**WorkerLease at spawn /
-  owner-death recovery、ProfileCatalog 真实激活和 fixed admission 均未
-  实现**；
+  接受 task、不自动 retry、不启用并行；**WorkerLease v1 已实现 same-host
+  POSIX group 的 spawn lease 与 owner-death recovery；ProfileCatalog 真实
+  激活和 fixed admission 仍未实现**；stdout 重接、Windows Job Objects、
+  跨主机回收、自动 resume 和 daemon 也未实现；
   没有 queue 级 `--dry-run`、
   活动 run 的 stop 命令、history/compaction/GC 或 contract 原地更新；
   start 阶段若在记录 run id 前崩溃，stale item 会 fail closed 为 blocked；
@@ -909,32 +936,34 @@ Worker 验收演练，因此不把它们当作 drill、reaper 或跨主机证据
 attempt continuity / worker progress / drill abnormal recovery v0、Task
 Architect v0、**Foreground Orchestration Queue v0**、
 **Plan-backed Chained Queue Base v0**、**Queue Manual Adoption v1（含统一
-adoption journal）**、**Chained Read Context v0**、**ControlSnapshot/event/resource v0**，
-以及
-**Worker Failure Taxonomy / Cost Truth v0**，加上 deadline fixture
+adoption journal）**、**Chained Read Context v0**、**ControlSnapshot/event/resource v0**、
+**Worker Failure Taxonomy / Cost Truth v0**、**WorkerLease v1（same-host
+controller-death recovery）**，加上 deadline fixture
 stability，不在下一迭代重复。
 下一具体步骤严格按执行权威链，而不是同时铺开：
-**WorkerLease persisted at spawn + controller owner-death recovery →
-ProfileCatalog + 真实 binding activation → per-run Supervisor ownership +
+**ProfileCatalog + 真实 binding activation → per-run Supervisor ownership +
 short control locks → fixed hierarchical admission → Windows Job Object →
-telemetry-backed dynamic scoring**。adoption 只关闭 blocked item，不启用并行、
-路由或准入；Windows 与动态评分不得越过前三项前置。
+telemetry-backed dynamic scoring**。WorkerLease 已完成；adoption 只关闭
+blocked item，不启用并行、路由或准入；Windows 与动态评分不得越过前三项
+前置。
 
-1. **WorkerLease persisted at spawn + owner-death recovery（P0，下一步，未实现）**
-   - worker 身份一可用就持久化 lease，而不是等 `collect()` 返回才写；
-   - lease 记录 run/task/attempt/profile、controller pid/host/identity、
-     worker pid/pgid/osStartIdentity/captureMode、workspace、createdAt/
-     heartbeatAt、cleanup 状态；
-   - controller 被 SIGKILL 后，新 controller 读取 lease 并精确核对身份；
-     仅对仍存活且已证明归属的 group 执行终止，保留 worktree 与既有证据，
-     通过显式新 attempt 或 provider session continuation 继续；group 已消失
-     则检查 artifacts 并只验收可证明的部分；身份或清理不明确一律
-     `needs_human`，绝不按 pid/pgid/进程名猜测；
-   - 不承诺重接旧 CLI stdout；若 worker 必须比 controller 活得更久，需要
-     外部 guardian/OS service manager 与单独证据协议；
-   - 这是任何并行执行的安全前置；当前没有 durable WorkerLease，也没有
-     cliyard 自身 SIGKILL 后的 owner-death 恢复。
-2. **ProfileCatalog + 真实 binding activation（P0，WorkerLease 之后）**
+1. **WorkerLease persisted at spawn + same-host owner-death recovery（P0，已实现 2026-10-28）**
+   - Supervisor-backed Claude/Codex spawn 后立即写 bounded、credential-free
+     lease；记录 run/task/attempt/invocation、controller pid/host/identity、
+     worker pid/pgid/osStartIdentity/captureMode、workspace、startedAt/
+     updatedAt、state 与 cleanup/recovery evidence；
+   - normal close、timeout、cancel、spawn-error 更新同一 lease；不可变身份
+     字段不重写；短命 worker 保持 `unknown`，不伪造身份；
+   - `supervisor recover-workers --repo <path> [--run id] [--json]` 只在
+     same-host 证明 controller 已死且 worker 精确身份匹配后，终止该专用
+     POSIX group（bounded SIGTERM → SIGKILL），追加 bounded recovery
+     evidence 并报告 resume-needed；
+   - live owner、foreign host、身份不符、未知身份和 malformed lease 一律
+     保留，不发送信号；RunManifest 仍是 task authority，不自动 resume，
+     也不重写 acceptance；
+   - 不包含 stdout 重接、Windows Job Objects、跨主机回收或 daemon；实测见
+     [evidence/WORKER_LEASE.md](evidence/WORKER_LEASE.md)。
+2. **ProfileCatalog + 真实 binding activation（P0，下一步）**
    - 建立 secret-free `ProfileCatalog`，持久化 `ExecutionProfile`、
      endpoint/账号绑定和能力；
    - 路由先做 deterministic hard filtering + operator preference；LLM 可以
@@ -969,8 +998,8 @@ telemetry-backed dynamic scoring**。adoption 只关闭 blocked item，不启用
      slot 和端口 lease；依赖任务仍按上游 integrationHead 串行；
    - Plan 编译器的写路径规则改为“无传递依赖的重叠拒绝、有传递依赖的重叠
      按序串行”，从而支持同模块子任务既并行又安全串行；
-   - 只有 WorkerLease/owner-death、profile activation 与 fixed admission
-     完成后，才允许开启并行。
+   - WorkerLease/owner-death 已实现；只有 profile activation 与 fixed
+     admission 完成后，才允许开启并行。
 6. **Control API、可替换入口与外部 UI（P0/P1，未实现）**
    - CLI 与版本化本地 Control API / event stream 是稳定入口；
    - DSH 只做薄 cockpit，优先注册 `dsh-better-sidebar` tab；
@@ -1025,12 +1054,14 @@ continuity / progress / drill 切片，以下仍是明确非目标，不得用�
 Attempt reuse 是 worktree 连续性，不是 provider 会话续跑；worker progress 是
 观察信息，不是验收依据；Task Architect 只产出 Plan；queue 是前台、显式批准、
 顺序队列，不是契约或运行权威，也不是 daemon。manual adoption 是人工复核后的
-queue 终态，不是自动接受、自动重试或并行派发。下一步先补 **WorkerLease at
-spawn + owner-death recovery**，再做 **ProfileCatalog/真实 binding
-activation**、per-run ownership 和 **fixed hierarchical admission**；只有这些
-完成后才允许开启有界并行。Windows Job Object 与 telemetry-backed dynamic
-scoring 分别排在其后。EvidenceBundle 与 look-ahead controller 再后；daemon
-必须最后经过独立设计、soak 和验收，不能从当前单机顺序队列证据推导出来。
+queue 终态，不是自动接受、自动重试或并行派发。**WorkerLease v1 已实现
+same-host 的 spawn lease 与 owner-death recovery**；下一步做
+**ProfileCatalog/真实 binding activation**、per-run ownership 和 **fixed
+hierarchical admission**；只有这些完成后才允许开启有界并行。stdout 重接、
+跨主机回收、自动 resume 和 daemon 仍未实现；Windows Job Object 与
+telemetry-backed dynamic scoring 分别排在其后。
+EvidenceBundle 与 look-ahead controller 再后；daemon 必须最后经过独立设计、
+soak 和验收，不能从当前单机顺序队列证据推导出来。
 
 ## 4. 完成标准
 
@@ -1240,10 +1271,16 @@ Chained Read Context v0（已完成）：
     sleep，拓宽 fixture 窗口，并新增 late-result 仍 timeout 的负例；
     deadline-extension focused 13/13（23601.98 ms），完整套件 371/371；
     生产 deadline 语义未改变。
-66. [未完成] 在任何并行执行之前持久化 WorkerLease at spawn，并定义
-    controller owner-death recovery：精确身份校验、仅终止已证明归属的
-    group、保留 worktree/证据、模糊身份 `needs_human`；不承诺重接旧
-    stdout，也不承诺 worker 跨 controller 存活。
+66. [已完成] WorkerLease v1（2026-10-28，integrated HEAD `e6f922e`）：
+    Supervisor-backed spawn 后立即持久化 bounded、credential-free lease，
+    结果可接受前写入精确 POSIX 身份，normal close/timeout/cancel/spawn-error
+    更新同一 lease；`supervisor recover-workers` 在 same-host 精确证明
+    controller 死亡与 worker 身份后，仅终止该专用 group 并报告
+    resume-needed；模糊/缺失身份保留为 `needs_human`；RunManifest 仍是
+    task authority。worker-lease focused 19/19、真实 SIGKILL fixture 1/1、
+    full 394/394、build exit 0。不包含 stdout 重接、Windows Job Objects、
+    跨主机回收、自动 resume 或 daemon。证据见
+    [evidence/WORKER_LEASE.md](evidence/WORKER_LEASE.md)。
 67. [未完成] 建立 secret-free ProfileCatalog 并证明真实 endpoint/account
     binding activation；profile selection 不等于激活，未激活或未知容量
     fail closed。
@@ -1316,9 +1353,10 @@ Chained Read Context v0（已完成）：
             adoption journal unification：`queue.item.adopted` 只写
             events.jsonl，queue-adoption focused 11/11、queue-control 8/8、
             integrated full 两次捕获为 373/375、375/375、build exit 0
-19. 下一步 P0：WorkerLease persisted at spawn + controller owner-death
-            recovery（精确身份、保留证据、模糊身份 needs_human）
-20. 然后：secret-free ProfileCatalog + 真实 endpoint/account binding
+19. [已完成] P0：WorkerLease v1 persisted at spawn + same-host controller
+            owner-death recovery；worker-lease focused 19/19、SIGKILL fixture
+            1/1、full 394/394、build exit 0
+20. 下一步：secret-free ProfileCatalog + 真实 endpoint/account binding
             activation → per-run Supervisor ownership + short control locks
 21. 再然后：fixed hierarchical admission → 固定上限有界并行 v0
             （warm start 3 只是调度初值）
@@ -1337,11 +1375,12 @@ Supervisor v0（前台、原子 JSON RunManifest、进程级 SIGKILL 恢复）�
 其操作语义与自举手册见 [docs/SUPERVISOR_V0.md](SUPERVISOR_V0.md)。当前完整套件
 包含 failure/cost、chained read context、Plan-backed chain、queue manual
 adoption（统一 journal）、queue、Task Architect、supervisor、attempt
-continuity/progress、ControlSnapshot、deadline extension 与
-runtime/drill 测试（2026-10-28 integrated HEAD `41e5fcd`：两次捕获的本机运行
-分别为 **373/375** 与 **375/375**；第一次 2 个 deadline-extension async
-persistence 测试失败，第二次 0 fail；另一次完整运行的输出在汇总前被截断，
-未采用其计数；focused queue-adoption 11/11、queue-control 8/8）。
+continuity/progress、ControlSnapshot、deadline extension、WorkerLease 与
+runtime/drill 测试（2026-10-28 WorkerLease evidence at integrated HEAD
+`e6f922e`：完整套件 **394/394**（25657.98 ms，0 fail），worker-lease focused
+19/19，其中真实 SIGKILL fixture 1/1（241.49 ms）；此前 `41e5fcd` 的两次捕获
+**373/375** 与 **375/375** 保留为历史实测，第一次的 2 个
+deadline-extension async persistence 失败未复现）。
 本轮没有引入 daemon 或 SQLite，也没有把 supervisor 或 queue 的后台化列入
 计划。attempt reuse 是 worktree 连续性，worker progress 是观察信息；
 failure/cost 也是观察信息，不授权自动 retry；Task Architect 只产出 Plan；
@@ -1351,9 +1390,11 @@ queue 消费显式加入的 frozen contracts 或已批准 Plan，但不生成、
 不标记 accepted。RuntimeManager、Orphan Reaper、hardening、failure drills、
 attempt continuity/progress/异常 drill 回收、Task Architect、Foreground
 Orchestration Queue、Plan-backed Chained Queue Base、Queue Manual Adoption
-v1（含统一 adoption journal）、Chained Read Context、ControlSnapshot/event 与 Worker Failure
-Taxonomy/Cost Truth 均已收口；下一阶段严格先做 **WorkerLease at spawn +
-owner-death recovery**，再做 **ProfileCatalog/真实 binding activation**、
-per-run ownership 和 **fixed hierarchical admission**，然后才是有界并行、
-Windows Job Object 和 dynamic scoring；Control API 与
-DesignRevision/EvidenceBundle 再后，look-ahead controller 与 daemon 决策最后。
+v1（含统一 adoption journal）、Chained Read Context、ControlSnapshot/event、
+Worker Failure Taxonomy/Cost Truth 与 **WorkerLease v1（same-host POSIX
+group）** 均已收口；下一阶段严格先做
+**ProfileCatalog/真实 binding activation**，再做 per-run ownership 和
+**fixed hierarchical admission**，然后才是有界并行、Windows Job Object 和
+dynamic scoring；stdout 重接、跨主机回收、自动 resume 与 daemon 仍未实现。
+Control API 与 DesignRevision/EvidenceBundle 再后，look-ahead controller 与
+daemon 决策最后。
