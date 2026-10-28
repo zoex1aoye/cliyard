@@ -1,0 +1,55 @@
+{
+  "planId": "queue-execution-profile-v0",
+  "tasks": [
+    {
+      "taskId": "freeze-queue-execution-policy",
+      "goal": "Implement the next self-host gap: freeze and pass a versioned ExecutionProfile and continuation policy from queue add through queue run to Supervisor. Add src/execution/profile.ts with fail-closed, bounded v1 types for ExecutionProfile (profileId, runtimeId claude|codex, modelId, providerId, optional endpointRef/accountBindingId, derived capabilities for mapped progress and provider-session resume), QueueContinuationPolicy (optional DeadlineExtensionPolicy and BudgetContinuationPolicy), JSON parsers, deterministic defaults for legacy worker/model, and helpers that convert a frozen continuation policy to Supervisor CLI argv. Never persist secrets: endpointRef/accountBindingId are opaque bounded references only. Newly added queue items must always own a frozen executionProfile; existing queue records without one remain readable and use legacy worker/model semantics. Store optional continuationPolicy on QueueItem and keep worker/model as an exact mirror of profile.runtimeId/profile.modelId when a profile exists; fail closed on mismatch. Extend queue add and add-plan CLI acceptance with --execution-profile <profile.json> and --continuation-policy <policy.json>; when a profile file is supplied, its runtime/model are authoritative and explicit conflicting --worker/--model must be rejected. Without files, derive and freeze a deterministic profile from explicit or default worker/model, with DeepSeek Claude/Codex defaults and opaque endpoint references. Validate budget continuation capability requirements (provider-session resume) and automatic deadline capability requirements (mapped progress) before dispatch. Make queue-runner pass frozen worker/model plus every deadline/budget Supervisor flag on both start and resume; policy values must come only from the queue item, not current env or mutable source JSON. Add a read-only pre-dispatch policy compatibility check that blocks Codex budget continuation rather than relying on the Supervisor error. Expose profileId, runtime/model/provider, capabilities and continuation summary in queue human/JSON control views and bounded queue events. Add tests in tests/queue-execution-profile.test.ts covering profile normalization/fail-closed parsing, secret-free provenance, default legacy queue readability, exact frozen profile/policy persistence across retry/resume, file input, conflict rejection, runner argv mapping, codex budget incompatibility, tampered queue fields, and status/event output. Add docs/evidence/QUEUE_EXECUTION_PROFILE.md and design/queue-execution-profile-v0.md with exact format, examples, tests and limits. Do not implement dynamic routing, admission counts, model selection heuristics, process-tree cleanup, manual continuation control files or a daemon.",
+      "nonGoals": [
+        "Do not implement dynamic ExecutionProfile scoring or fallback routing.",
+        "Do not implement parallel queue dispatch or admission.",
+        "Do not persist API keys, tokens, raw endpoint URLs or account secrets.",
+        "Do not mutate an existing profile or continuation policy on retry/resume.",
+        "Do not implement process-tree identity or descendant cleanup.",
+        "Do not modify RunManifest acceptance authority or TaskContract.",
+        "Do not let queue policy values come from current environment at dispatch time."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        ".",
+        "design/task-continuation-and-deadline-v0.md",
+        "docs/PRODUCT_STRATEGY_V2.md",
+        "docs/evidence/CONTINUATION_SELF_HOST.md"
+      ],
+      "writePaths": [
+        "src/execution/profile.ts",
+        "src/agents/continuation.ts",
+        "src/orchestration/queue-store.ts",
+        "src/orchestration/queue-runner.ts",
+        "src/orchestration/cli.ts",
+        "src/orchestration/control-snapshot.ts",
+        "src/orchestration/event-journal.ts",
+        "tests/queue-execution-profile.test.ts",
+        "docs/evidence/QUEUE_EXECUTION_PROFILE.md",
+        "design/queue-execution-profile-v0.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/queue-execution-profile.test.ts",
+        "npm test"
+      ],
+      "deliverables": [
+        "Every new queue item freezes a secret-free ExecutionProfile.",
+        "Optional deadline and budget continuation policies survive queue persistence and are passed on start and resume.",
+        "Incompatible runtime/profile combinations fail before dispatch.",
+        "Existing queue records remain readable."
+      ],
+      "forbidden": [
+        "Do not store an API key, auth token or raw provider URL.",
+        "Do not silently ignore an unsupported --worker/--model/profile conflict.",
+        "Do not infer continuation policy from environment at dispatch time.",
+        "Do not touch files outside writePaths."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}

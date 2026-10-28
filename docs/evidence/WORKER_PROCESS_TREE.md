@@ -63,6 +63,43 @@ started from the child `exit` event (not `close`), signals the dedicated group,
 and only then does `close` fire. Without group cleanup this test hangs or leaves
 the helper running.
 
+## Self-host ordering
+
+The queue worker that implemented this slice still ran through the previous
+adapter, because the new process-tree manager did not yet exist at dispatch
+time. Its completed RunManifest therefore correctly has no `processTrees`
+record for that invocation. The first live process-tree record will be produced
+by the next worker run after this merge. Real OS process-group tests in the
+slice provide the cleanup evidence; the implementation run is not retroactively
+labeled with evidence it could not produce.
+
+## Post-merge production-path smoke
+
+A credential-free smoke used the merged Supervisor and Claude adapter path with
+an executable fake stream-json worker in a disposable Git repository. The fake
+worker spawned a background Node helper, wrote the allowed artifact and emitted
+a successful result before exiting. The helper inherited the worker's dedicated
+process group and remained alive after its leader exited.
+
+Observed RunManifest evidence:
+
+```text
+run: completed
+task: accepted
+capture: ps-exact
+worker pid/pgid: 46742 / 46742
+cleanup reason: child-close
+cleanup state: terminated
+residual helper: 46771 (pgid 46742)
+signal: SIGTERM process-group
+cleanup failure: null
+helper alive after Supervisor return: false
+```
+
+This is a real process-group cleanup through Supervisor, verifier and
+RunManifest persistence. It called no provider API and did not claim a paid
+worker session.
+
 ## Suite and build
 
 ```sh

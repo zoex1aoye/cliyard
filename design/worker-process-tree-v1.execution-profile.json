@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "profileId": "worker-process-tree-claude-deepseek",
+  "runtimeId": "claude",
+  "modelId": "deepseek-flash",
+  "providerId": "deepseek",
+  "endpointRef": "deepseek-claude-default"
+}

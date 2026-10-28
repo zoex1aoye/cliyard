@@ -59,6 +59,9 @@ claude -> deepseek-flash
 codex  -> deepseek-v4-pro
 ```
 
+An explicit model outside the `deepseek-*` namespace is frozen as
+`providerId: "unknown"` with `endpointRef: "unknown-default-endpoint"`.
+
 No environment variable supplies this queue identity.
 
 ## 2. Continuation boundary
@@ -100,6 +103,23 @@ The queue performs a read-only, pre-dispatch compatibility check:
 
 The pre-dispatch block stores an item failure only because no RunManifest exists.
 After dispatch, RunManifest remains failure authority.
+
+A real self-host follow-up used this path end to end:
+
+```text
+queue item: worker-process-tree-v1
+profile: worker-process-tree-claude-deepseek
+runtime/model: claude / deepseek-flash
+deadline envelope: 15 min base, two 10 min extensions
+budget envelope: $12 base, two $6 continuations, $30 cumulative guard
+result: completed in about 13 minutes
+CLI-estimated cost: $9.325543 / $12 base guard
+extension grants: none (base envelope was sufficient)
+```
+
+This proves the queue persisted and passed the frozen profile and continuation
+value flags. It does not claim that extension fired; the healthy base window was
+enough.
 
 ## 3. Legacy compatibility
 
@@ -171,6 +191,14 @@ The queue-family command covered orchestration core, Plan-backed queue core
 and CLI, queue control snapshot, run binding and the new execution-profile
 suite.
 
+After merging into the control worktree, the normal full suite was run
+independently:
+
+```text
+npm run build   pass
+npm test        362/362 pass
+```
+
 ## 6. Covered checks
 
 `tests/queue-execution-profile.test.ts` proves:
@@ -206,17 +234,10 @@ reconciliation, control snapshot and Plan materialization.
 - No daemon.
 - Budget guards remain guards, not balance, invoice or strict hard-cap claims.
 
-## 8. Full-suite limitation
+## 8. Full-suite verification
 
-A broad `node --import tsx --test tests/*.test.ts` attempt was aborted after
-the managed sandbox produced unrelated environment failures:
-
-- tests that independently spawn `npx tsx` hit the same temporary IPC
-  `EPERM`;
-- runtime tests could not bind their static loopback port ranges and reported
-  `no available port`.
-
-Those failures occurred outside the changed queue modules and made a truthful
-full-suite pass count unavailable in this session. The 50/50 queue-family run,
-the five focused existing suites listed above, and the TypeScript build are the
-accepted local evidence for this slice. Runtime services remain Verifier-owned.
+The managed worker sandbox could not reliably execute the broad `tsx` command,
+so its own evidence used the Node `tsx` loader and focused queue suites. After
+human review and merge, the normal control-worktree command completed with
+`362/362` passing tests after the process-tree slice was also merged. Runtime
+services remain Verifier-owned.

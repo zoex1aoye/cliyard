@@ -66,21 +66,29 @@ worker batch CLIs, but `QueueItem` has no durable policy fields and the queue
 runner does not pass the flags. A normal `queue run` therefore cannot opt a
 Plan into deadline extension or budget continuation.
 
-This is the next product gap. A queue-owned policy must be frozen, visible in
-status, validated before dispatch and covered by retry/resume semantics. It
-must remain separate from TaskContract acceptance authority.
+Status: closed for frozen policy transport. New queue items persist a
+secret-free `ExecutionProfile` and optional deadline/budget envelope, show
+their capability gate in status, and pass the exact values to Supervisor start
+or resume. Dynamic routing and admission remain separate work.
 
 ### 2.4 A timeout did not prove descendant cleanup
 
-A Codex worker timed out at its 10-minute default while its verifier had
-started child test processes. The direct worker child was terminated, but
-several test descendants remained reparented and required explicit cleanup.
-`CodexWorkerOptions.timeoutMs` and budget/deadline grants are not yet evidence
-of a fully terminated process tree.
+At the time of the observation, a Codex worker timed out at its 10-minute
+default while its verifier had started child test processes. The direct worker
+child was terminated, but several test descendants remained reparented and
+required explicit cleanup.
 
-The next fix should capture the worker process group or equivalent exact tree
-identity and terminate only descendants that still match that identity. Broad
-`pkill`-style cleanup is not acceptable because it can hit unrelated work.
+Status: closed for normal close, timeout, cancel and spawn error on macOS/Linux.
+Claude and Codex workers now run in dedicated POSIX process groups, capture the
+exact OS identity, clean residual descendants after the leader exits, and fail
+closed on ambiguous group evidence. Windows remains exact-child-only and
+abrupt SIGKILL of cliyard itself remains unrecoverable. See
+[WORKER_PROCESS_TREE.md](WORKER_PROCESS_TREE.md).
+
+A post-merge production-path smoke left a helper alive after the fake worker
+leader exited; Supervisor persisted an exact `pid=pgid=46742` process group,
+recorded residual helper `46771`, sent `SIGTERM` to the group, and returned with
+the helper dead and the task accepted.
 
 ### 2.5 Human takeover cannot finalize the old queue item
 
@@ -143,7 +151,7 @@ Final independent control-worktree checks:
 
 ```text
 npm run build   pass
-npm test        338/338 pass
+npm test        362/362 pass
 ```
 
 The real CLI resume probe proved current Claude Code + DeepSeek accepts:

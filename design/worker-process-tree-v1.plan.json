@@ -1,0 +1,56 @@
+{
+  "planId": "worker-process-tree-v1",
+  "tasks": [
+    {
+      "taskId": "managed-worker-process-tree",
+      "goal": "Close the timeout descendant-cleanup gap recorded in docs/evidence/CONTINUATION_SELF_HOST.md. Add src/agents/process-tree.ts as a shared manager for worker CLI process trees. On POSIX spawn worker CLIs detached so each CLI is the leader of a dedicated process group; on Windows record the supported cleanup mode without pretending POSIX group ownership. Reuse src/runtime/process.ts ProcessInspector to capture the exact (pid, pgid, OS lstart) identity immediately after spawn and to list group members. Persist a bounded WorkerProcessRecord with host, exact identity when capturable, known pgid, capture source/support, cleanup reason (child-close, timeout, cancel, spawn-error), cleanup state, signals sent, bounded residual member identities, exit code/signal, and timestamps. Never persist prompts, commands containing secrets, raw env or unbounded process lists. Implement idempotent cleanup: after a worker closes normally, inspect the managed group for residual descendants and terminate them; on timeout or cancel send SIGTERM to the exact known process group, wait a bounded grace period, escalate to SIGKILL only if members remain, and record success/failure. Never signal a broad process group shared with cliyard itself. If exact leader identity is unavailable because an extremely short child already exited, use the newly spawned dedicated pgid only when POSIX group semantics prove it is reserved by remaining members; otherwise fail closed rather than guessing. If group inspection or cleanup remains ambiguous/fails, preserve any original worker failure but add separate process-tree evidence and make a success result fail closed with a structured worker/resource cleanup failure. Extend AgentStartInput/AgentResult if needed, Claude and Codex adapters, closed-loop result aggregation, RunManifest task persistence/parsing, batch checkpointing and supervisor human status. Both adapters must clean residual descendants after normal main-process exit, timeout and cancel; session.cancel must await the same idempotent cleanup. Add tests/worker-process-tree.test.ts using real detached Node fixtures that spawn helper processes, proving exact pgid/identity capture, helper cleanup after normal worker exit, timeout cleanup with helper death, cancel cleanup, SIGTERM-to-SIGKILL escalation, bounded/idempotent evidence, manifest round-trip and malformed-record fail-closed behavior. Include at least one test reproducing the prior leak: worker leader exits while a child test process remains. Skip real POSIX-group tests on win32 and document the platform limit. Add docs/evidence/WORKER_PROCESS_TREE.md and design/worker-process-tree-v1.md with exact tests and limits. Do not use broad pkill/process-name cleanup, do not kill unrelated PIDs, and do not claim cross-host cleanup.",
+      "nonGoals": [
+        "Do not use pkill, process name matching or workspace-wide process scans as kill authority.",
+        "Do not claim Windows process-tree equivalence to POSIX groups.",
+        "Do not implement cross-host cleanup or a daemon.",
+        "Do not change TaskContract acceptance rules or path verification.",
+        "Do not terminate runtime services owned by RuntimeManager.",
+        "Do not retain raw commands, prompts, environment values or secrets.",
+        "Do not silently ignore cleanup failure."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        ".",
+        "docs/evidence/CONTINUATION_SELF_HOST.md",
+        "src/runtime/process.ts"
+      ],
+      "writePaths": [
+        "src/agents/process-tree.ts",
+        "src/agents/types.ts",
+        "src/agents/claude.ts",
+        "src/agents/codex.ts",
+        "src/repair/loop.ts",
+        "src/scheduler/codex-batch.ts",
+        "src/supervisor/types.ts",
+        "src/supervisor/store.ts",
+        "src/supervisor/cli.ts",
+        "tests/worker-process-tree.test.ts",
+        "docs/evidence/WORKER_PROCESS_TREE.md",
+        "design/worker-process-tree-v1.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/worker-process-tree.test.ts",
+        "npm test"
+      ],
+      "deliverables": [
+        "Claude and Codex workers run in dedicated POSIX process groups.",
+        "Normal close, timeout and cancel all clean residual descendants.",
+        "Exact identity and cleanup evidence persists without secrets.",
+        "Cleanup ambiguity fails closed while preserving original failures."
+      ],
+      "forbidden": [
+        "Do not kill by process name or broad search.",
+        "Do not signal the supervisor's own process group.",
+        "Do not let a successful result proceed after ambiguous cleanup failure.",
+        "Do not touch files outside writePaths."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}

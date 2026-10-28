@@ -135,6 +135,10 @@ profile from explicit `--worker`/`--model` or these defaults:
 | `claude` | `deepseek-flash` | `deepseek` | `deepseek-claude-default` |
 | `codex` | `deepseek-v4-pro` | `deepseek` | `deepseek-codex-default` |
 
+An explicit model that does not use the `deepseek-*` namespace is frozen with
+`providerId: "unknown"` and `endpointRef: "unknown-default-endpoint"`. The
+control plane does not infer a provider from an arbitrary model name.
+
 The derived `profileId` is:
 
 ```text
