@@ -1,0 +1,92 @@
+{
+  "planId": "worker-lease-v1",
+  "tasks": [
+    {
+      "taskId": "worker-lease-core",
+      "goal": "Implement WorkerLease v1 from design/worker-lease-v1.md. Add a strict, bounded, credential-free lease model and atomic same-host store under .cliyard/worker-leases/<runId>/<taskId>/<leaseId>.json capturing run/task/attempt/invocation, controller pid/host/exact OS identity, worker pid/pgid/OS start identity/capture mode, workspace, timestamps and active|released|cleanup-failed|unknown state. Expose exact identity capture through WorkerProcessTreeManager/ManagedWorkerProcess so Claude and Codex adapters can persist the lease immediately after spawn, before their result can be accepted; a lease persistence failure must stop the managed worker and reject the attempt rather than leave it untracked. Thread a run-scoped lease callback from Supervisor-backed codex-batch/runClosedLoop into adapters while keeping standalone/mock paths compatible. Update the same lease on normal close, timeout, cancel and spawn-error using the process-tree cleanup outcome; do not rewrite immutable identity fields or store prompts/commands/env/secrets. Short-lived exit before identity capture remains unknown, never guessed. Add `supervisor recover-workers --repo <path> [--run <run-id>] [--json]` for same-host recovery: skip live matching controllers; skip foreign hosts; for provably dead controllers and exact worker identity, terminate only the dedicated group with existing bounded TERM-to-KILL cleanup, append recovery evidence, and report resume-needed without changing RunManifest acceptance or pretending success; for missing/mismatched identities preserve lease/processes and report needs_human. Expose bounded lease counts and latest lease per task in supervisor status, treating malformed/missing leases as degraded evidence. Add tests/worker-lease.test.ts with injected inspectors plus at least one real POSIX SIGKILL fixture where a child controller creates a detached worker helper lease, is killed, and a new recover-workers invocation terminates that exact group; cover normal cleanup update, timeout/cancel, live owner skip, foreign host skip, wrong identity/needs_human, unknown short exit, malformed records, lease write failure fail-closed, and status projection. Skip real POSIX tests on win32 and preserve the exact-child limitation. Update supervisor/worker types and manifest read models only as needed. Preserve RunManifest authority and existing cleanup semantics.",
+      "nonGoals": [
+        "Do not reattach to an orphaned CLI stdout.",
+        "Do not claim worker survival after controller death.",
+        "Do not implement Windows Job Objects or cross-host kill.",
+        "Do not alter task acceptance based on lease state.",
+        "Do not store commands, prompts, environment values or secrets.",
+        "Do not kill by process name, broad scan or unproven pid."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        ".",
+        "design/worker-lease-v1.md",
+        "design/execution-authority-v1.md",
+        "design/worker-process-tree-v1.md"
+      ],
+      "writePaths": [
+        "src/agents/worker-lease.ts",
+        "src/agents/process-tree.ts",
+        "src/agents/types.ts",
+        "src/agents/claude.ts",
+        "src/agents/codex.ts",
+        "src/repair/loop.ts",
+        "src/scheduler/codex-batch.ts",
+        "src/supervisor/types.ts",
+        "src/supervisor/store.ts",
+        "src/supervisor/cli.ts",
+        "tests/worker-lease.test.ts"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "node --import tsx --test tests/worker-lease.test.ts tests/worker-process-tree.test.ts tests/supervisor-cli.test.ts",
+        "npm test"
+      ],
+      "deliverables": [
+        "Worker identity persists at spawn and final cleanup.",
+        "Explicit same-host recovery safely handles dead-controller worker groups.",
+        "Ambiguous ownership always becomes needs_human.",
+        "Status exposes bounded lease and recovery evidence."
+      ],
+      "forbidden": [
+        "Do not touch files outside writePaths.",
+        "Do not use pkill or process-name matching.",
+        "Do not rewrite RunManifest acceptance.",
+        "Do not persist raw commands or secrets."
+      ],
+      "maxRepairs": 2
+    },
+    {
+      "taskId": "worker-lease-evidence",
+      "goal": "After worker-lease-core is accepted, inspect the integrated implementation and document only measured behavior. Add docs/evidence/WORKER_LEASE.md with the exact lease schema/bounds, spawn and cleanup write points, controller-death recovery command, safety matrix (live owner, dead owner, wrong host, identity mismatch, unknown identity, POSIX group, Windows exact-child), real SIGKILL fixture evidence, focused/full test counts and remaining limits. Update README, docs/NEXT_ITERATION.md and docs/NEXT_STEP_CONTROLLER.md so WorkerLease is marked implemented while stdout reattachment, Windows Job Objects, cross-host recovery, automatic resume and daemon remain uncompleted. State clearly that RunManifest remains task authority. Run the complete test suite on the integrated HEAD before writing final measured counts.",
+      "nonGoals": [
+        "No source or test behavior changes.",
+        "No invented evidence.",
+        "No claim of Windows group parity, cross-host cleanup, reattachment or daemon support.",
+        "No automatic push or main merge."
+      ],
+      "dependsOn": [
+        "worker-lease-core"
+      ],
+      "readPaths": [
+        ".",
+        "design/worker-lease-v1.md"
+      ],
+      "writePaths": [
+        "docs/evidence/WORKER_LEASE.md",
+        "README.md",
+        "docs/NEXT_ITERATION.md",
+        "docs/NEXT_STEP_CONTROLLER.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npm test"
+      ],
+      "deliverables": [
+        "WorkerLease behavior and recovery limits are measured and documented.",
+        "The next profile activation prerequisite remains unambiguous."
+      ],
+      "forbidden": [
+        "Do not edit source or tests.",
+        "Do not touch files outside writePaths.",
+        "Do not claim unmeasured capabilities."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
