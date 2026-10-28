@@ -249,6 +249,62 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
+ * Diagnostic bounds for event-driven fixture waits. These only decide how a
+ * lost callback or a child that never exits is reported; they are never the
+ * schedule under test, so they can be far longer than the policy timers.
+ */
+const DIAGNOSTIC_WAIT_MS = 15_000;
+
+function withDiagnosticDeadline<T>(
+  label: string,
+  signal: Promise<T>,
+  timeoutMs = DIAGNOSTIC_WAIT_MS,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`timed out after ${timeoutMs}ms waiting for ${label}`));
+    }, timeoutMs);
+  });
+  return Promise.race([signal, expired]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+async function waitForCondition(
+  label: string,
+  predicate: () => boolean,
+  timeoutMs = DIAGNOSTIC_WAIT_MS,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      assert.fail(`timed out after ${timeoutMs}ms waiting for ${label}`);
+    }
+    await delay(10);
+  }
+}
+
+/** The child records its own pid; `exec` keeps the spawned pid stable. */
+function readPid(path: string): number | undefined {
+  try {
+    const pid = Number.parseInt(readFileSync(path, "utf8").trim(), 10);
+    return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The child waits for a marker written by the grant callback instead of
  * racing a fixed schedule against the extension window. Process startup and
  * the child's own IO stay on the pre-grant side of the deadline, so the result
@@ -534,13 +590,34 @@ ${resultLine()}
   }
 });
 
+/**
+ * The grant callback is the readiness signal; no fixed child schedule is
+ * assumed. The fixture keeps emitting mapped assistant activity until that
+ * callback writes a marker, so once the child is running:
+ *
+ * - a host-delayed deadline timer still finds fresh healthy evidence;
+ * - the child cannot exit before the grant callback has started, so the only
+ *   exit observed here happens with persistence still in flight.
+ *
+ * The base deadline is bounded by `maxTotalTimeoutMs` (2,600ms), so the startup
+ * margin comes from choosing a base well above process startup (2,000ms) and a
+ * smaller extension step (600ms). A fixture cannot emit provider output before
+ * the OS schedules the child, so any base deadline still shares that one
+ * unavoidable startup margin.
+ */
 test("collect waits for an in-flight grant checkpoint past child exit", async () => {
-  const childMarkerRoot = mkdtempSync(
-    join(tmpdir(), "cliyard-deadline-child-marker-"),
+  const markerRoot = mkdtempSync(
+    join(tmpdir(), "cliyard-deadline-inflight-"),
   );
-  const childFinishedPath = join(childMarkerRoot, "finished");
+  const grantMarkerPath = join(markerRoot, "granted");
+  const childFinishedPath = join(markerRoot, "finished");
+  const pidPath = join(markerRoot, "pid");
   const fixture = claudeFixture(`
-await delay(900);
+fs.writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+while (!fs.existsSync(${JSON.stringify(grantMarkerPath)})) {
+  ${assistantLine("in-flight fixture progress")}
+  await delay(25);
+}
 fs.writeFileSync(${JSON.stringify(childFinishedPath)}, "finished");
 ${resultLine("finished while checkpoint was pending")}
 `);
@@ -548,55 +625,78 @@ ${resultLine("finished while checkpoint was pending")}
   const persistence = new Promise<void>((resolvePromise) => {
     releasePersistence = resolvePromise;
   });
-  let callbackStarted = false;
+  let signalCallbackStarted: (() => void) | undefined;
+  const callbackStarted = new Promise<void>((resolvePromise) => {
+    signalCallbackStarted = resolvePromise;
+  });
+  const grants: TaskExtensionRecord[] = [];
   let collection: Promise<AgentResult> | undefined;
   try {
     collection = runFixture(
       fixture,
       policy({
-        baseTimeoutMs: 600,
-        extensionStepMs: 2_000,
+        baseTimeoutMs: 2_000,
+        extensionStepMs: 600,
         maxTotalTimeoutMs: 2_600,
-        healthyActivityWindowMs: 2_000,
+        healthyActivityWindowMs: 10_000,
       }),
       async (extension) => {
-        assert.equal(extension.cumulativeTimeoutMs, 2_600);
-        callbackStarted = true;
+        grants.push(extension);
+        // The grant is observable but not yet persisted, exactly like the
+        // production checkpoint this test holds in flight.
+        signalCallbackStarted!();
+        writeFileSync(grantMarkerPath, "granted");
         await persistence;
       },
     );
+    const collectionSettled = collection.then(
+      () => true,
+      () => true,
+    );
 
-    const callbackDeadline = Date.now() + 2_000;
-    while (!callbackStarted && Date.now() < callbackDeadline) {
-      await delay(10);
-    }
-    assert.equal(callbackStarted, true);
+    await withDiagnosticDeadline(
+      "extension callback start",
+      callbackStarted,
+    );
+    assert.equal(grants.length, 1);
+    assert.equal(grants[0]!.cumulativeTimeoutMs, 2_600);
 
-    const childDeadline = Date.now() + 2_500;
-    while (!existsSync(childFinishedPath) && Date.now() < childDeadline) {
-      await delay(10);
-    }
+    await waitForCondition(
+      "fixture child pid",
+      () => readPid(pidPath) !== undefined,
+    );
+    const childPid = readPid(pidPath)!;
+    await waitForCondition(
+      "fixture child exit while grant persistence is held",
+      () => !isProcessAlive(childPid),
+    );
     assert.equal(existsSync(childFinishedPath), true);
-    await delay(50);
+
+    // The child is gone; give the close path a bounded turn to run while the
+    // persistence gate is still unresolved. A premature resolution would
+    // surface here, and a correct adapter stays pending.
     const finishedEarly = await Promise.race([
-      collection.then(() => true),
-      delay(20).then(() => false),
+      collectionSettled,
+      delay(250).then(() => false),
     ]);
-    assert.equal(finishedEarly, false);
+    assert.equal(
+      finishedEarly,
+      false,
+      "collect resolved before the in-flight grant was persisted",
+    );
 
     releasePersistence!();
     const result = await collection;
     assert.equal(result.exitCode, 0, result.logTail);
+    assert.equal(result.failure, undefined);
     assert.equal(result.extensions?.length, 1);
-    assert.equal(
-      result.extensions?.[0]?.cumulativeTimeoutMs,
-      2_600,
-    );
+    assert.equal(result.extensions?.[0]?.cumulativeTimeoutMs, 2_600);
+    assert.deepEqual(result.extensions, grants);
   } finally {
     releasePersistence?.();
     await collection?.catch(() => undefined);
     fixture.cleanup();
-    rmSync(childMarkerRoot, { recursive: true, force: true });
+    rmSync(markerRoot, { recursive: true, force: true });
   }
 });
 
