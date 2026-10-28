@@ -1,0 +1,47 @@
+{
+  "planId": "deadline-suite-concurrency-hardening-v1",
+  "tasks": [
+    {
+      "taskId": "harden-deadline-suite-fixtures",
+      "goal": "Eliminate the remaining deadline-extension test flakes on the combined journal/adoption baseline. Two consecutive full-suite runs exposed different failures: `collect waits for an in-flight grant checkpoint past child exit` and `a rejected persistence callback denies the grant`; each can pass in isolation. Audit the whole tests/deadline-extension.test.ts file as specified in design/deadline-suite-concurrency-hardening-v1.md. Replace fragile startup/fixed-delay assumptions for tests that require a successful extension with event-driven synchronization and continuous or marker-gated mapped assistant/tool activity so healthy evidence remains fresh at each intended deadline. Specifically cover healthy grant, maxExtensions, maxTotalTimeoutMs, timer re-arm, callback rejection, in-flight child exit, default-off, and supervisor checkpoint integration. Keep intentional non-extension cases fresh-evidence-free so they still prove denial. Use generous diagnostic deadlines only for lost-signal failures, not as the policy timing under test. Do not skip or weaken coverage. If a deterministic test proves a real production race, make the narrowest fix in src/agents/claude.ts and explain it. Verify with build, focused deadline file repeated at least five times under concurrent local load, and the complete npm test suite three consecutive times. Update docs/evidence/DEADLINE_EXTENSION.md with the final fixture strategy, measured pass counts, and any remaining timing limitations; do not claim CI or long-duration flake-rate evidence.",
+      "nonGoals": [
+        "Do not skip, delete or mark tests todo.",
+        "Do not weaken timeout-after-deadline semantics.",
+        "Do not change adoption or journal behavior.",
+        "Do not add arbitrary long primary sleeps.",
+        "Do not claim more than three measured full-suite runs."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "design/deadline-suite-concurrency-hardening-v1.md",
+        "design/deadline-inflight-stability-v1.md",
+        "src/agents/claude.ts",
+        "tests/deadline-extension.test.ts",
+        "docs/evidence/DEADLINE_EXTENSION.md"
+      ],
+      "writePaths": [
+        "src/agents/claude.ts",
+        "tests/deadline-extension.test.ts",
+        "docs/evidence/DEADLINE_EXTENSION.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "node --import tsx --test tests/deadline-extension.test.ts",
+        "npm test"
+      ],
+      "deliverables": [
+        "Successful-extension tests signal readiness explicitly.",
+        "Denial tests still fail for the intended policy reason.",
+        "Deadline file is stable under repeated concurrent load.",
+        "Three consecutive full-suite runs are green."
+      ],
+      "forbidden": [
+        "Do not change files outside writePaths.",
+        "Do not remove late-result or callback-rejection coverage.",
+        "Do not claim cross-host stability."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}
