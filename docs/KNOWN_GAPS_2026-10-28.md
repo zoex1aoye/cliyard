@@ -73,6 +73,25 @@ The WorkerProcessTree v1.1 run launched the Supervisor from `c04bb96` while
 targeting the main checkout. Its RunManifest contains a non-null
 `workspaceBoundary: clean` record, proving real self-host execution.
 
+### 3. Accepted integration and governance history have diverged
+
+The accepted process-tree integration head is
+`9a38174a872d70b7a250225c31fa7ce4efdcf06e`. The main checkout's WorkerLease
+documentation commit `53cc0a2e72cd159b1caf1d1c6e3c79baad941ef3`,
+the committed `.agents` rules/skills, and their follow-up documentation are not
+ancestors of that integration head.
+
+Consequences:
+
+- a task worktree based on `9a38174` contains the accepted process code but not
+  the latest governance documents;
+- the next self-host run must not pretend the two histories are interchangeable;
+- manual integration must preserve the accepted code and the newer governance
+  files instead of fast-forwarding one side over the other.
+
+This is a provenance/integration gap, not a reason to dispatch from the main
+checkout's older process implementation.
+
 ## Existing P0/P1 gaps
 
 | Priority | Gap | Current state | Next action |
@@ -85,6 +104,7 @@ targeting the main checkout. Its RunManifest contains a non-null
 | P1 | Guard policy configuration | Extra roots, exclusions and caps exist in the core but are not exposed through Project config/CLI | Expose a versioned policy when prevention is designed |
 | P1 | Large/ignored trees | The guard walks physical entries and fails closed at 100,000 entries; it does not use `.gitignore` | Profile real Java/Flutter/Rust repositories before changing defaults |
 | P1 | Credential and network isolation | Guard hashes files and never inspects credentials, sockets or network traffic | SandboxProvider capability phases |
+| P1 | Accepted integration/main governance divergence | `9a38174` has accepted process code but not current main governance docs; both branches carry non-overlapping reviewed changes | Preserve both lineages during manual integration; do not reset either side |
 | P0 | ProfileCatalog and real binding activation | ExecutionProfile is frozen, but endpoint/account activation is not verified | After process safety |
 | P0 | Per-run ownership and hierarchical admission | Queue is still sequential with a repo-global Supervisor lock | After routing prerequisites |
 | P0 | Stable Control API | Internal control snapshot exists; no versioned client-neutral API/event stream | After routing/parallel semantics |
@@ -105,6 +125,24 @@ exact identity checks.
 Immediately after it, implement the provider-neutral **SandboxProvider** for OS
 write prevention. ProfileCatalog and grid admission remain behind process and
 filesystem safety.
+
+## Planned v1 slice
+
+The next Plan is:
+
+- [controller-death-nested-processes-v1.md](../design/controller-death-nested-processes-v1.md);
+- [controller-death-nested-processes-v1.plan.json](../design/controller-death-nested-processes-v1.plan.json).
+
+It has two sequential tasks:
+
+1. `controller-death-nested-core`: persist exact sampled nested identities in
+   WorkerLease and extend exact-identity recovery when the top-level leader is
+   gone.
+2. `controller-death-nested-evidence`: document only the measured behavior after
+   the core task is accepted.
+
+The core task intentionally excludes SandboxProvider, Windows Job Objects,
+cross-host recovery, automatic resume and RunManifest rewriting.
 
 ## Next-run execution rule
 
