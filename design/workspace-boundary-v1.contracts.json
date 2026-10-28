@@ -1,0 +1,104 @@
+{
+  "planId": "workspace-boundary-v1",
+  "contracts": [
+    {
+      "taskId": "workspace-boundary-core",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Implement the WorkspaceBoundary v1 detection core described in design/workspace-boundary-v1.md. Add src/agents/workspace-boundary.ts with strict, bounded, credential-free protected-root snapshot and comparison primitives for an authority checkout and optional additional absolute roots. The policy must accept explicit protected roots and exclusions, protect authority source files plus important Git state (HEAD, index, packed-refs, config, hooks and refs), and default the control-plane mutable paths from the design document to excluded. Snapshot regular files by SHA-256 content, symlinks by their link target, and directories by normalized presence; do not follow symlinks outside a protected root. Detect added, removed and modified entries. Keep full snapshots memory-only and expose bounded path-level changes only; never retain file contents or raw command/environment data. Normalize evidence paths, reject absolute/traversal/control-character evidence, cap paths and diagnostic text, and return an explicit inspection error instead of clean when a root cannot be read or a configured safety cap is exceeded. Add tests/workspace-boundary.test.ts covering clean equality, modified/added/removed files, symlink changes, excluded mutable control paths, deterministic ordering, path sanitization, duplicate/overlapping roots, ENOENT handling, and cap/read failure fail-closed behavior. Do not integrate the guard into the scheduler in this task."
+      ],
+      "nonGoals": [
+        "Do not integrate with codex-batch or RunManifest.",
+        "Do not implement an OS sandbox or provider SPI.",
+        "Do not delete or revert files.",
+        "Do not persist file contents, prompts, commands or environment values."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        ".",
+        "design/workspace-boundary-v1.md",
+        "src/agents/path-scope.ts",
+        "src/runtime/process.ts"
+      ],
+      "writePaths": [
+        "src/agents/workspace-boundary.ts",
+        "tests/workspace-boundary.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "31a1eaa6e03e5dd7f2e90c7a2203c6408acdf7f9",
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/workspace-boundary.test.ts"
+      ],
+      "deliverables": [
+        "A deterministic protected-root snapshot and comparison API.",
+        "Bounded, path-only evidence with no file contents.",
+        "Explicit inspection errors and fail-closed caps."
+      ],
+      "forbidden": [
+        "Do not touch files outside writePaths.",
+        "Do not store file contents or hashes in durable evidence.",
+        "Do not follow symlinks outside a protected root."
+      ],
+      "maxRepairs": 2
+    },
+    {
+      "taskId": "workspace-boundary-integration",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Integrate WorkspaceBoundary v1 from the accepted workspace-boundary-core task and design/workspace-boundary-v1.md into the durable worker batch. In src/scheduler/codex-batch.ts, capture one authority snapshot for each ready wave after attempt worktrees/read-context checks are ready and before any worker starts, then capture and compare after runClosedLoop promises settle and before any result is accepted or merged. Add a deterministic test seam through CodexBatchOptions so tests can inject clean, dirty and failing guards; production must use the real guard and never silently disable it. Persist one bounded WorkspaceBoundaryRecord for every task in the wave in RunManifest, including version, status clean|violation|inspection_error, enforcement guard-only, observed timestamps, bounded changes, and a bounded error. Keep full snapshots out of durable state. If the boundary is dirty or inspection fails, no task in that wave may be accepted or merged. Preserve an already rejected worker's original structured failure; convert an otherwise successful result to a policy_blocked FailureRecord with code workspace_boundary_violation or workspace_boundary_inspection_failed. Never delete or revert an unexpected change. Extend src/supervisor/types.ts and src/supervisor/store.ts with optional records that remain backward-compatible with older manifests and fail closed on malformed present records. Expose concise boundary evidence in supervisor human and JSON status through the existing status model in src/supervisor/cli.ts and/or src/orchestration/control-snapshot.ts. Add tests/workspace-boundary-integration.test.ts using temporary repositories and injected guards to prove a clean wave accepts, a dirty wave rejects every active task without merge, an inspection error fails closed, original failures are preserved, accepted and rejected task evidence survives manifest round-trip, legacy manifests stay readable, malformed records fail closed, and status reports clean/violation/error. Exclude only the control-plane mutable paths and ledger path specified in the design; protect queue.json, plans/contracts, RunManifests and authority source/Git state. Add docs/evidence/WORKSPACE_BOUNDARY.md with measured commands and limitations; update README.md, docs/NEXT_ITERATION.md, docs/NEXT_STEP_CONTROLLER.md and design/workspace-boundary-v1.md so this detection slice is marked implemented while OS write prevention, provider SPI, credential/network isolation and full ignored-directory coverage remain explicit gaps. Do not add or change package dependencies."
+      ],
+      "nonGoals": [
+        "Do not add an OS sandbox or change Node version.",
+        "Do not implement SRT, Codex Sandbox, bubblewrap or container providers.",
+        "Do not auto-delete or auto-revert mutations.",
+        "Do not mark a result accepted when boundary inspection is unavailable.",
+        "Do not claim detection equals prevention."
+      ],
+      "dependsOn": [
+        "workspace-boundary-core"
+      ],
+      "readPaths": [
+        ".",
+        "design/workspace-boundary-v1.md",
+        "src/agents/workspace-boundary.ts",
+        "tests/workspace-boundary.test.ts"
+      ],
+      "writePaths": [
+        "src/scheduler/codex-batch.ts",
+        "src/supervisor/types.ts",
+        "src/supervisor/store.ts",
+        "src/supervisor/cli.ts",
+        "src/orchestration/control-snapshot.ts",
+        "tests/workspace-boundary-integration.test.ts",
+        "docs/evidence/WORKSPACE_BOUNDARY.md",
+        "README.md",
+        "docs/NEXT_ITERATION.md",
+        "docs/NEXT_STEP_CONTROLLER.md",
+        "design/workspace-boundary-v1.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "31a1eaa6e03e5dd7f2e90c7a2203c6408acdf7f9",
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/workspace-boundary.test.ts tests/workspace-boundary-integration.test.ts tests/worker-exit-path-audit.test.ts tests/supervisor-cli.test.ts",
+        "npm test"
+      ],
+      "deliverables": [
+        "Every worker wave has pre/post protected-root evidence.",
+        "Dirty or uninspectable authority state rejects the entire active wave.",
+        "RunManifest and Supervisor status expose bounded boundary evidence.",
+        "Docs distinguish guard-only detection from future OS enforcement."
+      ],
+      "forbidden": [
+        "Do not touch files outside writePaths.",
+        "Do not auto-fix or hide authority-checkout mutations.",
+        "Do not accept results after a boundary inspection failure.",
+        "Do not add sandbox dependencies."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}
