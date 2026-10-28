@@ -145,8 +145,14 @@ no longer validates cannot be re-confirmed.
 
 ## Event
 
-Each successful first adoption appends one bounded JSON line to
-`.cliyard/queue-events/adoptions.jsonl`:
+Each successful first adoption appends exactly one bounded
+`queue.item.adopted` JSON line to the unified queue journal:
+
+```text
+<repo>/.cliyard/queue-events/events.jsonl
+```
+
+There is no second adoption stream and no `adoptions.jsonl` writer or reader.
 
 ```json
 {
@@ -168,14 +174,38 @@ Each successful first adoption appends one bounded JSON line to
 }
 ```
 
-This dedicated stream exists because the v0 queue journal has a closed event
-registry; adding `queue.item.adopted` there would change a module outside this
-slice's write scope. The stream is append-only and bounded by construction
-(closed fields plus the evidence limits above). A journal write failure is
-observability-only and never turns a successful adoption into a failure; the
-resolution in `queue.json` remains authoritative for adoption state. Queue
-status exposes the bounded stream as `queue.adoptionEvents` (JSON) and prints an
-`adoptions:` summary line.
+The event is append-only and bounded by construction. In addition to the
+common queue-event fields, `queue.item.adopted` requires the complete set
+above: `itemId`, `runId`, `status: "completed"`, `sourceManifestStatus`
+(`blocked` or `interrupted`), `baseCommit`, `reviewedCommit`, `contractsHash`,
+`reviewEvidencePath`, `reviewEvidenceHash`, `approvedBy` and `reason`.
+
+Event-specific validation:
+
+* every adoption field is required; a missing field is rejected on append and
+  makes an existing line malformed on read;
+* adoption-only fields (`sourceManifestStatus`, `baseCommit`, `reviewedCommit`,
+  `contractsHash`, `reviewEvidencePath`, `reviewEvidenceHash`, `approvedBy`)
+  are rejected on every other event type, both when appending and when
+  reading;
+* `baseCommit` and `reviewedCommit` are full Git object ids (40 or 64 hex
+  characters); `contractsHash` and `reviewEvidenceHash` are hex SHA-256
+  digests (64 hex characters);
+* `itemId` and `runId` are at most 128 characters, `approvedBy` at most 128,
+  `reason` at most 1,000 and `reviewEvidencePath` at most 4,096; text fields
+  are non-empty and use the same obvious-credential rejection as
+  `OperatorResolution`;
+* an oversized or secret-bearing value is rejected rather than silently
+  truncated; malformed, incomplete or misplaced lines are counted as journal
+  malformed lines and never appear as adoption observations.
+
+A journal write failure is observability-only and never turns a successful
+adoption into a failure; the resolution in `queue.json` remains authoritative
+for adoption state. Queue status exposes `queue.adoptionEvents` (JSON) by
+filtering the unified journal for `queue.item.adopted` and prints an
+`adoptions:` summary line. The projection scans the full valid record set
+before applying its bounded display window, so unrelated recent events cannot
+hide adoption observations; malformed-line counts remain visible.
 
 ## Dependent semantics
 
@@ -220,3 +250,6 @@ differs from recorded bytes fails closed.
 * No abbreviated commits, branches or symbolic refs.
 * No raw logs, prompts, secrets or unbounded output in evidence.
 * No parallel dispatch, dynamic routing, daemon or push behavior.
+
+WorkerLease persisted at spawn plus controller owner-death recovery remains
+the next implementation slice; adoption does not provide either.

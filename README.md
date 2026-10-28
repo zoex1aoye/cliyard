@@ -48,7 +48,7 @@ Human: versioned requirements + visual/design evidence
 - **Claude Code + DeepSeek worker:** `claude-ds` + `npm run claude-batch`
 - **Continuous waves:** independent ready tasks execute in parallel within an integration branch; accepted task branches are snapshotted and merged sequentially, then the next dependent wave starts from the new integration head. This intra-item parallelism exists, but still needs first-class task/resource admission and two-level observability.
 - **Supervisor v0 (durable foreground):** `supervisor start/status/resume/reap/stop`, atomic JSON RunManifest, integration-branch checkpoint, one-lock recovery; resume skips accepted tasks (no daemon, no SQLite)
-- **Foreground orchestration queue v0 (explicit approval):** `queue add/add-plan/list/retry/cancel/run/adopt` over frozen contracts or approved Plans. Contract-backed `add` freezes the contracts path and SHA-256 at add; `run` dispatches ready items one at a time through the existing Supervisor, stops at the first blocked item by default, and with `--continue-on-blocked` keeps independent work moving while dependants become blocked. Blocked items retry explicitly (`start` when no run exists, otherwise `resume --retry-rejected`); a same-host stale queue lock is reclaimed and a `running` item with a recorded run id reconciles against its RunManifest. `queue adopt` closes one reviewed blocked item with a separately versioned `OperatorResolution`: the source blocked/interrupted RunManifest is read-only historical truth, its tasks are never marked accepted, and the queue item becomes `completed` with `completion: "adopted"`. Adoption requires the exact run binding, unchanged frozen contracts/approved Plan, a full reviewed commit inside the pinned-base/current-HEAD lineage, and bounded secret-free evidence. The queue never approves or rewrites contracts and never rewrites a RunManifest. Completed and cancelled items are monotonic. Sequential, same-host, foreground only; adoption does not enable parallel dispatch.
+- **Foreground orchestration queue v0 (explicit approval):** `queue add/add-plan/list/retry/cancel/run/adopt` over frozen contracts or approved Plans. Contract-backed `add` freezes the contracts path and SHA-256 at add; `run` dispatches ready items one at a time through the existing Supervisor, stops at the first blocked item by default, and with `--continue-on-blocked` keeps independent work moving while dependants become blocked. Blocked items retry explicitly (`start` when no run exists, otherwise `resume --retry-rejected`); a same-host stale queue lock is reclaimed and a `running` item with a recorded run id reconciles against its RunManifest. `queue adopt` closes one reviewed blocked item with a separately versioned `OperatorResolution`: the source blocked/interrupted RunManifest is read-only historical truth, its tasks are never marked accepted, and the queue item becomes `completed` with `completion: "adopted"`. Adoption requires the exact run binding, unchanged frozen contracts/approved Plan, a full reviewed commit inside the pinned-base/current-HEAD lineage, and bounded secret-free evidence. The queue never approves or rewrites contracts and never rewrites a RunManifest. Completed and cancelled items are monotonic. The bounded `queue.item.adopted` observation lives only in the unified queue journal. Sequential, same-host, foreground only; adoption does not enable parallel dispatch.
 - **Control snapshot + queue event journal v0:** `queue status [--json]` is read-only and joins item state, Plan/materialization lineage, the latest RunManifest/tasks, queue and supervisor liveness, latest worker progress, retry policy and a host resource sample. Missing manifests and malformed journal lines are reported as degraded evidence; they never become success. Queue add/retry/cancel, Plan materialization, dispatch, blocking and provider session boundaries append bounded events to `.cliyard/queue-events/events.jsonl`. Provider profiles are unresolved until an `ExecutionProfile` exists: capacity, quota, balance and pricing are `unknown/null`, never filled from a public nominal number.
 - **Worker failure taxonomy + cost truth v0:** every newly rejected dispatched task carries a structured, bounded `FailureRecord` in its RunManifest task (category, stage, optional code, message, `observedAt`, advisory `retryableHint`). The exact categories are `budget_exhausted`, `timeout`, `provider_transient`, `provider_auth`, `provider_protocol`, `worker_process_exit`, `verifier_rejected`, `policy_blocked`, `resource_exhausted` and `unknown`; classification distinguishes a worker process failure from a post-success verifier rejection. Cost truth is one of `provider-reported`, `cli-estimated`, `usage-only` or `unavailable`, with per-session provenance and explicit `missing` reasons. Claude Code `total_cost_usd` is a non-authoritative CLI estimate (never a DeepSeek bill or balance); token usage is preserved independently; a zero emitted by the CLI stays zero but non-authoritative; missing cost stays `unavailable`, never `$0`. The configured `--max-budget-usd` is recorded as `guardBudgetUsd`, not spend. Accepted and rejected tasks keep their cost, including across worktree cleanup. `supervisor status` and `queue status` expose failure/cost; queue pre-dispatch blocks keep an item-level `policy_blocked` failure only when no RunManifest exists. RunManifest remains task authority. Nothing in this slice retries automatically: `retryableHint` is advisory, the queue needs explicit `queue retry`, Supervisor needs explicit `resume --retry-rejected`, and the Claude adapter's pre-existing bounded transient retry is unchanged.
 - **Plan-backed chained queue base v0:** `queue add-plan <plan.json> --repo <path> --id <id> [--depends-on <id>]` snapshots an explicitly approved Plan (absolute path + SHA-256) and requires the Plan id to equal the queue id. A root item pins the repository HEAD captured at add; a dependent item waits for its one upstream to complete, then compiles the Plan deterministically at that RunManifest's `integrationHead` into a queue-owned artifact under `.cliyard/queue/materialized/` before any attempt increment or Supervisor start. Retry/resume re-verifies the recorded Plan hash, artifact bytes, base and upstream lineage; a changed Plan, artifact or upstream evidence blocks instead of being substituted. The downstream integration branch starts at the upstream head, so the upstream `integrationHead` is an ancestor of the downstream one. A downstream task may declare an upstream-produced file explicitly in `readPaths`; preflight proves it against that pinned base. One linear dependency only; no automatic Plan generation/approval, no multi-parent integration/merge queue, no parallel dispatch or daemon.
@@ -61,15 +61,26 @@ Human: versioned requirements + visual/design evidence
 
 Not yet: **WorkerLease persisted at spawn and controller owner-death recovery** (the next safety prerequisite), secret-free `ProfileCatalog` with real binding activation, CLI+model execution-profile routing, fixed hierarchical admission, bounded inter-item and intra-item parallel dispatch, a stable local Control API, a reusable DesignRevision/EvidenceBundle, a self-owned fallback UI, or a supervised look-ahead controller/daemon. Windows Job Object process-tree parity and telemetry-backed dynamic scoring are later prerequisites, not shortcuts past WorkerLease, profile activation and fixed admission. Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, cross-host execution, SQLite manifests, unlimited parallel runtimes, multi-parent integration/merge queue and provider-conversation resume also remain unclaimed. The current queue is explicit-approval, sequential, same-host and foreground; adoption is a human review resolution, not parallel execution. The current task DAG can run independent ready tasks concurrently but lacks a shared CPU/RAM/provider/runtime admission broker. Plan-backed items deterministically compile contracts from an already-approved Plan; v0 supports only one linear queue dependency. Explicit downstream `readPaths` are validated at the pinned contracts base. Task Architect produces a human-reviewable Plan only; it does **not** freeze contracts or dispatch automatically.
 
-Measured suite (2026-10-28, execution-authority slice on `ce1157a`):
-`npm run build` exit `0`; focused queue adoption **8/8** (2539.7 ms),
-focused deadline extension **13/13** (23601.98 ms); full `npm test`
-**371/371** (24411.1 ms, 0 fail). The two upstream slices integrate
-`manual-queue-adoption` (`b7f7d9e`) and `deadline-fixture-stability`
-(`c57d591`): adoption adds 8 focused tests, and the stabilized deadline
-fixture adds 1 late-result test and is green. The previous execution-authority
-review recorded **361/362** with that fixture red; this integration closes it.
-Earlier focused and full counts remain historical measurements: failure/cost
+Measured suite (2026-10-28, adoption journal unification at integrated HEAD
+`41e5fcd`): `npm run build` exit `0`; focused queue adoption **11/11**
+(3006.48 ms), focused queue control snapshot **8/8** (832.59 ms), focused
+deadline extension **13/13** (23591.57 ms); full `npm test` was captured
+twice: **373/375** (25983.47 ms, 2 deadline-extension async-persistence
+failures) then **375/375** (24814.49 ms, 0 fail). The two failures did not
+reproduce in the focused run or the second captured full run; an earlier
+invocation also exited non-zero but its output was truncated before the
+summary, so no count from it is used. This is a local observation, not a
+flake-rate or stable-green-gate claim. `unify-adoption-journal`
+(`2c88012`) moves new adoption events from a dedicated `adoptions.jsonl` into
+the unified queue journal and adds 3 adoption tests plus 1 control-snapshot
+projection test (queue-adoption 8→11, queue-control 7→8). The adoption slice
+itself was measured at `ce1157a`: focused adoption **8/8** (2539.7 ms),
+deadline **13/13** (23601.98 ms), full **371/371** (24411.1 ms, 0 fail).
+That baseline integrated `manual-queue-adoption` (`b7f7d9e`) and
+`deadline-fixture-stability` (`c57d591`); the previous execution-authority
+review recorded **361/362** with the deadline fixture red, and this
+integration closed it. Earlier focused and full counts remain historical
+measurements: failure/cost
 **290/290** on `69f62de` (taxonomy 14/14, Claude 17/17, supervisor 12/12,
 queue control 7/7, combined 50/50); ControlSnapshot **245/245** on `3776c09`;
 read-context **240/240** on `390d61e` (focused 5/5, Plan-backed 31/31). One
@@ -245,12 +256,14 @@ reclaimed; foreign-host locks fail closed. Details and measured crash windows:
 [docs/evidence/ORCHESTRATION_QUEUE.md](docs/evidence/ORCHESTRATION_QUEUE.md)
 and [docs/evidence/PLAN_BACKED_CHAIN.md](docs/evidence/PLAN_BACKED_CHAIN.md).
 Queue audit events are appended to
-`<target>/.cliyard/queue-events/events.jsonl` (gitignored). Successful first
-adoptions also append one bounded line to
-`<target>/.cliyard/queue-events/adoptions.jsonl`; `queue.json` remains the
-authority for the `OperatorResolution` if that observability append fails.
-These streams are bounded, best-effort observations only; `queue status`
-reads them but never appends or rewrites them. An adopted item shows
+`<target>/.cliyard/queue-events/events.jsonl` (gitignored). A successful first
+adoption appends exactly one bounded `queue.item.adopted` record to that same
+unified journal; there is no separate `adoptions.jsonl` writer or reader.
+`queue.json` remains the authority for the `OperatorResolution` if that
+observability append fails. The journal is a bounded, best-effort observation
+stream only; `queue status` reads it, including the `queue.adoptionEvents`
+projection derived by filtering `queue.item.adopted` from the unified journal,
+but never appends or rewrites it. An adopted item shows
 `completion: "adopted"`; its source blocked/interrupted RunManifest remains
 historical truth and is never rewritten.
 
