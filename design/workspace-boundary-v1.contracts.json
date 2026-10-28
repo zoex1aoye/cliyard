@@ -26,7 +26,7 @@
         "tests/workspace-boundary.test.ts"
       ],
       "sharedResources": [],
-      "baseCommit": "31a1eaa6e03e5dd7f2e90c7a2203c6408acdf7f9",
+      "baseCommit": "eada765e5f4e65d5f4c3c252ec3fdc98c75fc64b",
       "verifyCommands": [
         "npm run build",
         "npx tsx --test tests/workspace-boundary.test.ts"
@@ -80,7 +80,7 @@
         "design/workspace-boundary-v1.md"
       ],
       "sharedResources": [],
-      "baseCommit": "31a1eaa6e03e5dd7f2e90c7a2203c6408acdf7f9",
+      "baseCommit": "eada765e5f4e65d5f4c3c252ec3fdc98c75fc64b",
       "verifyCommands": [
         "npm run build",
         "npx tsx --test tests/workspace-boundary.test.ts tests/workspace-boundary-integration.test.ts tests/worker-exit-path-audit.test.ts tests/supervisor-cli.test.ts",
