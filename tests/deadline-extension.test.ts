@@ -248,11 +248,23 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
 
+/**
+ * The child waits for a marker written by the grant callback instead of
+ * racing a fixed schedule against the extension window. Process startup and
+ * the child's own IO stay on the pre-grant side of the deadline, so the result
+ * lands shortly after the grant rather than at the edge of the extended
+ * deadline.
+ */
 test("healthy mapped activity persists one exact grant before extending", async () => {
+  const markerRoot = mkdtempSync(
+    join(tmpdir(), "cliyard-deadline-grant-marker-"),
+  );
+  const grantMarkerPath = join(markerRoot, "granted");
   const fixture = claudeFixture(`
-await delay(700);
 ${assistantLine("healthy fixture progress")}
-await delay(1000);
+while (!fs.existsSync(${JSON.stringify(grantMarkerPath)})) {
+  await delay(10);
+}
 fs.appendFileSync(path.join(process.cwd(), "allowed.ts"), "\\nexport const extended = true;\\n");
 ${resultLine()}
 `);
@@ -260,9 +272,15 @@ ${resultLine()}
   try {
     const result = await runFixture(
       fixture,
-      policy({ baseTimeoutMs: 1_200, extensionStepMs: 1_000 }),
+      policy({
+        baseTimeoutMs: 3_000,
+        extensionStepMs: 2_000,
+        healthyActivityWindowMs: 10_000,
+      }),
       (extension) => {
         grants.push(extension);
+        // The exact record was checkpointed; only now may the child finish.
+        writeFileSync(grantMarkerPath, "granted");
       },
     );
     assert.equal(
@@ -281,8 +299,8 @@ ${resultLine()}
     assert.equal(extension.kind, "deadline");
     assert.equal(extension.source, "auto");
     assert.equal(extension.attempt, 0);
-    assert.equal(extension.extensionMs, 1000);
-    assert.equal(extension.cumulativeTimeoutMs, 2200);
+    assert.equal(extension.extensionMs, 2000);
+    assert.equal(extension.cumulativeTimeoutMs, 5000);
     assert.equal(extension.healthyEvidence.length, 1);
     assert.match(extension.healthyEvidence[0]!, /^assistant@/);
     assert.ok(extension.providerSessionId);
@@ -293,6 +311,50 @@ ${resultLine()}
     assert.match(args, /--max-budget-usd 3/);
   } finally {
     fixture.cleanup();
+    rmSync(markerRoot, { recursive: true, force: true });
+  }
+});
+
+test("a result after the extended deadline still loses to timeout", async () => {
+  const markerRoot = mkdtempSync(
+    join(tmpdir(), "cliyard-deadline-late-marker-"),
+  );
+  const grantMarkerPath = join(markerRoot, "granted");
+  const fixture = claudeFixture(`
+${assistantLine("late fixture progress")}
+while (!fs.existsSync(${JSON.stringify(grantMarkerPath)})) {
+  await delay(10);
+}
+// The grant moves the deadline to 5s; this result would arrive at ~7s.
+await delay(4_000);
+fs.appendFileSync(path.join(process.cwd(), "allowed.ts"), "\\nexport const tooLate = true;\\n");
+${resultLine("too late")}
+`);
+  const grants: TaskExtensionRecord[] = [];
+  try {
+    const result = await runFixture(
+      fixture,
+      policy({
+        baseTimeoutMs: 3_000,
+        extensionStepMs: 2_000,
+        healthyActivityWindowMs: 10_000,
+      }),
+      (extension) => {
+        grants.push(extension);
+        writeFileSync(grantMarkerPath, "granted");
+      },
+    );
+
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.failure?.category, "timeout");
+    assert.match(result.failure?.message ?? "", /timed out after 5000ms/);
+    assert.equal(grants.length, 1);
+    assert.equal(result.extensions?.length, 1);
+    assert.deepEqual(result.extensions, grants);
+    assert.equal(result.extensions?.[0]?.cumulativeTimeoutMs, 5000);
+  } finally {
+    fixture.cleanup();
+    rmSync(markerRoot, { recursive: true, force: true });
   }
 });
 
