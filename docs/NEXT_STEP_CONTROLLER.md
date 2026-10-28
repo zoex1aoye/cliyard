@@ -11,12 +11,16 @@
 > the status adoption projection filters that journal and there is no
 > `adoptions.jsonl`), run binding, worker path audit, health-gated budget
 > continuation/deadline extension, and deadline-fixture stability are
-> implemented. The next P0 slice is **WorkerLease persisted at spawn plus
-> controller owner-death recovery**. Only after that: secret-free
-> `ProfileCatalog` with real binding activation, per-run Supervisor ownership,
-> and fixed hierarchical admission. Windows Job Object ownership and dynamic
-> routing scores stay behind those prerequisites. Evidence:
+> implemented. **WorkerLease v1 (same-host controller-death recovery)** is also
+> implemented: Supervisor-backed invocations persist a bounded, credential-free
+> lease at spawn, and `supervisor recover-workers` terminates only an exactly
+> verified dead-controller POSIX worker group. The next P0 slice is a
+> secret-free `ProfileCatalog` with real binding activation. Only after that:
+> per-run Supervisor ownership and fixed hierarchical admission. Windows Job
+> Object ownership and dynamic routing scores stay behind those prerequisites.
+> Evidence:
 > [evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md),
+> [evidence/WORKER_LEASE.md](evidence/WORKER_LEASE.md),
 > [evidence/CONTROL_SNAPSHOT.md](evidence/CONTROL_SNAPSHOT.md) and
 > [evidence/FAILURE_COST_TRUTH.md](evidence/FAILURE_COST_TRUTH.md).
 
@@ -44,8 +48,8 @@ queue observe / status (implemented)
   -> deadline fixture stability (implemented)
   -> adoption journal unification (implemented)
   -> telemetry-backed task estimates (design only)
-  -> WorkerLease persisted at spawn + controller owner-death recovery (NEXT)
-  -> secret-free ProfileCatalog + real endpoint/account binding activation
+  -> WorkerLease persisted at spawn + controller owner-death recovery (implemented)
+  -> secret-free ProfileCatalog + real endpoint/account binding activation (NEXT)
   -> per-run Supervisor ownership + short control-store locks
   -> fixed hierarchical admission for queue items + Plan ready waves
   -> Windows Job Object ProcessOwnerProvider
@@ -134,8 +138,40 @@ slice does not touch deadline code, and this is not a flake-rate or
 stable-green-gate claim. Evidence:
 [evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md).
 
-These slices do **not** implement WorkerLease at spawn, owner-death recovery,
-profile activation, admission, parallel dispatch, Windows parity or a daemon.
+### WorkerLease v1 (2026-10-28)
+
+Supervisor-backed Claude and Codex invocations now write one bounded,
+credential-free lease immediately after spawn at
+`<repo>/.cliyard/worker-leases/<runId>/<taskId>/<leaseId>.json`. The lease
+records run/task/attempt/invocation, controller pid/host/exact identity, worker
+pid/pgid/OS start identity/capture mode, workspace, timestamps and lifecycle
+state (`active`, `released`, `cleanup-failed`, `unknown`). Exact identity is
+persisted before the adapter can resolve a result; a persistence failure stops
+the managed worker and rejects the attempt. Normal close, timeout, cancel and
+spawn error update the same lease with the process-tree cleanup outcome and do
+not rewrite immutable identity fields. A worker that exits before exact
+identity capture stays `unknown`; no identity is fabricated.
+
+`supervisor recover-workers --repo <path> [--run <id>] [--json]` is a one-shot
+same-host command. It skips foreign hosts, live matching controllers, identity
+mismatches, unknown identities, non-active leases and malformed records. Only
+after proving the controller dead and the worker's exact POSIX leader identity
+does it signal the dedicated group (bounded SIGTERM, then SIGKILL), append a
+bounded recovery record and report `resumeNeeded`. Recovery never reattaches
+stdout, never resumes automatically and never writes a `RunManifest`; the
+`RunManifest` remains task authority. Windows exact-child captures are preserved
+as `needs_human`, not signalled.
+
+Measured on integrated HEAD `e6f922e`: build exit `0`; focused worker-lease
+**19/19** (4652.98 ms), including the real SIGKILL controller-death fixture
+(1/1, 241.49 ms); full suite **394/394** (25657.98 ms, 0 fail). Cross-host
+recovery, stdout reattachment, Windows Job Objects, automatic resume and a
+daemon are not implemented. Evidence:
+[evidence/WORKER_LEASE.md](evidence/WORKER_LEASE.md).
+
+These earlier slices do **not** implement profile activation, admission,
+parallel dispatch, Windows parity or a daemon; the WorkerLease slice above is
+implemented.
 
 ## Immediate next slices
 
@@ -264,30 +300,37 @@ cliyard queue extend-attempts <id> --to <n> --reason <text>
 It should persist who/what changed the policy, old/new values, timestamp and
 reason, while still requiring `queue retry` before another dispatch.
 
-### 5. WorkerLease at spawn + owner-death recovery (P0, next)
+### 5. WorkerLease at spawn + owner-death recovery (P0, implemented 2026-10-28)
 
-This is the safety prerequisite for every later parallel slice. Persist a
-durable `WorkerLease` as soon as the worker identity exists, not after
-`collect()` returns. The lease must record run/task/attempt/profile, the
-controller's pid/host/process identity, the worker's pid/pgid/OS start
+**Status: implemented for same-host POSIX groups.** This was the safety
+prerequisite for every later parallel slice. Supervisor-backed adapters persist
+a bounded `WorkerLease` as soon as worker identity exists, not after
+`collect()` returns. The lease records run/task/attempt/invocation, the
+controller's pid/host/exact process identity, the worker's pid/pgid/OS start
 identity/capture mode, workspace, timestamps and cleanup state.
 
-Controller-death policy:
+Observed controller-death policy:
 
-- a new controller reads the lease and verifies exact worker identity;
-- if the owned group is alive: terminate only that exact group, preserve the
-  worktree and prior evidence, and resume through an explicit new attempt or
-  provider-session continuation;
-- if the group is gone: inspect artifacts and verify only what can be proven;
-- ambiguous identity or cleanup: `needs_human`; never guess from pid, pgid or
-  process name alone.
+- `supervisor recover-workers` reads the lease and verifies exact controller
+  and worker identity;
+- a live matching controller, or a foreign host, is skipped without signals;
+- with a proven-dead controller and exact live POSIX group: terminate only that
+  exact group with bounded SIGTERM → SIGKILL, preserve the worktree and prior
+  evidence, append recovery evidence and report the invocation as
+  resume-needed;
+- an absent, mismatched or unknown identity, uninspectable membership or a
+  residual group yields `needs_human` and preserves the lease/processes; no
+  process name, pid alone or broad scan is used;
+- Windows exact-child captures are preserved as `needs_human`, not signalled.
 
-Reattaching to an orphaned CLI's old stdout is not a v1 promise. If the worker
+Reattaching to an orphaned CLI's old stdout is not implemented. If the worker
 must outlive the controller, that requires an external guardian/OS service
-manager and a separate evidence protocol. No durable `WorkerLease` or
-owner-death recovery exists today, and manual adoption is not a substitute.
+manager and a separate evidence protocol. Recovery also does not resume
+automatically, does not kill across hosts, and never changes `RunManifest`
+acceptance. Measured evidence:
+[evidence/WORKER_LEASE.md](evidence/WORKER_LEASE.md).
 
-### 6. `ProfileCatalog` + real binding activation (P0 after WorkerLease)
+### 6. `ProfileCatalog` + real binding activation (P0, next)
 
 Model the three real deployment shapes:
 
@@ -306,10 +349,10 @@ inherit a public nominal number from the model name. Dynamic scoring stays
 disabled until activation and fixed admission are measured. See
 [PRODUCT_STRATEGY_V2.md](PRODUCT_STRATEGY_V2.md#4-execution-model).
 
-### 7. Parallel Supervisor/queue spike (P0 after WorkerLease and activation)
+### 7. Parallel Supervisor/queue spike (P0 after profile activation)
 
-Current queue and Supervisor are sequential and repo-global. Only after
-WorkerLease/owner-death recovery and real profile activation, choose between
+Current queue and Supervisor are sequential and repo-global. Only after real
+profile activation (WorkerLease v1 is now implemented), choose between
 per-item isolated control clones and per-run Supervisor ownership with short
 Git-control locks. Define multiple `running` items, independent run
 manifests/worktrees/branches, provider/model slots, runtime/port leases,
@@ -417,11 +460,11 @@ considered as an external process-lifecycle concern.
 | P0 | Failed attempts can retain files outside frozen write scope | A budget-exhausted docs attempt left `NEXT_STEP_CONTROLLER.md.tmp...` in its reusable worktree | Retry may inherit non-contract artifacts; normal path gate was skipped by non-zero exit | **Closed by worker exit path audit v0:** paths are audited after every worker exit and reused worktrees are re-audited (see [evidence/WORKER_EXIT_PATH_AUDIT.md](evidence/WORKER_EXIT_PATH_AUDIT.md)) |
 | P1 | Budget and time cannot be extended from healthy live state | Real tasks exhausted guards; current CLI exposes failure only at exit and the Supervisor has no extension control path | Operators retry a whole attempt and lose/reconstruct context | **Closed by continuation v0:** same-session budget continuation and health-gated deadline extension are preauthorized and audited (see [evidence/BUDGET_CONTINUATION.md](evidence/BUDGET_CONTINUATION.md), [evidence/DEADLINE_EXTENSION.md](evidence/DEADLINE_EXTENSION.md)) |
 | P0 | A blocked run had no formal reviewed-work resolution | Operators manually merged reviewed work while the RunManifest stayed blocked | Ad-hoc recovery could hide the original failure or fake task acceptance | **Closed by queue manual adoption v1:** separate versioned `OperatorResolution`; source RunManifest remains historical truth (see [evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md)) |
-| P0 | No durable worker identity is written at spawn | Process-group cleanup exists, but ownership is not recoverable if cliyard itself is `SIGKILL`ed | A detached worker group cannot be safely reattached or terminated by a new controller | **Next:** persist `WorkerLease` at spawn; exact-identity owner-death recovery; ambiguous identity `needs_human` |
-| P0 | Controller death has no recovery policy | `SIGKILL` cannot run in-process cleanup; `active.json`/process name alone do not prove worker ownership | Unattended parallel work could leave orphan groups or kill the wrong process | Same WorkerLease slice: verify identity, terminate only the owned group, preserve worktree/evidence |
+| P0 | No durable worker identity is written at spawn | Process-group cleanup exists, but ownership is not recoverable if cliyard itself is `SIGKILL`ed | A detached worker group cannot be safely reattached or terminated by a new controller | **Closed by WorkerLease v1:** bounded lease written at spawn; `supervisor recover-workers` verifies exact identity; ambiguous identity `needs_human` (see [evidence/WORKER_LEASE.md](evidence/WORKER_LEASE.md)) |
+| P0 | Controller death has no recovery policy | `SIGKILL` cannot run in-process cleanup; `active.json`/process name alone do not prove worker ownership | Unattended parallel work could leave orphan groups or kill the wrong process | **Closed by WorkerLease v1:** same-host recovery terminates only the verified POSIX group, preserves worktree/evidence and reports resume-needed without changing RunManifest |
 | P0 | No profile catalog or real binding activation | Queue items carry `worker`/optional `model`; selection is not proof an endpoint/account is active | Routing would choose a label without a measured activation result | Secret-free `ProfileCatalog` + adapter activation result before dispatch |
 | P0 | No fixed hierarchical admission | Queue items are dispatched one at a time; intra-item waves lack shared caps | Enabling parallel dispatch would multiply local maxima into an unbounded burst | Fixed conjunctive admission for queue items + Plan ready waves; unknown profile starts at one probe |
-| P2 | Windows process-tree ownership is absent | Runtime group semantics are proven on macOS only; no Job Object provider | Windows parity cannot be claimed | Windows Job Object `ProcessOwnerProvider` after WorkerLease/profile/fixed admission |
+| P2 | Windows process-tree ownership is absent | Runtime group semantics are proven on macOS only; no Job Object provider; WorkerLease recovery deliberately refuses `windows-exact-child` as `needs_human` | Windows parity cannot be claimed | Windows Job Object `ProcessOwnerProvider` after profile activation and fixed admission |
 | P2 | Routing scores have no measured telemetry | No provider-reported cost, quota or stable telemetry history exists | Dynamic scoring would optimize unmeasured labels | Deterministic scoring only after activation, fixed admission and measured telemetry |
 | P1 | Task estimates are static heuristics rather than telemetry | Estimated L tasks `$8 / 6–15 min`; real attempts exhausted `$10` or `$5` guards and several tasks needed continuation | Misleading budget/time expectations and poor admission inputs | [task-estimation-v1.md](../design/task-estimation-v1.md): LLM supplies complexity signals, controller calculates calibrated ranges |
 | P0 | Attempt maximum cannot be changed through an audited command | During recovery, `maxAttempts` was manually changed from 3 to 4 in `.cliyard/queue.json` | Operator recovery bypasses a first-class control-plane path | audited `extend-attempts` command |
@@ -463,15 +506,17 @@ The controller slice is ready to start when:
 3. Operator-driven attempt extension is audited and does not dispatch by
    itself. **Not implemented.**
 4. The monitoring projection is demonstrably read-only. **Implemented.**
-5. The existing suite remains green. **Measured** at **375/375** on the second
-   captured complete run (2026-10-28, integrated HEAD `41e5fcd`); the first
-   captured run was **373/375** with two deadline-extension failures that did
-   not reproduce in the focused run or the second captured full run. An earlier
-   invocation also exited non-zero before its summary was captured and is not
-   counted. This is a local observation, not a stable-green-gate claim.
+5. The existing suite remains green. **Measured** at **394/394** on the
+   complete run (2026-10-28, WorkerLease evidence at integrated HEAD
+   `e6f922e`, 25657.98 ms, 0 fail); focused worker-lease was **19/19**. Earlier
+   complete-run measurements remain historical: **375/375** on `41e5fcd` after
+   a first **373/375** with two deadline-extension failures that did not
+   reproduce. This is a local observation, not a stable-green-gate claim.
 6. A durable `WorkerLease` is persisted at spawn, and exact-identity
    owner-death recovery is measured, including `needs_human` for ambiguous
-   ownership. **Not implemented; next prerequisite.**
+   ownership. **Implemented** for same-host POSIX groups; real SIGKILL fixture
+   1/1. Cross-host recovery, Windows Job Objects, stdout reattachment and
+   automatic resume remain unimplemented.
 7. A secret-free `ProfileCatalog` and real endpoint/account binding activation
    are measured. **Not implemented.**
 8. Execution routing can select CLI and model separately from current
@@ -488,6 +533,7 @@ The controller slice is ready to start when:
 12. Windows Job Object parity and dynamic scoring are not controller-start
     prerequisites, but neither may be represented as done. **Not implemented.**
 
-Conditions 1, 2, 4, 5 and 11 are met. Conditions 3 and 6-10 and 12 remain
+Conditions 1, 2, 4, 5, 6 and 11 are met. Conditions 3 and 7-10 and 12 remain
 open; the controller is not ready to start. Parallel work must not begin
-before conditions 6-10 are measured.
+before conditions 7-10 are measured. WorkerLease covers only same-host POSIX
+groups; it does not authorize cross-host or Windows-parity work.
