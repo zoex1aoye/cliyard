@@ -238,21 +238,56 @@ Adoption requirements:
 ## 7. Implementation order
 
 ```text
-1. Stabilize the deadline-extension timing fixture.
-2. Implement queue adoption with OperatorResolution and read-only status.
-3. Persist WorkerLease at spawn; define owner-death recovery semantics.
-4. Add a secret-free ProfileCatalog and prove real profile activation.
-5. Replace repo-global long-running Supervisor ownership with per-run
+1. [done] Stabilize the deadline-extension timing fixture.
+2. [done] Implement queue adoption with OperatorResolution and read-only
+   status.
+3. [done] Persist WorkerLease at spawn; define owner-death recovery semantics.
+4. Add WorkspaceBoundary v1: enforce or detect protected-root writes outside
+   the task worktree before accepting parallel-unrestricted work.
+5. Add a secret-free ProfileCatalog and prove real profile activation.
+6. Replace repo-global long-running Supervisor ownership with per-run
    ownership plus short control-store locks.
-6. Add fixed hierarchical admission for two queue items and Plan ready waves.
-7. Add the Windows Job Object ProcessOwnerProvider.
-8. Add deterministic routing scores only after measured telemetry exists.
+7. Add fixed hierarchical admission for two queue items and Plan ready waves.
+8. Add the Windows Job Object ProcessOwnerProvider.
+9. Add deterministic routing scores only after measured telemetry exists.
 ```
 
-Steps 1 and 2 are the current dispatchable slice. Step 3 is the safety
-prerequisite for parallel execution.
+Steps 1-3 are implemented. WorkspaceBoundary v1 is the next safety prerequisite
+before profile routing and parallel execution.
 
-## 8. Non-goals for the current slice
+## 8. New P0 finding: workspace write boundary
+
+During the WorkerLease self-host run, a worker process modified
+`src/agents/process-tree.ts` in the main control checkout while its audited
+task worktree was elsewhere. The modification was detected by `git status`,
+removed from the control checkout and is present in the accepted worker
+snapshot through its own task commit. The worktree path audit did not report
+the control-checkout mutation because it only examines changes inside the task
+worktree.
+
+This proves that:
+
+- changing `cwd` is not a filesystem security boundary;
+- prompt restrictions and `acceptEdits` are not enforcement;
+- post-run worktree diff auditing is insufficient for the control checkout or
+  other protected paths.
+
+Before unrestricted parallel execution, cliyard needs a WorkspaceBoundary v1
+decision:
+
+- OS sandbox/container write confinement where the worker CLI can be bounded;
+- otherwise a control-checkout pre/post integrity guard that fails closed on
+  every unexpected protected-path mutation;
+- explicit protected roots covering the primary checkout, Git refs/index,
+  `.cliyard`, user config and other allowed absolute paths;
+- evidence that the guard detects both modified and untracked files;
+- no claim that detection equals prevention.
+
+This boundary ranks with queue admission and Windows process ownership; a
+successful task must not be accepted merely because its own worktree looks
+clean.
+
+## 9. Non-goals for the current slice
 
 - no dynamic scoring or adaptive concurrency;
 - no silent endpoint/account fallback;
