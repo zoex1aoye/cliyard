@@ -9,11 +9,13 @@ import { resolve } from "node:path";
 import {
   addPlanQueueItem,
   addQueueItem,
+  adoptQueueItem,
   cancelQueueItem,
   isPlanBackedQueueItem,
   loadQueue,
   queueCounts,
   retryQueueItem,
+  type OperatorResolution,
   type PlanBackedQueueItem,
   type QueueDocument,
   type QueueItem,
@@ -64,6 +66,11 @@ const VALUE_FLAGS = new Set([
   "--max-attempts",
   "--plan-id",
   "--max-dispatches",
+  "--run",
+  "--artifact",
+  "--evidence",
+  "--approved-by",
+  "--reason",
 ]);
 
 export async function runQueueCli(
@@ -94,6 +101,8 @@ export async function runQueueCli(
       return retryCommand(rest, log);
     case "cancel":
       return cancelCommand(rest, log);
+    case "adopt":
+      return adoptCommand(rest, log);
     case "run":
       return runCommand(rest, options, log);
     default:
@@ -281,6 +290,43 @@ function cancelCommand(rest: string[], log: (line: string) => void): number {
 }
 
 // ---------------------------------------------------------------------------
+// adopt
+// ---------------------------------------------------------------------------
+
+function adoptCommand(rest: string[], log: (line: string) => void): number {
+  const repoRoot = repoFrom(rest);
+  const id = positionalArg(rest);
+  if (!id) throw new Error("queue adopt: missing <queue-id>");
+  const item = adoptQueueItem(repoRoot, {
+    id,
+    runId: requiredArg("--run", rest, "queue adopt"),
+    artifact: requiredArg("--artifact", rest, "queue adopt"),
+    evidencePath: requiredArg("--evidence", rest, "queue adopt"),
+    approvedBy: requiredArg("--approved-by", rest, "queue adopt"),
+    reason: requiredArg("--reason", rest, "queue adopt"),
+  });
+  if (has("--json", rest)) {
+    log(JSON.stringify(item, null, 2));
+  } else {
+    log(`queue item ${item.id}: completed-by-adoption (source run ${item.resolution?.sourceRunId ?? "-"})`);
+    printItemDetail(item, log);
+  }
+  return 0;
+}
+
+function requiredArg(
+  flag: string,
+  argv: string[],
+  command: string,
+): string {
+  const value = arg(flag, argv);
+  if (!value || !value.trim()) {
+    throw new Error(`${command}: missing ${flag} <value>`);
+  }
+  return value;
+}
+
+// ---------------------------------------------------------------------------
 // run
 // ---------------------------------------------------------------------------
 
@@ -361,6 +407,9 @@ function printItemDetail(
   if (item.failure) {
     log(`  failure: ${formatFailureObservation(item.failure)}`);
   }
+  if (item.resolution) {
+    printAdoptionDetail(item.resolution, log);
+  }
   if (isPlanBackedQueueItem(item)) {
     printPlanDetail(item, log);
     if (item.reason) log(`  reason: ${item.reason}`);
@@ -437,10 +486,41 @@ function printPlanDetail(
         `run ${materialization.upstreamRunId ?? "-"} ` +
         `integration head ${materialization.upstreamIntegrationHead ?? "-"}`,
     );
+    if (materialization.upstreamAdoptedCommit !== undefined) {
+      log(
+        `  adopted upstream commit: ${materialization.upstreamAdoptedCommit}`,
+      );
+    }
   }
   log(
     `  contracts: ${materialization.contractsPath} ` +
       `(sha256 ${materialization.contractsHash})`,
+  );
+}
+
+/**
+ * Show the operator resolution without presenting the source run's tasks as
+ * accepted. The RunManifest remains the task authority and is unchanged.
+ */
+function printAdoptionDetail(
+  resolution: OperatorResolution,
+  log: (line: string) => void,
+): void {
+  log(
+    `  adoption: manual adoption of run ${resolution.sourceRunId} ` +
+      `(${resolution.sourceManifestStatus})`,
+  );
+  log(
+    `  reviewed commit: ${resolution.reviewedCommit} ` +
+      `(pinned base ${resolution.baseCommit})`,
+  );
+  log(
+    `  evidence: ${resolution.reviewEvidencePath} ` +
+      `(sha256 ${resolution.reviewEvidenceHash})`,
+  );
+  log(
+    `  approved by ${resolution.approvedBy} at ${resolution.approvedAt}: ` +
+      resolution.reason,
   );
 }
 
@@ -539,6 +619,13 @@ function printControlSnapshot(
         ? `, read error: ${snapshot.journal.readError}`
         : ""),
   );
+  log(
+    `adoptions: ${snapshot.queue.adoptionEvents.totalEvents} event(s), ` +
+      `${snapshot.queue.adoptionEvents.malformedLines} malformed` +
+      (snapshot.queue.adoptionEvents.readError
+        ? `, read error: ${snapshot.queue.adoptionEvents.readError}`
+        : ""),
+  );
   log(`failure categories: ${formatFailureCounts(snapshot.failureCounts)}`);
   log(`cost: ${formatControlCost(snapshot.cost)}`);
   if (snapshot.resources.provider.length > 0) {
@@ -567,11 +654,14 @@ function printControlItem(
   log: (line: string) => void,
 ): void {
   log(
-    `${item.id}  ${item.status}  next=${item.observedNextAction}  ` +
+    `${item.id}  ${item.status}` +
+      `${item.completion === "adopted" ? " (adopted)" : ""}  ` +
+      `next=${item.observedNextAction}  ` +
       `ready=${item.ready ? "yes" : "no"}  ` +
       `worker=${item.worker}${item.model ? `/${item.model}` : ""}  ` +
       `attempts=${item.attempts}/${item.maxAttempts}`,
   );
+  if (item.resolution) printAdoptionDetail(item.resolution, log);
   printExecutionDetail(
     item.executionProfile,
     item.continuationPolicy,
@@ -758,6 +848,9 @@ Usage:
   cliyard queue status --repo <path> [--json]
   cliyard queue retry <queue-id> --repo <path> [--json]
   cliyard queue cancel <queue-id> --repo <path> [--json]
+  cliyard queue adopt <queue-id> --repo <path> --run <run-id>
+                    --artifact <full-git-sha> --evidence <evidence.json>
+                    --approved-by <operator> --reason <text> [--json]
   cliyard queue run --repo <path> [--continue-on-blocked]
                     [--max-dispatches n] [--json]
 
@@ -767,7 +860,11 @@ for an existing run). add-plan freezes the approved Plan's SHA-256 instead and
 compiles queue-owned contracts at a pinned base immediately before dispatch; a
 Plan item supports at most one queue dependency. A blocked item stops the run
 by default; with --continue-on-blocked independent items continue and
-dependants are blocked.
+dependants are blocked. adopt closes one blocked item whose reviewed work was
+already integrated: it requires the matching blocked/interrupted run, unchanged
+frozen contracts, a full reviewed commit reachable from HEAD, and bounded
+secret-free review evidence. The RunManifest is not rewritten and its tasks are
+not marked accepted; status reports such items as completed (adopted).
 Foreground only: no daemon, no parallel dispatch. The RunManifest remains the
 task authority and is never rewritten by the queue.`);
 }

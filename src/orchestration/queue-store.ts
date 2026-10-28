@@ -17,6 +17,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
+  appendFileSync,
   closeSync,
   existsSync,
   fsyncSync,
@@ -34,6 +35,7 @@ import { findCycle } from "../scheduler/dag.js";
 import {
   isProcessAlive,
   isSameHost,
+  loadRunManifest,
   SUPERVISOR_DIR,
 } from "../supervisor/store.js";
 import {
@@ -60,11 +62,28 @@ export const QUEUE_FILE = "queue.json";
 export const QUEUE_LOCK_FILE = "queue.lock";
 export const DEFAULT_MAX_ATTEMPTS = 3;
 
+/** First formal operator resolution format (design/queue-adoption-v1.md). */
+export const OPERATOR_RESOLUTION_VERSION = 1 as const;
+export const REVIEW_EVIDENCE_VERSION = 1 as const;
+export const MAX_REVIEW_EVIDENCE_BYTES = 64 * 1024;
+export const MAX_REVIEW_EVIDENCE_COMMANDS = 64;
+export const MAX_REVIEW_COMMAND_LENGTH = 2_000;
+export const MAX_REVIEW_NOTES_LENGTH = 2_000;
+export const MAX_REVIEW_EVIDENCE_PATH_LENGTH = 4_096;
+export const MAX_APPROVED_BY_LENGTH = 128;
+export const MAX_ADOPTION_REASON_LENGTH = 1_000;
+/** Bounded adoption events, kept beside the general queue event journal. */
+export const QUEUE_ADOPTION_EVENTS_DIR = "queue-events";
+export const QUEUE_ADOPTION_EVENTS_FILE = "adoptions.jsonl";
+export const DEFAULT_ADOPTION_EVENT_LIMIT = 200;
+
 /** Queue ids are explicit labels and must be safe path/manifest identifiers. */
 const QUEUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
 /** Exact full git object id: SHA-1 (40) or SHA-256 (64) repositories. */
 const FULL_COMMIT_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+/** Matches the Supervisor's exact run-id shape. */
+const RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export type QueueItemStatus =
   | "pending"
@@ -91,6 +110,41 @@ export interface QueuePlanMaterialization {
   contractsPath: string;
   contractsHash: string;
   materializedAt: string;
+  /**
+   * Explicit adopted lineage: the upstream item's reviewed commit. Present
+   * only when the dependency was completed by an OperatorResolution.
+   */
+  upstreamAdoptedCommit?: string;
+}
+
+export type OperatorResolutionManifestStatus = "blocked" | "interrupted";
+
+/**
+ * Immutable operator acceptance of manually reviewed work
+ * (design/execution-authority-v1.md §6, design/queue-adoption-v1.md).
+ *
+ * A resolution is separate from the RunManifest. It never rewrites the source
+ * run, never marks a rejected task accepted, and never claims the worker
+ * succeeded. The queue item becomes terminally completed through this record.
+ */
+export interface OperatorResolution {
+  version: typeof OPERATOR_RESOLUTION_VERSION;
+  kind: "manual-adoption";
+  queueItemId: string;
+  sourceRunId: string;
+  sourceManifestStatus: OperatorResolutionManifestStatus;
+  /** The source RunManifest baseCommit (full object id, lowercase). */
+  baseCommit: string;
+  /** Frozen contracts identity the source run was dispatched under. */
+  contractsHash: string;
+  /** Exact reviewed Git commit integrated by the operator (full object id). */
+  reviewedCommit: string;
+  reviewEvidencePath: string;
+  /** SHA-256 of the exact evidence file bytes. */
+  reviewEvidenceHash: string;
+  approvedBy: string;
+  approvedAt: string;
+  reason: string;
 }
 
 /**
@@ -127,6 +181,11 @@ export interface QueueItem {
   continuationPolicy?: QueueContinuationPolicy;
   /** Exact mirror of profile.runtimeId when executionProfile is present. */
   model?: string;
+  /**
+   * Present only for a completed-by-adoption item. The source RunManifest is
+   * untouched and remains the authority for what the worker actually did.
+   */
+  resolution?: OperatorResolution;
   dependsOn: string[];
   status: QueueItemStatus;
   attempts: number;
@@ -164,6 +223,13 @@ export function isPlanBackedQueueItem(
   item: QueueItem,
 ): item is PlanBackedQueueItem {
   return typeof item.planPath === "string" && item.planPath.trim() !== "";
+}
+
+/** True for a terminal queue item completed through manual adoption. */
+export function isAdoptedQueueItem(
+  item: QueueItem,
+): item is QueueItem & { resolution: OperatorResolution } {
+  return item.resolution !== undefined;
 }
 
 /**
@@ -762,6 +828,898 @@ export function cancelQueueItem(repoRoot: string, id: string): QueueItem {
     });
     return item;
   });
+}
+
+// ---------------------------------------------------------------------------
+// Manual adoption / OperatorResolution
+// ---------------------------------------------------------------------------
+
+/** One reviewed check command. Raw output is never stored, only its hash. */
+export interface ReviewEvidenceCommand {
+  command: string;
+  exitCode: number;
+  /** SHA-256 of the exact command output bytes the reviewer observed. */
+  outputSha256: string;
+  notes?: string;
+}
+
+/** Versioned, bounded, secret-free manual review evidence. */
+export interface ReviewEvidence {
+  version: typeof REVIEW_EVIDENCE_VERSION;
+  reviewedAt: string;
+  /** Optional binding: when present it must equal the adopted commit. */
+  reviewedCommit?: string;
+  commands: ReviewEvidenceCommand[];
+  notes?: string;
+}
+
+interface ParsedReviewEvidence {
+  path: string;
+  bytes: Buffer;
+  hash: string;
+  evidence: ReviewEvidence;
+}
+
+export interface AdoptQueueItemInput {
+  id: string;
+  /** Exact source run id; must equal the item's recorded lastRunId. */
+  runId: string;
+  /** Full reviewed commit id integrated into the current HEAD. */
+  artifact: string;
+  /** Review evidence JSON path; relative paths resolve against the repo. */
+  evidencePath: string;
+  approvedBy: string;
+  reason: string;
+}
+
+export function queueAdoptionEventsPath(repoRoot: string): string {
+  return join(
+    resolve(repoRoot),
+    SUPERVISOR_DIR,
+    QUEUE_ADOPTION_EVENTS_DIR,
+    QUEUE_ADOPTION_EVENTS_FILE,
+  );
+}
+
+export interface QueueAdoptionEvent {
+  version: 1;
+  eventId: string;
+  at: string;
+  type: "queue.item.adopted";
+  itemId: string;
+  runId: string;
+  status: "completed";
+  sourceManifestStatus: OperatorResolutionManifestStatus;
+  baseCommit: string;
+  reviewedCommit: string;
+  contractsHash: string;
+  reviewEvidencePath: string;
+  reviewEvidenceHash: string;
+  approvedBy: string;
+  reason: string;
+}
+
+export interface QueueAdoptionEventSummary {
+  version: 1;
+  path: string;
+  exists: boolean;
+  totalEvents: number;
+  malformedLines: number;
+  events: QueueAdoptionEvent[];
+  lastEventAt: string | null;
+  readError: string | null;
+}
+
+/**
+ * Adopt one blocked queue item whose work was manually reviewed and integrated.
+ *
+ * The source RunManifest is read as evidence only and never rewritten. The
+ * queue item becomes terminally `completed` with an immutable
+ * `OperatorResolution`; repeated adoption is accepted only for a byte-equal
+ * resolution identity.
+ */
+export function adoptQueueItem(
+  repoRoot: string,
+  input: AdoptQueueItemInput,
+): QueueItem {
+  const root = resolve(repoRoot);
+  return withQueueLock(root, () => {
+    const document = loadQueue(root);
+    const item = requireQueueItem(document, root, input.id);
+    const runId = requireRunId(input.runId);
+    const approvedBy = requireAdoptionText(
+      input.approvedBy,
+      "--approved-by",
+      MAX_APPROVED_BY_LENGTH,
+    );
+    const reason = requireAdoptionText(
+      input.reason,
+      "--reason",
+      MAX_ADOPTION_REASON_LENGTH,
+    );
+    // Evidence bytes are hashed exactly as supplied. Missing, oversized,
+    // malformed or secret-bearing evidence fails before any state change.
+    const evidence = readReviewEvidenceFile(root, input.evidencePath);
+
+    if (item.resolution !== undefined) {
+      if (item.status !== "completed") {
+        throw new QueueValidationError(
+          `queue item ${JSON.stringify(item.id)} has an adoption resolution ` +
+            `but is ${item.status}; refusing to mutate it`,
+        );
+      }
+      const candidate = buildAdoptionResolution(
+        root,
+        item,
+        {
+          runId,
+          artifact: input.artifact,
+          approvedBy,
+          reason,
+          evidence,
+        },
+        item.resolution.approvedAt,
+      );
+      assertSameResolutionIdentity(item.resolution, candidate);
+      return item;
+    }
+
+    if (item.status !== "blocked") {
+      throw new QueueValidationError(
+        `queue item ${JSON.stringify(item.id)} is ${item.status}; ` +
+          "only a blocked item with a reviewed run may be adopted",
+      );
+    }
+    if (item.lastRunId !== runId) {
+      throw new QueueValidationError(
+        `queue item ${JSON.stringify(item.id)} lastRunId ` +
+          `${JSON.stringify(item.lastRunId ?? null)} does not match ` +
+          `--run ${JSON.stringify(runId)}`,
+      );
+    }
+
+    const at = now();
+    const resolution = buildAdoptionResolution(
+      root,
+      item,
+      {
+        runId,
+        artifact: input.artifact,
+        approvedBy,
+        reason,
+        evidence,
+      },
+      at,
+    );
+
+    item.status = "completed";
+    item.resolution = resolution;
+    delete item.reason;
+    delete item.failure;
+    item.nextAction = item.lastRunId ? "resume" : "start";
+    item.updatedAt = at;
+    document.updatedAt = at;
+    saveQueue(root, document);
+    tryAppendQueueAdoptionEvent(root, resolution);
+    return item;
+  });
+}
+
+interface AdoptionEvidenceInput {
+  runId: string;
+  artifact: string;
+  approvedBy: string;
+  reason: string;
+  evidence: ParsedReviewEvidence;
+}
+
+function buildAdoptionResolution(
+  repoRoot: string,
+  item: QueueItem,
+  input: AdoptionEvidenceInput,
+  approvedAt: string,
+): OperatorResolution {
+  if (item.lastRunId !== input.runId) {
+    throw new QueueValidationError(
+      `queue item ${JSON.stringify(item.id)} lastRunId ` +
+        `${JSON.stringify(item.lastRunId ?? null)} does not match ` +
+        `--run ${JSON.stringify(input.runId)}`,
+    );
+  }
+
+  let manifest: RunManifestLike;
+  try {
+    manifest = loadRunManifest(repoRoot, input.runId);
+  } catch (error) {
+    throw new QueueValidationError(
+      `cannot load source RunManifest ${JSON.stringify(input.runId)}: ` +
+        `${errorMessage(error)}`,
+    );
+  }
+  if (manifest.runId !== input.runId) {
+    throw new QueueValidationError(
+      `source RunManifest run id ${JSON.stringify(manifest.runId)} does not ` +
+        `match --run ${JSON.stringify(input.runId)}`,
+    );
+  }
+  if (resolve(manifest.repoRoot) !== resolve(repoRoot)) {
+    throw new QueueValidationError(
+      `source run ${JSON.stringify(input.runId)} belongs to ` +
+        `${resolve(manifest.repoRoot)}, not ${resolve(repoRoot)}`,
+    );
+  }
+  if (manifest.status !== "blocked" && manifest.status !== "interrupted") {
+    throw new QueueValidationError(
+      `source RunManifest ${JSON.stringify(input.runId)} is ` +
+        `${manifest.status}; only blocked or interrupted runs may be adopted`,
+    );
+  }
+
+  const identity = queueItemContractsIdentity(item);
+  if (!identity) {
+    throw new QueueValidationError(
+      `queue item ${JSON.stringify(item.id)} has no frozen contracts identity`,
+    );
+  }
+  const contractsHash = identity.contractsHash.toLowerCase();
+  let artifactHash: string;
+  try {
+    artifactHash = hashFileBytes(identity.contractsPath, "contracts file");
+  } catch (error) {
+    throw new QueueValidationError(errorMessage(error));
+  }
+  if (artifactHash !== contractsHash) {
+    throw new QueueValidationError(
+      `frozen contracts changed: ${identity.contractsPath} ` +
+        `(expected sha256 ${identity.contractsHash}, found ${artifactHash})`,
+    );
+  }
+  if (
+    resolve(manifest.contractsPath) !== resolve(identity.contractsPath) ||
+    manifest.contractsHash.toLowerCase() !== contractsHash
+  ) {
+    throw new QueueValidationError(
+      `source RunManifest ${JSON.stringify(input.runId)} contracts identity ` +
+        "does not match the item's frozen contracts",
+    );
+  }
+
+  if (isPlanBackedQueueItem(item)) {
+    if (!item.materialization) {
+      throw new QueueValidationError(
+        `plan-backed item ${JSON.stringify(item.id)} has no recorded ` +
+          "materialization; it was never dispatched under frozen contracts",
+      );
+    }
+    let planHash: string;
+    try {
+      planHash = hashFileBytes(item.planPath, "approved Plan file");
+    } catch (error) {
+      throw new QueueValidationError(errorMessage(error));
+    }
+    if (planHash !== item.planHash.toLowerCase()) {
+      throw new QueueValidationError(
+        `approved Plan changed: ${item.planPath} (expected sha256 ` +
+          `${item.planHash}, found ${planHash})`,
+      );
+    }
+    if (
+      manifest.baseCommit.toLowerCase() !==
+      item.materialization.baseCommit.toLowerCase()
+    ) {
+      throw new QueueValidationError(
+        `source RunManifest base ${manifest.baseCommit} does not match the ` +
+          `materialized base ${item.materialization.baseCommit}`,
+      );
+    }
+  }
+
+  const baseCommit = resolveExactCommit(
+    repoRoot,
+    manifest.baseCommit,
+    "source RunManifest baseCommit",
+  );
+  const reviewedCommit = resolveExactCommit(
+    repoRoot,
+    input.artifact,
+    "--artifact",
+  );
+  const head = resolveRepositoryHead(repoRoot);
+  assertAncestorOrEqual(
+    repoRoot,
+    baseCommit,
+    reviewedCommit,
+    `reviewed commit ${reviewedCommit} is not a descendant of the pinned ` +
+      `source base ${baseCommit}`,
+  );
+  assertAncestorOrEqual(
+    repoRoot,
+    reviewedCommit,
+    head,
+    `reviewed commit ${reviewedCommit} is not an ancestor of or equal to ` +
+      `the current HEAD ${head}`,
+  );
+  const evidenceCommit = input.evidence.evidence.reviewedCommit;
+  if (
+    evidenceCommit !== undefined &&
+    evidenceCommit.toLowerCase() !== reviewedCommit
+  ) {
+    throw new QueueValidationError(
+      `review evidence reviewedCommit ${evidenceCommit} does not match ` +
+        `--artifact ${reviewedCommit}`,
+    );
+  }
+
+  return {
+    version: OPERATOR_RESOLUTION_VERSION,
+    kind: "manual-adoption",
+    queueItemId: item.id,
+    sourceRunId: input.runId,
+    sourceManifestStatus: manifest.status,
+    baseCommit,
+    contractsHash,
+    reviewedCommit,
+    reviewEvidencePath: input.evidence.path,
+    reviewEvidenceHash: input.evidence.hash,
+    approvedBy: input.approvedBy,
+    approvedAt,
+    reason: input.reason,
+  };
+}
+
+/** Minimal structural view of the Supervisor manifest fields read here. */
+interface RunManifestLike {
+  runId: string;
+  repoRoot: string;
+  contractsPath: string;
+  contractsHash: string;
+  baseCommit: string;
+  status: string;
+}
+
+const RESOLUTION_KEYS = [
+  "version",
+  "kind",
+  "queueItemId",
+  "sourceRunId",
+  "sourceManifestStatus",
+  "baseCommit",
+  "contractsHash",
+  "reviewedCommit",
+  "reviewEvidencePath",
+  "reviewEvidenceHash",
+  "approvedBy",
+  "approvedAt",
+  "reason",
+] as const;
+
+const RESOLUTION_IDENTITY_FIELDS: ReadonlyArray<keyof OperatorResolution> = [
+  "version",
+  "kind",
+  "queueItemId",
+  "sourceRunId",
+  "sourceManifestStatus",
+  "baseCommit",
+  "contractsHash",
+  "reviewedCommit",
+  "reviewEvidencePath",
+  "reviewEvidenceHash",
+  "approvedBy",
+  "reason",
+];
+
+function assertSameResolutionIdentity(
+  existing: OperatorResolution,
+  candidate: OperatorResolution,
+): void {
+  for (const field of RESOLUTION_IDENTITY_FIELDS) {
+    if (existing[field] !== candidate[field]) {
+      throw new QueueValidationError(
+        `queue item ${JSON.stringify(existing.queueItemId)} is already ` +
+          `adopted with a different ${field}; refusing to replace the ` +
+          "existing OperatorResolution",
+      );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Review evidence parsing
+// ---------------------------------------------------------------------------
+
+const REVIEW_EVIDENCE_KEYS = [
+  "version",
+  "reviewedAt",
+  "reviewedCommit",
+  "commands",
+  "notes",
+] as const;
+const REVIEW_COMMAND_KEYS = [
+  "command",
+  "exitCode",
+  "outputSha256",
+  "notes",
+] as const;
+
+function readReviewEvidenceFile(
+  repoRoot: string,
+  evidencePath: string,
+): ParsedReviewEvidence {
+  if (typeof evidencePath !== "string" || !evidencePath.trim()) {
+    throw new QueueValidationError("--evidence must be a non-empty path");
+  }
+  const absolutePath = isAbsolute(evidencePath)
+    ? resolve(evidencePath)
+    : resolve(repoRoot, evidencePath);
+  if (absolutePath.length > MAX_REVIEW_EVIDENCE_PATH_LENGTH) {
+    throw new QueueValidationError(
+      `review evidence path exceeds ${MAX_REVIEW_EVIDENCE_PATH_LENGTH} ` +
+        `characters: ${absolutePath}`,
+    );
+  }
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(absolutePath);
+  } catch (error) {
+    throw new QueueValidationError(
+      `review evidence file is missing or unreadable: ${absolutePath} ` +
+        `(${errorMessage(error)})`,
+    );
+  }
+  if (bytes.byteLength > MAX_REVIEW_EVIDENCE_BYTES) {
+    throw new QueueValidationError(
+      `review evidence exceeds the ${MAX_REVIEW_EVIDENCE_BYTES}-byte v1 ` +
+        `bound: ${absolutePath}`,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bytes.toString("utf8")) as unknown;
+  } catch (error) {
+    throw new QueueValidationError(
+      `review evidence is not valid JSON: ${absolutePath} ` +
+        `(${errorMessage(error)})`,
+    );
+  }
+  const evidence = parseReviewEvidence(parsed, absolutePath);
+  return {
+    path: absolutePath,
+    bytes,
+    hash: createHash("sha256").update(bytes).digest("hex"),
+    evidence,
+  };
+}
+
+/** Strict allow-list evidence schema; raw logs and unknown fields fail closed. */
+export function parseReviewEvidence(
+  raw: unknown,
+  source = "review evidence",
+): ReviewEvidence {
+  if (!isRecord(raw)) {
+    throw new QueueValidationError(`${source} must be a JSON object`);
+  }
+  assertOnlyKeys(raw, REVIEW_EVIDENCE_KEYS, source);
+  if (raw.version !== REVIEW_EVIDENCE_VERSION) {
+    throw new QueueValidationError(
+      `${source} version must be ${REVIEW_EVIDENCE_VERSION} ` +
+        `(got ${JSON.stringify(raw.version)})`,
+    );
+  }
+  if (typeof raw.reviewedAt !== "string" || Number.isNaN(Date.parse(raw.reviewedAt))) {
+    throw new QueueValidationError(
+      `${source} reviewedAt must be an ISO-8601 timestamp`,
+    );
+  }
+  let reviewedCommit: string | undefined;
+  if (raw.reviewedCommit !== undefined) {
+    const candidate =
+      typeof raw.reviewedCommit === "string"
+        ? raw.reviewedCommit.trim().toLowerCase()
+        : "";
+    if (!FULL_COMMIT_PATTERN.test(candidate)) {
+      throw new QueueValidationError(
+        `${source} reviewedCommit must be a full git commit hash ` +
+          "(40 or 64 hex characters)",
+      );
+    }
+    reviewedCommit = candidate;
+  }
+  if (
+    !Array.isArray(raw.commands) ||
+    raw.commands.length === 0 ||
+    raw.commands.length > MAX_REVIEW_EVIDENCE_COMMANDS
+  ) {
+    throw new QueueValidationError(
+      `${source} commands must be a non-empty array of at most ` +
+        `${MAX_REVIEW_EVIDENCE_COMMANDS} entries`,
+    );
+  }
+
+  const commands: ReviewEvidenceCommand[] = [];
+  for (const [index, value] of raw.commands.entries()) {
+    commands.push(
+      parseReviewEvidenceCommand(value, `${source}.commands[${index}]`),
+    );
+  }
+  if (!commands.some((command) => command.exitCode === 0)) {
+    throw new QueueValidationError(
+      `${source} must record at least one successful command (exitCode 0)`,
+    );
+  }
+  const notes =
+    raw.notes === undefined
+      ? undefined
+      : requireBoundedSecretFreeText(
+          raw.notes,
+          `${source}.notes`,
+          MAX_REVIEW_NOTES_LENGTH,
+        );
+
+  return {
+    version: REVIEW_EVIDENCE_VERSION,
+    reviewedAt: raw.reviewedAt,
+    ...(reviewedCommit !== undefined ? { reviewedCommit } : {}),
+    commands,
+    ...(notes !== undefined ? { notes } : {}),
+  };
+}
+
+function parseReviewEvidenceCommand(
+  raw: unknown,
+  source: string,
+): ReviewEvidenceCommand {
+  if (!isRecord(raw)) {
+    throw new QueueValidationError(`${source} must be an object`);
+  }
+  assertOnlyKeys(raw, REVIEW_COMMAND_KEYS, source);
+  const command = requireBoundedSecretFreeText(
+    raw.command,
+    `${source}.command`,
+    MAX_REVIEW_COMMAND_LENGTH,
+  );
+  if (
+    !Number.isInteger(raw.exitCode) ||
+    (raw.exitCode as number) < -255 ||
+    (raw.exitCode as number) > 255
+  ) {
+    throw new QueueValidationError(
+      `${source}.exitCode must be an integer from -255 to 255`,
+    );
+  }
+  if (
+    typeof raw.outputSha256 !== "string" ||
+    !SHA256_PATTERN.test(raw.outputSha256.trim())
+  ) {
+    throw new QueueValidationError(
+      `${source}.outputSha256 must be a hex SHA-256 digest`,
+    );
+  }
+  const notes =
+    raw.notes === undefined
+      ? undefined
+      : requireBoundedSecretFreeText(
+          raw.notes,
+          `${source}.notes`,
+          MAX_REVIEW_NOTES_LENGTH,
+        );
+  return {
+    command,
+    exitCode: raw.exitCode as number,
+    outputSha256: raw.outputSha256.trim().toLowerCase(),
+    ...(notes !== undefined ? { notes } : {}),
+  };
+}
+
+function assertOnlyKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  source: string,
+): void {
+  const allowedSet = new Set(allowed);
+  for (const key of Object.keys(value)) {
+    if (!allowedSet.has(key)) {
+      throw new QueueValidationError(
+        `${source} contains unsupported field ${JSON.stringify(key)}; ` +
+          "raw logs, prompts and secrets are never accepted",
+      );
+    }
+  }
+}
+
+/**
+ * Reviewer-provided text is bounded and must not embed obvious credentials.
+ * Output is never accepted, so this only guards summaries and command labels.
+ */
+function requireBoundedSecretFreeText(
+  value: unknown,
+  source: string,
+  maxLength: number,
+): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new QueueValidationError(`${source} must be a non-empty string`);
+  }
+  if (value.length > maxLength) {
+    throw new QueueValidationError(
+      `${source} exceeds the ${maxLength}-character v1 bound`,
+    );
+  }
+  if (looksLikeSecret(value)) {
+    throw new QueueValidationError(
+      `${source} appears to contain a credential; review evidence must be ` +
+        "secret-free",
+    );
+  }
+  return value.trim();
+}
+
+function looksLikeSecret(value: string): boolean {
+  return [
+    /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/,
+    /\bsk-[A-Za-z0-9_-]{16,}\b/,
+    /\bsk_[A-Za-z0-9_-]{16,}\b/,
+    /\bghp_[A-Za-z0-9]{20,}\b/,
+    /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
+    /\bAKIA[0-9A-Z]{16}\b/,
+    /\bBearer\s+[A-Za-z0-9._-]{16,}/i,
+    /\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|token|passwd|password|secret)\b\s*[:=]\s*["']?[A-Za-z0-9._/+=-]{6,}/i,
+  ].some((pattern) => pattern.test(value));
+}
+
+function requireRunId(value: string): string {
+  if (typeof value !== "string" || !RUN_ID_PATTERN.test(value.trim())) {
+    throw new QueueValidationError(
+      `--run must be a valid run id (got ${JSON.stringify(value)})`,
+    );
+  }
+  return value.trim();
+}
+
+function requireAdoptionText(
+  value: string,
+  label: string,
+  maxLength: number,
+): string {
+  return requireBoundedSecretFreeText(value, label, maxLength);
+}
+
+// ---------------------------------------------------------------------------
+// Adoption event stream
+// ---------------------------------------------------------------------------
+
+function appendQueueAdoptionEvent(
+  repoRoot: string,
+  resolution: OperatorResolution,
+): QueueAdoptionEvent {
+  const event: QueueAdoptionEvent = {
+    version: 1,
+    eventId: randomUUID(),
+    at: resolution.approvedAt,
+    type: "queue.item.adopted",
+    itemId: resolution.queueItemId,
+    runId: resolution.sourceRunId,
+    status: "completed",
+    sourceManifestStatus: resolution.sourceManifestStatus,
+    baseCommit: resolution.baseCommit,
+    reviewedCommit: resolution.reviewedCommit,
+    contractsHash: resolution.contractsHash,
+    reviewEvidencePath: resolution.reviewEvidencePath,
+    reviewEvidenceHash: resolution.reviewEvidenceHash,
+    approvedBy: resolution.approvedBy,
+    reason: resolution.reason,
+  };
+  const path = queueAdoptionEventsPath(repoRoot);
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  appendFileSync(path, `${JSON.stringify(event)}\n`, "utf8");
+  return event;
+}
+
+/** Best-effort append: an observability failure never masks adoption. */
+function tryAppendQueueAdoptionEvent(
+  repoRoot: string,
+  resolution: OperatorResolution,
+): QueueAdoptionEvent | undefined {
+  try {
+    return appendQueueAdoptionEvent(repoRoot, resolution);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Read the bounded adoption event stream; malformed lines are counted. */
+export function readQueueAdoptionEvents(
+  repoRoot: string,
+  limit = DEFAULT_ADOPTION_EVENT_LIMIT,
+): QueueAdoptionEventSummary {
+  const path = queueAdoptionEventsPath(repoRoot);
+  const normalizedLimit =
+    Number.isInteger(limit) && limit > 0
+      ? Math.min(limit, 5_000)
+      : DEFAULT_ADOPTION_EVENT_LIMIT;
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return {
+        version: 1,
+        path,
+        exists: false,
+        totalEvents: 0,
+        malformedLines: 0,
+        events: [],
+        lastEventAt: null,
+        readError: null,
+      };
+    }
+    return {
+      version: 1,
+      path,
+      exists: true,
+      totalEvents: 0,
+      malformedLines: 0,
+      events: [],
+      lastEventAt: null,
+      readError: errorMessage(error),
+    };
+  }
+  const valid: QueueAdoptionEvent[] = [];
+  let malformedLines = 0;
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line) as unknown;
+    } catch {
+      malformedLines += 1;
+      continue;
+    }
+    if (!isQueueAdoptionEvent(parsed)) {
+      malformedLines += 1;
+      continue;
+    }
+    valid.push(parsed);
+  }
+  return {
+    version: 1,
+    path,
+    exists: true,
+    totalEvents: valid.length,
+    malformedLines,
+    events: valid.slice(-normalizedLimit),
+    lastEventAt: valid.length > 0 ? valid[valid.length - 1]!.at : null,
+    readError: null,
+  };
+}
+
+export function isQueueAdoptionEvent(
+  value: unknown,
+): value is QueueAdoptionEvent {
+  if (!isRecord(value)) return false;
+  if (
+    value.version !== 1 ||
+    value.type !== "queue.item.adopted" ||
+    value.status !== "completed" ||
+    typeof value.eventId !== "string" ||
+    !value.eventId.trim() ||
+    typeof value.at !== "string" ||
+    Number.isNaN(Date.parse(value.at)) ||
+    (value.sourceManifestStatus !== "blocked" &&
+      value.sourceManifestStatus !== "interrupted")
+  ) {
+    return false;
+  }
+  const { itemId, runId, approvedBy, reason, reviewEvidencePath } = value;
+  const { baseCommit, reviewedCommit, contractsHash, reviewEvidenceHash } =
+    value;
+  if (
+    typeof itemId !== "string" ||
+    !itemId.trim() ||
+    typeof runId !== "string" ||
+    !runId.trim() ||
+    typeof approvedBy !== "string" ||
+    !approvedBy.trim() ||
+    typeof reason !== "string" ||
+    !reason.trim() ||
+    typeof reviewEvidencePath !== "string" ||
+    !reviewEvidencePath.trim() ||
+    typeof baseCommit !== "string" ||
+    typeof reviewedCommit !== "string" ||
+    typeof contractsHash !== "string" ||
+    typeof reviewEvidenceHash !== "string"
+  ) {
+    return false;
+  }
+  return (
+    FULL_COMMIT_PATTERN.test(baseCommit) &&
+    FULL_COMMIT_PATTERN.test(reviewedCommit) &&
+    SHA256_PATTERN.test(contractsHash) &&
+    SHA256_PATTERN.test(reviewEvidenceHash) &&
+    approvedBy.length <= MAX_APPROVED_BY_LENGTH &&
+    reason.length <= MAX_ADOPTION_REASON_LENGTH &&
+    reviewEvidencePath.length <= MAX_REVIEW_EVIDENCE_PATH_LENGTH
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Git object proofs
+// ---------------------------------------------------------------------------
+
+function hashFileBytes(path: string, label: string): string {
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(path);
+  } catch (error) {
+    throw new QueueValidationError(
+      `${label} is missing or unreadable: ${path} (${errorMessage(error)})`,
+    );
+  }
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/**
+ * Require a full object id and prove Git resolves it to that exact commit.
+ * Abbreviated ids, branch names and symbolic revisions never pass.
+ */
+function resolveExactCommit(
+  repoRoot: string,
+  value: string,
+  label: string,
+): string {
+  const candidate =
+    typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!FULL_COMMIT_PATTERN.test(candidate)) {
+    throw new QueueValidationError(
+      `${label} must be an exact full git commit hash ` +
+        `(40 or 64 hex characters), got ${JSON.stringify(value)}`,
+    );
+  }
+  const result = spawnSync(
+    "git",
+    ["rev-parse", "--verify", "--quiet", `${candidate}^{commit}`],
+    { cwd: repoRoot, encoding: "utf8" },
+  );
+  if (result.error !== undefined || result.status !== 0) {
+    throw new QueueValidationError(
+      `cannot resolve ${label} ${JSON.stringify(candidate)} as a commit in ` +
+        `${repoRoot}`,
+    );
+  }
+  const resolved = result.stdout.trim().toLowerCase();
+  if (resolved !== candidate) {
+    throw new QueueValidationError(
+      `${label} ${JSON.stringify(candidate)} did not resolve to the exact ` +
+        `commit (got ${JSON.stringify(resolved)})`,
+    );
+  }
+  return resolved;
+}
+
+function assertAncestorOrEqual(
+  repoRoot: string,
+  ancestor: string,
+  descendant: string,
+  message: string,
+): void {
+  const result = spawnSync(
+    "git",
+    ["merge-base", "--is-ancestor", ancestor, descendant],
+    { cwd: repoRoot, encoding: "utf8" },
+  );
+  if (result.error !== undefined || result.status === null) {
+    throw new QueueValidationError(
+      `cannot prove Git ancestry of ${ancestor} in ${descendant}: ` +
+        `${result.error?.message ?? "git did not run"}`,
+    );
+  }
+  if (result.status === 1) {
+    throw new QueueValidationError(message);
+  }
+  if (result.status !== 0) {
+    throw new QueueValidationError(
+      `cannot prove Git ancestry of ${ancestor} in ${descendant} ` +
+        `(git exited ${result.status})`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1522,6 +2480,21 @@ function parseQueueItem(
 
   const dependsOn = uniqueStrings(raw.dependsOn as string[]);
   const runIds = uniqueStrings(raw.runIds as string[]);
+  let resolution: OperatorResolution | undefined;
+  if (raw.resolution !== undefined) {
+    resolution = parseOperatorResolution(
+      raw.resolution,
+      `${source}.resolution`,
+      raw.id,
+      raw.lastRunId as string | undefined,
+    );
+    if (raw.status !== "completed") {
+      throw new QueueValidationError(
+        `${source}: resolution requires a completed queue item (got ` +
+          `${JSON.stringify(raw.status)})`,
+      );
+    }
+  }
 
   if (planBacked) {
     if (dependsOn.length === 0) {
@@ -1592,6 +2565,7 @@ function parseQueueItem(
       updatedAt: raw.updatedAt as string,
       ...(raw.reason !== undefined ? { reason: raw.reason as string } : {}),
       ...(failure !== undefined ? { failure } : {}),
+      ...(resolution !== undefined ? { resolution } : {}),
     };
   }
 
@@ -1625,6 +2599,118 @@ function parseQueueItem(
     updatedAt: raw.updatedAt as string,
     ...(raw.reason !== undefined ? { reason: raw.reason as string } : {}),
     ...(failure !== undefined ? { failure } : {}),
+    ...(resolution !== undefined ? { resolution } : {}),
+  };
+}
+
+function parseOperatorResolution(
+  raw: unknown,
+  source: string,
+  itemId: string,
+  lastRunId: string | undefined,
+): OperatorResolution {
+  if (!isRecord(raw)) {
+    throw new QueueValidationError(`${source} must be an object`);
+  }
+  assertOnlyKeys(raw, RESOLUTION_KEYS, source);
+  if (raw.version !== OPERATOR_RESOLUTION_VERSION) {
+    throw new QueueValidationError(
+      `${source}.version must be ${OPERATOR_RESOLUTION_VERSION}`,
+    );
+  }
+  if (raw.kind !== "manual-adoption") {
+    throw new QueueValidationError(
+      `${source}.kind must be "manual-adoption"`,
+    );
+  }
+  if (raw.queueItemId !== itemId) {
+    throw new QueueValidationError(
+      `${source}.queueItemId must equal the queue item id ${JSON.stringify(itemId)}`,
+    );
+  }
+  if (
+    typeof raw.sourceRunId !== "string" ||
+    !RUN_ID_PATTERN.test(raw.sourceRunId)
+  ) {
+    throw new QueueValidationError(`${source}.sourceRunId is not a valid run id`);
+  }
+  if (lastRunId === undefined) {
+    throw new QueueValidationError(
+      `${source} requires the queue item lastRunId`,
+    );
+  }
+  if (raw.sourceRunId !== lastRunId) {
+    throw new QueueValidationError(
+      `${source}.sourceRunId must equal the item lastRunId`,
+    );
+  }
+  if (
+    raw.sourceManifestStatus !== "blocked" &&
+    raw.sourceManifestStatus !== "interrupted"
+  ) {
+    throw new QueueValidationError(
+      `${source}.sourceManifestStatus must be blocked or interrupted`,
+    );
+  }
+  for (const field of ["baseCommit", "reviewedCommit"] as const) {
+    if (
+      typeof raw[field] !== "string" ||
+      !FULL_COMMIT_PATTERN.test(raw[field] as string)
+    ) {
+      throw new QueueValidationError(
+        `${source}.${field} must be a full git commit hash ` +
+          "(40 or 64 hex characters)",
+      );
+    }
+  }
+  for (const field of ["contractsHash", "reviewEvidenceHash"] as const) {
+    if (
+      typeof raw[field] !== "string" ||
+      !SHA256_PATTERN.test(raw[field] as string)
+    ) {
+      throw new QueueValidationError(
+        `${source}.${field} must be a hex SHA-256 digest`,
+      );
+    }
+  }
+  if (
+    typeof raw.reviewEvidencePath !== "string" ||
+    !raw.reviewEvidencePath.trim() ||
+    raw.reviewEvidencePath.length > MAX_REVIEW_EVIDENCE_PATH_LENGTH
+  ) {
+    throw new QueueValidationError(
+      `${source}.reviewEvidencePath must be a bounded non-empty path`,
+    );
+  }
+  if (typeof raw.approvedAt !== "string" || Number.isNaN(Date.parse(raw.approvedAt))) {
+    throw new QueueValidationError(
+      `${source}.approvedAt must be an ISO-8601 timestamp`,
+    );
+  }
+  const approvedBy = requireBoundedSecretFreeText(
+    raw.approvedBy,
+    `${source}.approvedBy`,
+    MAX_APPROVED_BY_LENGTH,
+  );
+  const reason = requireBoundedSecretFreeText(
+    raw.reason,
+    `${source}.reason`,
+    MAX_ADOPTION_REASON_LENGTH,
+  );
+  return {
+    version: OPERATOR_RESOLUTION_VERSION,
+    kind: "manual-adoption",
+    queueItemId: itemId,
+    sourceRunId: raw.sourceRunId,
+    sourceManifestStatus: raw.sourceManifestStatus,
+    baseCommit: (raw.baseCommit as string).toLowerCase(),
+    contractsHash: (raw.contractsHash as string).toLowerCase(),
+    reviewedCommit: (raw.reviewedCommit as string).toLowerCase(),
+    reviewEvidencePath: raw.reviewEvidencePath,
+    reviewEvidenceHash: (raw.reviewEvidenceHash as string).toLowerCase(),
+    approvedBy,
+    approvedAt: raw.approvedAt,
+    reason,
   };
 }
 
@@ -1711,6 +2797,18 @@ function parsePlanMaterialization(
     raw.upstreamIntegrationHead,
     `${source}.upstreamIntegrationHead`,
   );
+  const upstreamAdoptedCommit = optionalStringField(
+    raw.upstreamAdoptedCommit,
+    `${source}.upstreamAdoptedCommit`,
+  );
+  if (
+    upstreamAdoptedCommit !== undefined &&
+    !FULL_COMMIT_PATTERN.test(upstreamAdoptedCommit)
+  ) {
+    throw new QueueValidationError(
+      `${source}.upstreamAdoptedCommit must be a full git commit hash`,
+    );
+  }
 
   if (item.dependsOn.length === 0) {
     if (
@@ -1724,7 +2822,8 @@ function parsePlanMaterialization(
     if (
       upstreamQueueId !== undefined ||
       upstreamRunId !== undefined ||
-      upstreamIntegrationHead !== undefined
+      upstreamIntegrationHead !== undefined ||
+      upstreamAdoptedCommit !== undefined
     ) {
       throw new QueueValidationError(
         `${source}: root materialization must not record upstream lineage`,
@@ -1743,22 +2842,44 @@ function parsePlanMaterialization(
         `${source}.upstreamRunId is required for a dependent item`,
       );
     }
-    if (upstreamIntegrationHead === undefined) {
-      throw new QueueValidationError(
-        `${source}.upstreamIntegrationHead is required for a dependent item`,
-      );
+    if (upstreamIntegrationHead !== undefined) {
+      if (!FULL_COMMIT_PATTERN.test(upstreamIntegrationHead)) {
+        throw new QueueValidationError(
+          `${source}.upstreamIntegrationHead must be a full git commit hash`,
+        );
+      }
     }
-    if (!FULL_COMMIT_PATTERN.test(upstreamIntegrationHead)) {
-      throw new QueueValidationError(
-        `${source}.upstreamIntegrationHead must be a full git commit hash`,
-      );
-    }
-    if (
-      upstreamIntegrationHead.toLowerCase() !== baseCommit.toLowerCase()
-    ) {
-      throw new QueueValidationError(
-        `${source}.baseCommit must equal upstreamIntegrationHead`,
-      );
+    if (upstreamAdoptedCommit !== undefined) {
+      // Explicit adopted lineage: the base is an optional usable integration
+      // head that contains the reviewed commit, else the reviewed commit.
+      if (upstreamIntegrationHead !== undefined) {
+        if (
+          upstreamIntegrationHead.toLowerCase() !== baseCommit.toLowerCase()
+        ) {
+          throw new QueueValidationError(
+            `${source}.baseCommit must equal upstreamIntegrationHead`,
+          );
+        }
+      } else if (
+        upstreamAdoptedCommit.toLowerCase() !== baseCommit.toLowerCase()
+      ) {
+        throw new QueueValidationError(
+          `${source}.baseCommit must equal upstreamAdoptedCommit`,
+        );
+      }
+    } else {
+      if (upstreamIntegrationHead === undefined) {
+        throw new QueueValidationError(
+          `${source}.upstreamIntegrationHead is required for a dependent item`,
+        );
+      }
+      if (
+        upstreamIntegrationHead.toLowerCase() !== baseCommit.toLowerCase()
+      ) {
+        throw new QueueValidationError(
+          `${source}.baseCommit must equal upstreamIntegrationHead`,
+        );
+      }
     }
   }
 
@@ -1791,6 +2912,9 @@ function parsePlanMaterialization(
     ...(upstreamRunId !== undefined ? { upstreamRunId } : {}),
     ...(upstreamIntegrationHead !== undefined
       ? { upstreamIntegrationHead }
+      : {}),
+    ...(upstreamAdoptedCommit !== undefined
+      ? { upstreamAdoptedCommit: upstreamAdoptedCommit.toLowerCase() }
       : {}),
     contractsPath,
     contractsHash,

@@ -10,6 +10,8 @@ import {
   loadQueue,
   queueCounts,
   queueItemContractsIdentity,
+  readQueueAdoptionEvents,
+  type QueueAdoptionEventSummary,
   type QueueCounts,
   type QueueItem,
   type QueueLockInspection,
@@ -105,7 +107,15 @@ export interface ControlRunSnapshot {
   workerProgress: WorkerProgressStatus[];
 }
 
+/**
+ * How a completed queue item reached completion. `adopted` means an operator
+ * resolution closed it; the underlying run and its unaccepted tasks remain
+ * visible and are never presented as accepted.
+ */
+export type ControlCompletion = "run" | "adopted" | null;
+
 export interface ControlItemSnapshot extends QueueItem {
+  completion: ControlCompletion;
   ready: boolean;
   retryable: boolean;
   observedNextAction: ObservedNextAction;
@@ -163,6 +173,8 @@ export interface ControlSnapshot {
   queue: {
     updatedAt: string;
     lock: QueueLockInspection;
+    /** Bounded manual-adoption event stream (design/queue-adoption-v1.md). */
+    adoptionEvents: QueueAdoptionEventSummary;
   };
   journal: QueueEventJournalSummary;
   resources: ResourceSnapshot;
@@ -194,6 +206,7 @@ export async function buildControlSnapshot(
     repoRoot,
     options.journalLimit,
   );
+  const adoptionEvents = readQueueAdoptionEvents(repoRoot);
   const queueLock = inspectQueueLock(repoRoot);
   const byId = new Map(document.items.map((item) => [item.id, item]));
   const items: ControlItemSnapshot[] = [];
@@ -229,6 +242,7 @@ export async function buildControlSnapshot(
         }
         if (
           item.status === "completed" &&
+          item.resolution === undefined &&
           run.effectiveStatus !== "completed"
         ) {
           errors.push(
@@ -257,6 +271,12 @@ export async function buildControlSnapshot(
 
     items.push({
       ...cloneQueueItem(item),
+      completion:
+        item.status !== "completed"
+          ? null
+          : item.resolution !== undefined
+            ? "adopted"
+            : "run",
       ready,
       retryable,
       observedNextAction: observedNextAction(
@@ -334,6 +354,7 @@ export async function buildControlSnapshot(
     queue: {
       updatedAt: document.updatedAt,
       lock: queueLock,
+      adoptionEvents,
     },
     journal,
     resources,
@@ -684,6 +705,9 @@ function cloneQueueItem(item: QueueItem): QueueItem {
       : {}),
     ...(item.materialization !== undefined
       ? { materialization: { ...item.materialization } }
+      : {}),
+    ...(item.resolution !== undefined
+      ? { resolution: Object.freeze({ ...item.resolution }) }
       : {}),
   };
 }
