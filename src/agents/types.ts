@@ -2,6 +2,7 @@ import type { TaskContract } from "../contracts/schema.js";
 import type { CostTruth, FailureRecord } from "../failures.js";
 import type { TaskExtensionRecord } from "./continuation.js";
 import type { WorkerProcessRecord } from "./process-tree.js";
+import type { WorkerLeaseAttacher } from "./worker-lease.js";
 
 export type AgentAdapterId = "mock" | "claude" | "codex" | "codebuddy";
 
@@ -120,6 +121,13 @@ export interface AgentStartInput {
   onExtension?: (
     extension: TaskExtensionRecord,
   ) => void | Promise<void>;
+  /**
+   * Run-scoped durable worker-lease sink. The adapter attaches a lease
+   * immediately after spawn and updates that same lease with the terminal
+   * process-tree outcome. A rejected callback stops the worker and fails the
+   * attempt; only Supervisor-backed runs provide it.
+   */
+  onWorkerLease?: WorkerLeaseAttacher;
 }
 
 export interface AgentResult {

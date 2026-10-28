@@ -18,6 +18,19 @@ import {
   type ManagedWorkerProcess,
   type WorkerProcessRecord,
 } from "./process-tree.js";
+import type {
+  WorkerLeaseAttacher,
+  WorkerLeaseHandle,
+} from "./worker-lease.js";
+
+interface LeaseInvocation {
+  attacher: WorkerLeaseAttacher;
+  taskId: string;
+  attempt: number;
+  invocationId: string;
+  workspace: string;
+}
+
 import {
   boundFailureText,
   classifyFailure,
@@ -300,6 +313,7 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
                 retry === 0
                   ? launch
                   : ({ kind: "fresh", sessionId: randomUUID() } as const);
+              const invocationId = randomUUID();
               res = await withClaudeSlot(() =>
                 runClaude({
                   binary,
@@ -321,6 +335,17 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
                   prompt,
                   emit,
                   processTree,
+                  ...(input.onWorkerLease
+                    ? {
+                        lease: {
+                          attacher: input.onWorkerLease,
+                          taskId: input.contract.taskId,
+                          attempt: input.attempt,
+                          invocationId,
+                          workspace: opts.cwd,
+                        },
+                      }
+                    : {}),
                   onSpawn: (child, managed) => {
                     const session = sessions.get(sessionId);
                     if (session) session.child = child;
@@ -959,6 +984,7 @@ function runClaude(opts: {
   emit: ProgressEmitter;
   processTree: WorkerProcessTreeManager;
   onSpawn: (child: ChildProcess, managed: ManagedWorkerProcess) => void;
+  lease?: LeaseInvocation;
 }): Promise<ClaudeRunResult> {
   return new Promise((resolvePromise, reject) => {
     const args = [
@@ -990,6 +1016,39 @@ function runClaude(opts: {
     });
     const child = managed.child;
     opts.onSpawn(child, managed);
+    let leaseHandle: WorkerLeaseHandle | undefined;
+    let leaseError: Error | undefined;
+    const leaseAttached = (async (): Promise<void> => {
+      if (!opts.lease) return;
+      try {
+        leaseHandle = await opts.lease.attacher({
+          taskId: opts.lease.taskId,
+          attempt: opts.lease.attempt,
+          invocationId: opts.lease.invocationId,
+          workspace: opts.lease.workspace,
+          managed,
+        });
+      } catch (error) {
+        leaseError = error instanceof Error ? error : new Error(String(error));
+        // The attacher already stopped the worker; repeat cleanup so a custom
+        // attacher cannot leave an untracked live process behind.
+        const outcome = await managed.cleanup("spawn-error");
+        leaseError = attachProcessTreeEvidence(leaseError, outcome);
+      }
+    })();
+    const finishLease = async (
+      outcome: Parameters<WorkerLeaseHandle["update"]>[0],
+    ): Promise<Error | undefined> => {
+      await leaseAttached;
+      if (leaseError) return leaseError;
+      if (!leaseHandle) return undefined;
+      try {
+        await leaseHandle.update(outcome);
+        return undefined;
+      } catch (error) {
+        return attachProcessTreeEvidence(error, outcome);
+      }
+    };
 
     let stdout = "";
     let stderr = "";
@@ -1309,7 +1368,12 @@ function runClaude(opts: {
       cleanup();
       void (async () => {
         const outcome = await managed.cleanup("spawn-error");
-        reject(attachProcessTreeEvidence(error, outcome));
+        const leaseFailure = await finishLease(outcome);
+        reject(
+          leaseFailure
+            ? leaseFailure
+            : attachProcessTreeEvidence(error, outcome),
+        );
       })();
     });
     child.on("close", (code, signal) => {
@@ -1335,6 +1399,11 @@ function runClaude(opts: {
         const treeOutcome = await managed.cleanup(
           timedOut ? "timeout" : "child-close",
         );
+        const leaseFailure = await finishLease(treeOutcome);
+        if (leaseFailure) {
+          reject(leaseFailure);
+          return;
+        }
         const exitCode = timedOut ? 124 : (code ?? 1);
         if (!result && !timedOut && exitCode !== 0) {
           opts.emit({

@@ -21,6 +21,12 @@ import {
   type WorkerProgressEvent,
 } from "../agents/types.js";
 import {
+  buildWorkerLeaseStatus,
+  recoverWorkerLeases,
+  type WorkerLeaseRecoveryReport,
+  type WorkerLeaseStatusReport,
+} from "../agents/worker-lease.js";
+import {
   BUDGET_CONTINUATION_POLICY_VERSION,
   DEFAULT_BUDGET_CONTINUATION_POLICY,
   DEFAULT_DEADLINE_EXTENSION_POLICY,
@@ -155,6 +161,11 @@ export interface SupervisorStatus {
   workerProgress: WorkerProgressStatus[];
   /** Recovery evidence persisted by earlier reaper runs; never reconciled here. */
   runtimeRecovery: SupervisorRuntimeRecovery[];
+  /**
+   * Bounded worker-lease evidence for this run. Lease state never changes task
+   * acceptance or the manifest; malformed/missing records only degrade it.
+   */
+  workerLeases: WorkerLeaseStatusReport;
 }
 
 export async function runSupervisorCli(
@@ -181,6 +192,8 @@ export async function runSupervisorCli(
       return resumeCommand(rest, options, log);
     case "reap":
       return reapCommand(rest, options, log);
+    case "recover-workers":
+      return recoverWorkersCommand(rest, options, log);
     case "stop":
       return stopCommand(rest, options, log);
     default:
@@ -446,6 +459,20 @@ export async function buildStatus(
   // Worker progress is advisory: missing, malformed or stale files only hide
   // progress rows. They can never change status, counts or accepted work.
   const workerProgress = readWorkerProgress(repoRoot, manifest);
+  // Lease evidence is advisory and read-only. A malformed or missing lease is
+  // surfaced as degraded; it never makes a run look successful.
+  const workerLeases = await buildWorkerLeaseStatus(
+    repoRoot,
+    manifest.runId,
+    tasks.map((task) => ({
+      taskId: task.taskId,
+      expectsLease:
+        task.attemptStartedAt !== undefined ||
+        task.status === "running" ||
+        task.status === "verifying" ||
+        task.status === "repairing",
+    })),
+  );
 
   return {
     runId: manifest.runId,
@@ -481,6 +508,7 @@ export async function buildStatus(
     // Read-only: expose evidence written by previous reaper runs; status never
     // plans, signals, releases a lease, or rewrites a manifest.
     runtimeRecovery: readRuntimeRecoveryRecords(repoRoot),
+    workerLeases,
   };
 }
 
@@ -612,6 +640,34 @@ function printStatus(
           `${entry.event.message}${detail}${stale}`,
       );
     }
+  }
+  const leaseCounts = status.workerLeases.counts;
+  log(
+    `worker leases: active ${leaseCounts.active} / released ` +
+      `${leaseCounts.released} / cleanup-failed ${leaseCounts.cleanupFailed} / ` +
+      `unknown ${leaseCounts.unknown} / malformed ${leaseCounts.malformed}`,
+  );
+  for (const task of status.workerLeases.tasks) {
+    if (!task.latest) {
+      if (task.missing) {
+        log(`worker lease: ${task.taskId} missing (degraded evidence)`);
+      }
+      continue;
+    }
+    const latest = task.latest;
+    log(
+      `worker lease: ${task.taskId} attempt=${latest.attempt} ` +
+        `${latest.state} controller=${latest.controller.state} ` +
+        `capture=${latest.worker.captureMode}` +
+        (latest.cleanupReason ? ` reason=${latest.cleanupReason}` : "") +
+        (latest.latestObservation ? ` - ${latest.latestObservation}` : ""),
+    );
+  }
+  if (status.workerLeases.degraded) {
+    log(
+      "worker lease evidence degraded: " +
+        status.workerLeases.degradedReasons.join("; "),
+    );
   }
   if (status.reusableAttempts.length === 0) {
     log("reusable attempts: none");
@@ -893,6 +949,60 @@ async function reapCommand(
     printReconciliation(outcome, log);
   }
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// recover-workers
+// ---------------------------------------------------------------------------
+
+async function recoverWorkersCommand(
+  rest: string[],
+  _options: SupervisorCliOptions,
+  log: (line: string) => void,
+): Promise<number> {
+  const repoRoot = repoFrom(rest);
+  const runId = arg("--run", rest);
+  const report = await recoverWorkerLeases({
+    repoRoot,
+    ...(runId !== undefined ? { runId } : {}),
+  });
+  if (has("--json", rest)) {
+    log(JSON.stringify(report, null, 2));
+  } else {
+    printWorkerLeaseRecovery(report, log);
+  }
+  return 0;
+}
+
+function printWorkerLeaseRecovery(
+  report: WorkerLeaseRecoveryReport,
+  log: (line: string) => void,
+): void {
+  log(`host: ${report.host}`);
+  log(`scanned: ${report.scanned}`);
+  log(`recovered: ${report.recovered}`);
+  log(`needs human: ${report.needsHuman}`);
+  log(`skipped: ${report.skipped}`);
+  if (report.truncated) log("scan truncated: yes");
+  for (const entry of report.entries) {
+    const identity = entry.runId && entry.taskId
+      ? `${entry.runId}/${entry.taskId}`
+      : entry.path;
+    log(
+      `${entry.outcome} ${entry.action} ${identity}` +
+        (entry.leaseId ? ` lease=${entry.leaseId}` : "") +
+        ` controller=${entry.controllerState}` +
+        ` worker=${entry.workerState}` +
+        (entry.resumeNeeded ? " resume-needed" : "") +
+        ` - ${entry.reason}`,
+    );
+  }
+  if (report.resumeNeeded.length > 0) {
+    log(
+      `resume needed: ${report.resumeNeeded.length} task invocation(s); ` +
+        "RunManifest acceptance was not changed",
+    );
+  }
 }
 
 /**
@@ -1635,6 +1745,7 @@ Usage:
                             [--max-cumulative-budget-guard-usd usd]
                             [--budget-overshoot-reserve-usd usd]
   cliyard supervisor reap --repo <path> [--json]
+  cliyard supervisor recover-workers --repo <path> [--run id] [--json]
   cliyard supervisor stop --repo <path> [--run id] [--force]
 
 Foreground only: start/resume hold .cliyard/supervisor.lock until exit.
@@ -1644,8 +1755,11 @@ A rejected attempt keeps its dirty worktree. Resume reuses a valid recorded
 attempt by default; --fresh-attempt discards it for a clean worktree.
 Start/resume reap proven orphaned runtimes after acquiring the lock and fail
 closed when any runtime needs human review. Status only reads persisted
-recovery records; it never reconciles. Automatic deadline extension is off by
-default and is available only with Claude's mapped assistant/tool progress.
+recovery and worker-lease records; it never reconciles. recover-workers only
+signals an exactly verified worker group after proving its controller dead on
+this host; it never reattaches stdout or changes RunManifest acceptance.
+Automatic deadline extension is off by default and is available only with
+Claude's mapped assistant/tool progress.
 Automatic budget continuation is off by default and max continuations are
 zero; an opted-in grant starts a new Claude invocation and is not a balance,
 invoice, quota or strict hard cap. Codex remains fail-closed at its base

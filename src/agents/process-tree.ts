@@ -152,9 +152,23 @@ export interface WorkerProcessTreeManagerOptions {
   pollMs?: number;
 }
 
+export interface WorkerProcessIdentityCapture {
+  identity?: RuntimeProcessIdentity;
+  /** Bounded capture error; identity stays absent when capture did not prove it. */
+  error?: string;
+}
+
 export interface ManagedWorkerProcess {
   readonly child: ChildProcess;
   readonly pid: number | undefined;
+  /** Platform capture mode for this managed invocation. */
+  readonly captureSupport: WorkerCaptureSupport;
+  /**
+   * Exact OS identity captured immediately after spawn. Resolves with no
+   * identity (never a guessed one) when the process was too short-lived or the
+   * platform cannot inspect process groups.
+   */
+  captureIdentity(): Promise<WorkerProcessIdentityCapture>;
   /**
    * Idempotent cleanup. The first call fixes the recorded reason; concurrent
    * and later calls resolve with the same outcome. Never rejects.
@@ -288,7 +302,7 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
   private readonly manager: WorkerProcessTreeManager;
   private readonly startedAt: string;
   private readonly capturePromise: Promise<CaptureResult>;
-  private readonly captureSupport: WorkerCaptureSupport;
+  private readonly captureSupportValue: WorkerCaptureSupport;
   private readonly signals: WorkerProcessSignalRecord[] = [];
   private residualMembers: RuntimeProcessIdentity[] = [];
   private residualCount = 0;
@@ -304,7 +318,7 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     this.manager = manager;
     this.child = child;
     this.startedAt = new Date().toISOString();
-    this.captureSupport = manager.captureSupport();
+    this.captureSupportValue = manager.captureSupport();
     // Start identity capture synchronously after spawn: first, so the ps child
     // observes the worker before an extremely short CLI can exit.
     this.capturePromise = this.startCapture();
@@ -328,6 +342,19 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
 
   get pid(): number | undefined {
     return this.child.pid;
+  }
+
+  get captureSupport(): WorkerCaptureSupport {
+    return this.captureSupportValue;
+  }
+
+  captureIdentity(): Promise<WorkerProcessIdentityCapture> {
+    return this.capturePromise.then((capture) => ({
+      ...(capture.identity ? { identity: copyIdentity(capture.identity) } : {}),
+      ...(capture.error !== undefined
+        ? { error: boundDetail(capture.error) }
+        : {}),
+    }));
   }
 
   cleanup(reason: WorkerCleanupReason): Promise<WorkerProcessCleanupOutcome> {
@@ -564,7 +591,7 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     return this.finish("unsupported", "unsupported", reason, {
       pgid: undefined,
       detail:
-        this.captureSupport === "windows-exact-child"
+        this.captureSupportValue === "windows-exact-child"
           ? "win32 has no managed POSIX process group; only the direct child was signalled"
           : `no process-group inspection on ${this.manager.platform}; only the direct child was signalled`,
     });
@@ -826,7 +853,7 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
       ...(isProcessPid(options.pgid) ? { pgid: options.pgid } : {}),
       ...(identity ? { identity } : {}),
       captureSource: source,
-      captureSupport: this.captureSupport,
+      captureSupport: this.captureSupportValue,
       cleanupReason: reason,
       cleanupState: state,
       signals: this.signals.map((signal) => ({ ...signal })),
