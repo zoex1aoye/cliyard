@@ -1,0 +1,126 @@
+{
+  "planId": "queue-adoption-and-test-stability-v1",
+  "tasks": [
+    {
+      "taskId": "manual-queue-adoption",
+      "goal": "Implement the first Execution Authority v1 slice from design/execution-authority-v1.md: a formal operator adoption path for a blocked or interrupted Plan-backed queue item whose work has been manually reviewed and integrated. Extend QueueItem with an optional versioned OperatorResolution persisted in queue.json. Add `cliyard queue adopt <id> --repo <path> --run <run-id> --artifact <full-git-sha> --evidence <review-evidence.json> --approved-by <operator> --reason <text> [--json]`. The evidence file must be versioned, bounded, secret-free JSON with reviewedAt, commands containing command/exitCode/outputSha256 and optional notes; require at least one successful command, reject malformed evidence, and hash the exact evidence bytes. Adopt only a blocked item with lastRunId equal to --run; require the exact frozen contracts identity still present; require --artifact to be a full git object id that exists, is reachable as a commit, and is an ancestor of or equal to the current HEAD; validate the source RunManifest remains blocked/interrupted and retain it unchanged. Persist resolution with source manifest status, baseCommit, contractsHash, reviewedCommit, evidence path/hash, approvedBy/At and reason. Make completed-by-adoption distinct in status output while preserving the underlying run inspection. Define and test dependency semantics: an adopted item satisfies dependants, and Plan-backed dependants use the adopted reviewedCommit as their upstream base only when the existing RunManifest integrationHead is not usable; preserve explicit lineage/upstream queue id and fail closed if the reviewed commit is not a descendant of the original pinned base. Repeated adoption must be idempotent only when all identity fields are byte-equivalent and otherwise reject. Add queue event `queue.item.adopted` with bounded fields. Expose resolution in queue status JSON/human output without turning blocked RunManifest tasks into accepted. Add focused tests for success, wrong state, run mismatch, changed contracts, malformed evidence, evidence hash, commit validation, idempotency, rejection, status/event output and dependent base selection. Add design/queue-adoption-v1.md with format and limits. Preserve existing retry/cancel/completed monotonicity.",
+      "nonGoals": [
+        "Do not rewrite or mutate the source RunManifest.",
+        "Do not mark rejected tasks accepted.",
+        "Do not adopt unblocked or unknown queue items.",
+        "Do not trust an abbreviated commit, branch name or symbolic ref.",
+        "Do not store raw logs, prompts, secrets or unbounded command output.",
+        "Do not implement parallel dispatch, dynamic routing, daemon or push."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        ".",
+        "design/execution-authority-v1.md",
+        "docs/evidence/CONTINUATION_SELF_HOST.md"
+      ],
+      "writePaths": [
+        "src/orchestration/queue-store.ts",
+        "src/orchestration/queue-runner.ts",
+        "src/orchestration/cli.ts",
+        "src/orchestration/control-snapshot.ts",
+        "tests/orchestration-queue.test.ts",
+        "tests/queue-adoption.test.ts",
+        "tests/queue-control-snapshot.test.ts",
+        "design/queue-adoption-v1.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "node --import tsx --test tests/orchestration-queue.test.ts tests/queue-adoption.test.ts tests/queue-control-snapshot.test.ts"
+      ],
+      "deliverables": [
+        "A blocked reviewed item can be adopted without falsifying its RunManifest.",
+        "OperatorResolution and review evidence are immutable and auditable.",
+        "Adopted lineage is visible and usable by dependants.",
+        "Malformed, mismatched or repeated conflicting adoption fails closed."
+      ],
+      "forbidden": [
+        "Do not touch files outside writePaths.",
+        "Do not weaken RunManifest acceptance authority.",
+        "Do not accept truncated git revisions.",
+        "Do not persist raw secrets or full provider output."
+      ],
+      "maxRepairs": 2
+    },
+    {
+      "taskId": "deadline-fixture-stability",
+      "goal": "Diagnose and fix the reproducible failure of `healthy mapped activity persists one exact grant before extending` in tests/deadline-extension.test.ts. The focused test currently reproduces on this machine: a fixture with baseTimeoutMs 1200, extensionStepMs 1000 and total fixture work around 1700ms receives one valid extension to a 2200ms cumulative deadline but still times out when process startup and IO push the result past the final deadline. Determine whether the fixture timing is too tight or the deadline state machine has a real race. Preserve the production rule that a result emitted after the active deadline loses to timeout and that an in-flight extension must be persisted before the timer is re-armed. Prefer event-based or separately generous fixture timing over weakening timeout semantics; make the test deterministic under normal local load, and add a regression assertion that a result after the extended deadline remains timeout. Update only the focused test unless a provable production race requires a narrowly scoped fix in src/agents/claude.ts. Do not suppress or skip the test.",
+      "nonGoals": [
+        "Do not relax the timeout-after-deadline semantic.",
+        "Do not make the test sleep for an arbitrary long duration.",
+        "Do not change budget continuation behavior.",
+        "Do not edit unrelated tests.",
+        "Do not claim a production race without a reproducing test."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/execution-authority-v1.md",
+        "src/agents/claude.ts",
+        "tests/deadline-extension.test.ts",
+        "docs/evidence/DEADLINE_EXTENSION.md"
+      ],
+      "writePaths": [
+        "src/agents/claude.ts",
+        "tests/deadline-extension.test.ts"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "node --import tsx --test tests/deadline-extension.test.ts"
+      ],
+      "deliverables": [
+        "The focused deadline-extension suite passes repeatedly under normal local load.",
+        "A late result still loses to the active deadline."
+      ],
+      "forbidden": [
+        "Do not skip, delete or mark the test todo.",
+        "Do not change files outside writePaths.",
+        "Do not weaken grant persistence ordering."
+      ],
+      "maxRepairs": 2
+    },
+    {
+      "taskId": "authority-slice-evidence",
+      "goal": "After manual-queue-adoption and deadline-fixture-stability are accepted, inspect their integrated changes and produce the docs-only evidence closure for the first Execution Authority v1 slice. Add docs/evidence/QUEUE_ADOPTION.md with the exact operator workflow, review evidence schema, lineage rules, status/event examples, fail-closed behavior, measured focused and full test counts, and remaining WorkerLease/profile-routing/admission gaps. Update README, docs/NEXT_ITERATION.md and docs/NEXT_STEP_CONTROLLER.md so the next step is clearly WorkerLease at spawn and owner-death recovery, followed by profile activation and fixed admission; do not move Windows or dynamic scoring ahead of those prerequisites. Record that the source blocked RunManifest remains historical truth and manual adoption is a separately versioned queue resolution. Run the complete test suite after both upstream tasks are integrated and document only measured results.",
+      "nonGoals": [
+        "No source or test behavior changes.",
+        "No invented evidence.",
+        "No claim of parallel queue dispatch, dynamic routing, Windows parity or daemon support.",
+        "No automatic push or main merge.",
+        "No mutation of historical blocked runs."
+      ],
+      "dependsOn": [
+        "manual-queue-adoption",
+        "deadline-fixture-stability"
+      ],
+      "readPaths": [
+        ".",
+        "design/execution-authority-v1.md",
+        "design/queue-adoption-v1.md"
+      ],
+      "writePaths": [
+        "docs/evidence/QUEUE_ADOPTION.md",
+        "README.md",
+        "docs/NEXT_ITERATION.md",
+        "docs/NEXT_STEP_CONTROLLER.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npm test"
+      ],
+      "deliverables": [
+        "Measured adoption and test-stability evidence is committed.",
+        "The next execution-authority sequence is unambiguous."
+      ],
+      "forbidden": [
+        "Do not change source or tests.",
+        "Do not touch files outside writePaths.",
+        "Do not claim unmeasured capabilities."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}

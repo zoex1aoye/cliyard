@@ -13,6 +13,7 @@ North star: stop babysitting AI. **CLI + local Control API = stable product boun
 **WinUI 3 × TDesign pilot:** [docs/WINUI3_TDESIGN_PILOT.md](docs/WINUI3_TDESIGN_PILOT.md).
 **Task sizing and cost estimation:** [docs/TASK_ESTIMATION.md](docs/TASK_ESTIMATION.md).
 **Harness boundaries and DSH replacement strategy:** [docs/HARNESS_BOUNDARIES.md](docs/HARNESS_BOUNDARIES.md).
+**Execution authority and next control-plane order:** [design/execution-authority-v1.md](design/execution-authority-v1.md).
 **Supervisor v0 operations:** [docs/SUPERVISOR_V0.md](docs/SUPERVISOR_V0.md) — durable foreground runs, recovery, limitations, safe self-hosting.
 **Foreground orchestration queue v0:** [docs/evidence/ORCHESTRATION_QUEUE.md](docs/evidence/ORCHESTRATION_QUEUE.md) — explicit-approval queue over frozen contracts, dependency-ordered sequential dispatch, blocked stop/continue, retry/resume, stale-running reconciliation and queue-lock evidence. No daemon; RunManifest remains task authority.
 **Plan-backed chained queue base v0:** [docs/evidence/PLAN_BACKED_CHAIN.md](docs/evidence/PLAN_BACKED_CHAIN.md) — `queue add-plan` snapshots an approved Plan, materializes queue-owned contracts at a pinned root HEAD or the completed upstream RunManifest `integrationHead`, and proves downstream worktree/integration ancestry in three real Claude Code + DeepSeek two-item chains. Fail-closed, idempotent, one linear dependency; no daemon.

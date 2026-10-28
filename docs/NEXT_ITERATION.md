@@ -71,6 +71,33 @@
 > 遥测估算见 [task-estimation-v1.md](../design/task-estimation-v1.md)，缺陷
 > 汇总见 [selfhost-iteration-v0.md](../design/selfhost-iteration-v0.md)。
 >
+> **2026-10-28 execution authority review：** queue policy、continuation、
+> worker path audit 和 POSIX process-tree cleanup 已合入。当前
+> `npm run build` 通过，但完整套件在本机为 **361/362**：
+> `deadline-extension.test.ts` 的 2.2 秒 fixture 窗口在 Node 启动和 IO
+> 后越过最终 deadline。该失败已单独复现，不能当作绿色门禁。
+>
+> 下一阶段按“执行权威链”推进，而不是同时铺开所有缺口：
+>
+> ```text
+> queue adoption / OperatorResolution
+>   -> deadline fixture stability
+>   -> WorkerLease persisted at spawn + controller-death policy
+>   -> ProfileCatalog + real binding activation
+>   -> per-run Supervisor ownership + short control locks
+>   -> fixed hierarchical queue / Plan-wave admission
+>   -> Windows Job Object ProcessOwnerProvider
+>   -> telemetry-backed dynamic routing score
+> ```
+>
+> 人工 adopt 不得改写原 blocked RunManifest；它必须作为独立、不可变的
+> `OperatorResolution` 记录 reviewed commit、冻结 contracts identity、复核
+> evidence hash、批准人和原因。动态评分必须晚于真实 profile 激活和准入，
+> 否则只是在尚未实际切换 binding 的情况下选择一个标签。Windows 完整进程树
+> 与 cliyard 自身 SIGKILL 恢复都归入 `ProcessOwnerProvider` /
+> `WorkerLease` 边界；具体决定见
+> [execution-authority-v1.md](../design/execution-authority-v1.md)。
+>
 > 当前已完成能力仍不包含 daemon/后台服务、跨主机回收、浏览器证据、SQLite、
 > 有界并行准入和多父 integration/merge queue；其中 **CLI + 模型路由、有界
 > 并行派发和 EvidenceBundle 已升级为下一阶段目标**，不代表当前已经实现。

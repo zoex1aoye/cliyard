@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "profileId": "queue-adoption-claude-deepseek",
+  "runtimeId": "claude",
+  "modelId": "deepseek-flash",
+  "providerId": "deepseek",
+  "endpointRef": "deepseek-claude-default"
+}
