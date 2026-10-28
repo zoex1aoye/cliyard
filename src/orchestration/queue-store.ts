@@ -42,6 +42,18 @@ import {
 } from "../failures.js";
 import { materializedContractsPath } from "./plan-materializer.js";
 import { tryAppendQueueEvent } from "./event-journal.js";
+import {
+  parseQueueContinuationPolicy,
+  type QueueContinuationPolicy,
+} from "../agents/continuation.js";
+import {
+  createLegacyExecutionProfile,
+  executionProfileEventFields,
+  executionProfileMirrorReason,
+  parseExecutionProfile,
+  type ExecutionProfile,
+  type ExecutionRuntimeId,
+} from "../execution/profile.js";
 
 export const QUEUE_VERSION = 1 as const;
 export const QUEUE_FILE = "queue.json";
@@ -106,6 +118,14 @@ export interface QueueItem {
   /** Plan-backed items only: the exact materialized attempt-chain identity. */
   materialization?: QueuePlanMaterialization;
   worker: QueueWorker;
+  /**
+   * Frozen v1 execution identity for every newly added item. Legacy queue
+   * records may omit it and retain their worker/model behavior.
+   */
+  executionProfile?: ExecutionProfile;
+  /** Frozen queue-owned Supervisor continuation envelope. */
+  continuationPolicy?: QueueContinuationPolicy;
+  /** Exact mirror of profile.runtimeId when executionProfile is present. */
   model?: string;
   dependsOn: string[];
   status: QueueItemStatus;
@@ -400,6 +420,10 @@ export interface AddQueueItemInput {
   dependsOn?: string[];
   worker?: QueueWorker;
   model?: string;
+  /** Parsed once under the queue lock and persisted; the path is never stored. */
+  executionProfilePath?: string;
+  /** Parsed once under the queue lock and persisted; the path is never stored. */
+  continuationPolicyPath?: string;
   planId?: string;
   maxAttempts?: number;
 }
@@ -458,21 +482,23 @@ export function addQueueItem(
       );
     }
 
-    const worker = input.worker ?? "claude";
-    validateWorkerInput(worker);
+    const execution = resolveExecutionFreeze(root, input);
     const maxAttempts = input.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     validateMaxAttemptsInput(maxAttempts);
 
     const planId = optionalNonEmpty(input.planId);
-    const model = optionalNonEmpty(input.model);
     const at = now();
     const item: QueueItem = {
       id: input.id,
       contractsPath,
       contractsHash,
       ...(planId !== undefined ? { planId } : {}),
-      worker,
-      ...(model !== undefined ? { model } : {}),
+      worker: execution.worker,
+      model: execution.model,
+      executionProfile: execution.executionProfile,
+      ...(execution.continuationPolicy !== undefined
+        ? { continuationPolicy: execution.continuationPolicy }
+        : {}),
       dependsOn,
       status: "pending",
       attempts: 0,
@@ -491,6 +517,10 @@ export function addQueueItem(
       itemId: item.id,
       status: item.status,
       action: item.nextAction,
+      ...executionProfileEventFields(
+        item.executionProfile,
+        item.continuationPolicy,
+      ),
     });
     return item;
   });
@@ -503,6 +533,10 @@ export interface AddPlanQueueItemInput {
   dependsOn?: string[];
   worker?: QueueWorker;
   model?: string;
+  /** Parsed once under the queue lock and persisted; the path is never stored. */
+  executionProfilePath?: string;
+  /** Parsed once under the queue lock and persisted; the path is never stored. */
+  continuationPolicyPath?: string;
   maxAttempts?: number;
 }
 
@@ -599,11 +633,9 @@ export function addPlanQueueItem(
       );
     }
 
-    const worker = input.worker ?? "claude";
-    validateWorkerInput(worker);
+    const execution = resolveExecutionFreeze(root, input);
     const maxAttempts = input.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     validateMaxAttemptsInput(maxAttempts);
-    const model = optionalNonEmpty(input.model);
     const at = now();
     const item: QueueItem = {
       id: input.id,
@@ -611,8 +643,12 @@ export function addPlanQueueItem(
       planHash,
       planId: compiled.planId,
       ...(dependsOn.length === 0 ? { planBaseCommit } : {}),
-      worker,
-      ...(model !== undefined ? { model } : {}),
+      worker: execution.worker,
+      model: execution.model,
+      executionProfile: execution.executionProfile,
+      ...(execution.continuationPolicy !== undefined
+        ? { continuationPolicy: execution.continuationPolicy }
+        : {}),
       dependsOn,
       status: "pending",
       attempts: 0,
@@ -631,6 +667,10 @@ export function addPlanQueueItem(
       itemId: item.id,
       status: item.status,
       action: item.nextAction,
+      ...executionProfileEventFields(
+        item.executionProfile,
+        item.continuationPolicy,
+      ),
     });
     return item;
   });
@@ -1001,6 +1041,133 @@ function assertSafeQueueId(value: string, label: string): void {
   }
 }
 
+interface ExecutionFreezeInput {
+  worker?: QueueWorker;
+  model?: string;
+  executionProfilePath?: string;
+  continuationPolicyPath?: string;
+}
+
+interface ExecutionFreeze {
+  worker: QueueWorker;
+  model: string;
+  executionProfile: ExecutionProfile;
+  continuationPolicy?: QueueContinuationPolicy;
+}
+
+/**
+ * Normalize profile and policy files once, under the queue lock. The returned
+ * objects contain only bounded values and opaque references; source paths are
+ * intentionally absent from the durable item.
+ */
+function resolveExecutionFreeze(
+  repoRoot: string,
+  input: ExecutionFreezeInput,
+): ExecutionFreeze {
+  if (input.model !== undefined && !input.model.trim()) {
+    throw new QueueValidationError("model must be a non-empty string");
+  }
+  let executionProfile: ExecutionProfile | undefined;
+  if (input.executionProfilePath !== undefined) {
+    const parsed = parseJsonFileAtAdd(
+      repoRoot,
+      input.executionProfilePath,
+      "execution profile",
+    );
+    executionProfile = parseExecutionProfile(parsed);
+    if (!executionProfile) {
+      throw new QueueValidationError(
+        "execution profile file is not a valid, secret-free v1 profile",
+      );
+    }
+    if (
+      input.worker !== undefined &&
+      input.worker !== executionProfile.runtimeId
+    ) {
+      throw new QueueValidationError(
+        `--worker ${input.worker} conflicts with execution profile ` +
+          `runtimeId ${executionProfile.runtimeId}`,
+      );
+    }
+    const requestedModel = optionalNonEmpty(input.model);
+    if (
+      requestedModel !== undefined &&
+      requestedModel !== executionProfile.modelId
+    ) {
+      throw new QueueValidationError(
+        `--model ${requestedModel} conflicts with execution profile ` +
+          `modelId ${executionProfile.modelId}`,
+      );
+    }
+  }
+
+  let continuationPolicy: QueueContinuationPolicy | undefined;
+  if (input.continuationPolicyPath !== undefined) {
+    const parsed = parseJsonFileAtAdd(
+      repoRoot,
+      input.continuationPolicyPath,
+      "continuation policy",
+    );
+    continuationPolicy = parseQueueContinuationPolicy(parsed);
+    if (!continuationPolicy) {
+      throw new QueueValidationError(
+        "continuation policy file is not a valid, secret-free v1 policy",
+      );
+    }
+  }
+
+  const runtimeId: ExecutionRuntimeId = input.worker ?? "claude";
+  validateWorkerInput(runtimeId);
+  const profile =
+    executionProfile ??
+    createLegacyExecutionProfile({
+      runtimeId,
+      ...(optionalNonEmpty(input.model) !== undefined
+        ? { modelId: optionalNonEmpty(input.model)! }
+        : {}),
+    });
+  return {
+    worker: profile.runtimeId,
+    model: profile.modelId,
+    executionProfile: profile,
+    ...(continuationPolicy !== undefined ? { continuationPolicy } : {}),
+  };
+}
+
+function parseJsonFileAtAdd(
+  repoRoot: string,
+  inputPath: string,
+  label: string,
+): unknown {
+  if (typeof inputPath !== "string" || !inputPath.trim()) {
+    throw new QueueValidationError(`${label} path must be non-empty`);
+  }
+  const path = isAbsolute(inputPath)
+    ? resolve(inputPath)
+    : resolve(repoRoot, inputPath);
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(path);
+  } catch (error) {
+    throw new QueueValidationError(
+      `${label} file is missing or unreadable: ${path} ` +
+        `(${errorMessage(error)})`,
+    );
+  }
+  if (bytes.byteLength > 64 * 1024) {
+    throw new QueueValidationError(
+      `${label} file exceeds the 64 KiB v1 bound: ${path}`,
+    );
+  }
+  try {
+    return JSON.parse(bytes.toString("utf8")) as unknown;
+  } catch (error) {
+    throw new QueueValidationError(
+      `${label} file is not valid JSON: ${path} (${errorMessage(error)})`,
+    );
+  }
+}
+
 function validateWorkerInput(worker: QueueWorker): void {
   if (worker !== "claude" && worker !== "codex") {
     throw new QueueValidationError(
@@ -1308,6 +1475,39 @@ function parseQueueItem(
       );
     }
   }
+  let executionProfile: ExecutionProfile | undefined;
+  if (raw.executionProfile !== undefined) {
+    executionProfile = parseExecutionProfile(raw.executionProfile);
+    if (!executionProfile) {
+      throw new QueueValidationError(
+        `${source}: executionProfile is not a valid, secret-free v1 profile`,
+      );
+    }
+  }
+  let continuationPolicy: QueueContinuationPolicy | undefined;
+  if (raw.continuationPolicy !== undefined) {
+    continuationPolicy = parseQueueContinuationPolicy(
+      raw.continuationPolicy,
+    );
+    if (!continuationPolicy) {
+      throw new QueueValidationError(
+        `${source}: continuationPolicy is not a valid, secret-free v1 policy`,
+      );
+    }
+  }
+  if (continuationPolicy !== undefined && executionProfile === undefined) {
+    throw new QueueValidationError(
+      `${source}: continuationPolicy requires an executionProfile`,
+    );
+  }
+  const mirrorReason = executionProfileMirrorReason(
+    executionProfile,
+    raw.worker,
+    raw.model as string | undefined,
+  );
+  if (mirrorReason !== undefined) {
+    throw new QueueValidationError(`${source}: ${mirrorReason}`);
+  }
   // Optional for legacy items; when present the record must validate fully.
   let failure: FailureRecord | undefined;
   if (raw.failure !== undefined) {
@@ -1367,8 +1567,18 @@ function parseQueueItem(
       planId: planId as string,
       ...(planBaseCommit !== undefined ? { planBaseCommit } : {}),
       ...(materialization !== undefined ? { materialization } : {}),
-      worker: raw.worker,
-      ...(raw.model !== undefined ? { model: raw.model as string } : {}),
+      worker: executionProfile?.runtimeId ?? raw.worker,
+      ...(executionProfile !== undefined
+        ? {
+            model: executionProfile.modelId,
+            executionProfile,
+          }
+        : {
+            ...(raw.model !== undefined
+              ? { model: raw.model as string }
+              : {}),
+          }),
+      ...(continuationPolicy !== undefined ? { continuationPolicy } : {}),
       dependsOn,
       status: raw.status as QueueItemStatus,
       attempts: raw.attempts as number,
@@ -1390,8 +1600,18 @@ function parseQueueItem(
     contractsPath: contractsPath as string,
     contractsHash: contractsHash as string,
     ...(planId !== undefined ? { planId } : {}),
-    worker: raw.worker,
-    ...(raw.model !== undefined ? { model: raw.model as string } : {}),
+    worker: executionProfile?.runtimeId ?? raw.worker,
+    ...(executionProfile !== undefined
+      ? {
+          model: executionProfile.modelId,
+          executionProfile,
+        }
+      : {
+          ...(raw.model !== undefined
+            ? { model: raw.model as string }
+            : {}),
+        }),
+    ...(continuationPolicy !== undefined ? { continuationPolicy } : {}),
     dependsOn,
     status: raw.status as QueueItemStatus,
     attempts: raw.attempts as number,

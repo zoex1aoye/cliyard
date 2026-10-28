@@ -50,6 +50,19 @@ import {
   type QueuePlanMaterialization,
 } from "./queue-store.js";
 import { tryAppendQueueEvent } from "./event-journal.js";
+import {
+  continuationPolicyToSupervisorArgs,
+  parseQueueContinuationPolicy,
+  type QueueContinuationPolicy,
+} from "../agents/continuation.js";
+import {
+  checkExecutionPolicyCompatibility,
+  executionProfileEventFields,
+  executionProfileMirrorReason,
+  parseExecutionProfile,
+  type ExecutionPolicyCompatibility,
+  type ExecutionProfile,
+} from "../execution/profile.js";
 
 export interface QueueSupervisorRequest {
   repoRoot: string;
@@ -163,6 +176,18 @@ export function createQueueSupervisorRunner(
   const runCli = options.runSupervisorCli ?? runSupervisorCli;
   return async (request) => {
     const { repoRoot, item, action } = request;
+    const execution = queueItemExecution(item);
+    if (!execution.ok) {
+      return {
+        exitCode: 1,
+        reason:
+          `cannot dispatch queue item ${JSON.stringify(item.id)}: ` +
+          execution.reason,
+      };
+    }
+    const continuationArgs = execution.continuationPolicy
+      ? continuationPolicyToSupervisorArgs(execution.continuationPolicy)
+      : [];
     const resumeRunId =
       action === "resume" ? (request.runId ?? item.lastRunId) : undefined;
     const startRunId =
@@ -197,7 +222,7 @@ export function createQueueSupervisorRunner(
             "--run",
             resumeRunId!,
             "--worker",
-            item.worker,
+            execution.worker,
             "--retry-rejected",
           ]
         : [
@@ -209,9 +234,12 @@ export function createQueueSupervisorRunner(
               ? ["--run-id", startRunId]
               : []),
             "--worker",
-            item.worker,
+            execution.worker,
           ];
-    if (item.model) args.push("--model", item.model);
+    if (execution.model !== undefined) {
+      args.push("--model", execution.model);
+    }
+    args.push(...continuationArgs);
     if (action === "start" && item.planId) {
       args.push("--plan-id", item.planId);
     }
@@ -419,6 +447,10 @@ export async function runQueue(
             attempt: candidate.attempts,
             status: candidate.status,
             reason: blockedReason,
+            ...executionProfileEventFields(
+              candidate.executionProfile,
+              candidate.continuationPolicy,
+            ),
             // Queue-item failure is authority only because no run exists.
             ...failureEventFields(candidate.failure),
           });
@@ -543,6 +575,103 @@ export function dependencyOrder(items: QueueItem[]): QueueItem[] {
 // Dispatch
 // ---------------------------------------------------------------------------
 
+type QueueItemExecution =
+  | {
+      ok: true;
+      worker: QueueItem["worker"];
+      model?: string;
+      profile?: ExecutionProfile;
+      continuationPolicy?: QueueContinuationPolicy;
+    }
+  | {
+      ok: false;
+      code: string;
+      reason: string;
+    };
+
+/**
+ * Pure read-only validation shared by the pre-dispatch gate and the concrete
+ * Supervisor runner. No field is inferred from the current environment.
+ */
+export function checkQueueItemExecutionPolicy(
+  item: QueueItem,
+): ExecutionPolicyCompatibility {
+  const execution = queueItemExecution(item);
+  return execution.ok
+    ? { ok: true }
+    : { ok: false, code: execution.code, reason: execution.reason };
+}
+
+function queueItemExecution(item: QueueItem): QueueItemExecution {
+  if (item.executionProfile === undefined) {
+    if (item.continuationPolicy !== undefined) {
+      return {
+        ok: false,
+        code: "execution_profile_required",
+        reason: "continuationPolicy requires a frozen executionProfile",
+      };
+    }
+    return {
+      ok: true,
+      worker: item.worker,
+      ...(item.model !== undefined ? { model: item.model } : {}),
+    };
+  }
+
+  const profile = parseExecutionProfile(item.executionProfile);
+  if (!profile) {
+    return {
+      ok: false,
+      code: "invalid_execution_profile",
+      reason: "executionProfile is not a valid, secret-free v1 profile",
+    };
+  }
+  const mirrorReason = executionProfileMirrorReason(
+    profile,
+    item.worker,
+    item.model,
+  );
+  if (mirrorReason !== undefined) {
+    return {
+      ok: false,
+      code: "execution_profile_mismatch",
+      reason: mirrorReason,
+    };
+  }
+
+  let continuationPolicy: QueueContinuationPolicy | undefined;
+  if (item.continuationPolicy !== undefined) {
+    continuationPolicy = parseQueueContinuationPolicy(
+      item.continuationPolicy,
+    );
+    if (!continuationPolicy) {
+      return {
+        ok: false,
+        code: "invalid_continuation_policy",
+        reason: "continuationPolicy is not a valid, secret-free v1 policy",
+      };
+    }
+  }
+  const compatibility = checkExecutionPolicyCompatibility(
+    profile,
+    continuationPolicy,
+  );
+  if (!compatibility.ok) {
+    return {
+      ok: false,
+      code: compatibility.code ?? "policy_capability_mismatch",
+      reason: compatibility.reason ?? "execution profile is incompatible",
+    };
+  }
+  return {
+    ok: true,
+    worker: profile.runtimeId,
+    model: profile.modelId,
+    profile,
+    ...(continuationPolicy !== undefined ? { continuationPolicy } : {}),
+  };
+}
+
 async function dispatchItem(
   repoRoot: string,
   document: QueueDocument,
@@ -585,6 +714,10 @@ async function dispatchItem(
     attempt: item.attempts,
     action,
     status: item.status,
+    ...executionProfileEventFields(
+      item.executionProfile,
+      item.continuationPolicy,
+    ),
   });
   tryAppendQueueEvent(repoRoot, {
     type: action === "resume" ? "run.resumed" : "run.started",
@@ -593,6 +726,10 @@ async function dispatchItem(
     runId: assignedRunId,
     attempt: item.attempts,
     action,
+    ...executionProfileEventFields(
+      item.executionProfile,
+      item.continuationPolicy,
+    ),
   });
 
   const snapshot: QueueItem = {
@@ -725,6 +862,10 @@ async function dispatchItem(
     attempt: item.attempts,
     action,
     status: item.status,
+    ...executionProfileEventFields(
+      item.executionProfile,
+      item.continuationPolicy,
+    ),
     ...(item.reason !== undefined ? { reason: item.reason } : {}),
     ...(completed
       ? {}
@@ -764,6 +905,14 @@ function preDispatchBlockReason(
     return {
       reason: `attempt limit reached (${item.attempts}/${item.maxAttempts})`,
       code: "attempt_limit_reached",
+    };
+  }
+  const executionPolicy = checkQueueItemExecutionPolicy(item);
+  if (!executionPolicy.ok) {
+    return {
+      reason:
+        executionPolicy.reason ?? "execution profile policy is incompatible",
+      code: executionPolicy.code ?? "policy_capability_mismatch",
     };
   }
   // Plan items have no top-level contracts identity; their recorded
@@ -876,6 +1025,10 @@ function journalPropagatedBlocks(
       type: "run.blocked",
       itemId: record.id,
       reason: record.reason,
+      ...executionProfileEventFields(
+        byId.get(record.id)?.executionProfile,
+        byId.get(record.id)?.continuationPolicy,
+      ),
       ...failureEventFields(byId.get(record.id)?.failure),
     });
   }
