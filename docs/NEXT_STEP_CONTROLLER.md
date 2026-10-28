@@ -4,10 +4,16 @@
 >
 > Baseline: `3065ad9` / `selfhost/chained-read-context-complete`
 >
-> Implementation update (2026-10-27): `queue status`, the queue event journal,
-> the read-only resource/provider snapshot, and worker failure taxonomy/cost
-> truth are implemented. The next P0 slice is CLI + model execution-profile
-> routing. Evidence:
+> Implementation update (2026-10-28): `queue status`, the queue event journal,
+> the read-only resource/provider snapshot, worker failure taxonomy/cost
+> truth, **queue manual adoption v1**, run binding, worker path audit,
+> health-gated budget continuation/deadline extension, and deadline-fixture
+> stability are implemented. The next P0 slice is **WorkerLease persisted at
+> spawn plus controller owner-death recovery**. Only after that: secret-free
+> `ProfileCatalog` with real binding activation, per-run Supervisor ownership,
+> and fixed hierarchical admission. Windows Job Object ownership and dynamic
+> routing scores stay behind those prerequisites. Evidence:
+> [evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md),
 > [evidence/CONTROL_SNAPSHOT.md](evidence/CONTROL_SNAPSHOT.md) and
 > [evidence/FAILURE_COST_TRUTH.md](evidence/FAILURE_COST_TRUTH.md).
 
@@ -27,22 +33,30 @@ sessions, execution bindings, attempt limits and block reasons.
 The implementation order was revised after the competitive and entry review:
 
 ```text
-queue observe / status
+queue observe / status (implemented)
   -> worker failure taxonomy + cost truth (implemented)
-  -> live first-run identity + failed-attempt path audit
-  -> healthy budget continuation + deadline extension
-  -> telemetry-backed task estimates
-  -> CLI + model ExecutionProfile routing
-  -> parallel Supervisor/queue architecture spike
-  -> shared hierarchical admission broker with fixed limits
-  -> parallel queue + Plan-wave v0, warm start 3
-  -> measured adaptive ramp/backoff
+  -> live first-run identity + failed-attempt path audit (implemented)
+  -> healthy budget continuation + deadline extension (implemented)
+  -> queue manual adoption / OperatorResolution (implemented)
+  -> deadline fixture stability (implemented)
+  -> telemetry-backed task estimates (design only)
+  -> WorkerLease persisted at spawn + controller owner-death recovery (NEXT)
+  -> secret-free ProfileCatalog + real endpoint/account binding activation
+  -> per-run Supervisor ownership + short control-store locks
+  -> fixed hierarchical admission for queue items + Plan ready waves
+  -> Windows Job Object ProcessOwnerProvider
+  -> telemetry-backed dynamic routing score + adaptive ramp/backoff
+  -> parallel queue + Plan-wave v0
   -> stable local Control API + DSH better-sidebar cockpit
   -> DesignRevision + EvidenceBundle/verdict
   -> look-ahead foreground controller
   -> bounded soak
   -> daemon/launchd/systemd decision
 ```
+
+Adoption and the deadline fixture are closed. They do **not** authorize
+parallel dispatch, profile activation, admission, Windows parity or dynamic
+scoring; those remain separate prerequisites in the order above.
 
 The controller is an event-loop over durable files. It must rehydrate from
 disk on every cycle and must not depend on an LLM's context staying alive.
@@ -53,6 +67,36 @@ The controller is deliberately late: it automates scheduling and acceptance,
 so those semantics must be correct first. Routing, parallel admission and
 entry selection are specified in
 [PRODUCT_STRATEGY_V2.md](PRODUCT_STRATEGY_V2.md).
+
+## Implemented since this plan was recorded
+
+### Queue manual adoption v1 (2026-10-28)
+
+`queue adopt <queue-id> --repo <path> --run <run-id> --artifact
+<full-git-sha> --evidence <evidence.json> --approved-by <operator> --reason
+<text>` closes one blocked item after a human reviewed and integrated its
+work. The source blocked/interrupted `RunManifest` remains historical truth;
+the queue stores a separately versioned `OperatorResolution` in `queue.json`
+and appends a bounded `queue.item.adopted` event. `queue status` reports
+`completion: "adopted"` while retaining the blocked run and its unaccepted
+tasks.
+
+Preconditions are fail-closed: exact `lastRunId`, unchanged frozen contracts
+(and approved Plan for Plan-backed items), a full reviewed commit that
+descends from the pinned base and is contained by current `HEAD`, and bounded
+secret-free review evidence with at least one successful command. Re-adoption
+is idempotent only for a byte-identical resolution identity; any difference is
+rejected. Plan-backed dependants record `upstreamAdoptedCommit` and use the
+reviewed commit as their base unless a valid completed upstream integration
+head contains it.
+
+Measured on integration HEAD `ce1157a`: build exit `0`; queue-adoption focused
+**8/8** (2539.7 ms); deadline-extension focused **13/13** (23601.98 ms); full
+suite **371/371** (24411.1 ms, 0 fail). Evidence:
+[evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md).
+
+This slice does **not** implement WorkerLease at spawn, owner-death recovery,
+profile activation, admission, parallel dispatch, Windows parity or a daemon.
 
 ## Immediate next slices
 
@@ -159,8 +203,9 @@ state. No automatic retry, routing, admission or parallel dispatch is
 introduced. The Claude adapter's pre-existing bounded transient retry is
 unchanged; after exhaustion it returns the final structured failure.
 
-Measured: focused failure/cost 50/50, full suite 290/290, `npm run build`
-exit 0. Evidence:
+Measured at that slice: focused failure/cost 50/50, full suite 290/290,
+`npm run build` exit 0. The current integrated suite is **371/371**
+(2026-10-28, HEAD `ce1157a`). Evidence:
 [evidence/FAILURE_COST_TRUTH.md](evidence/FAILURE_COST_TRUTH.md).
 
 ### 4. Audited attempt-policy recovery (P1)
@@ -174,7 +219,30 @@ cliyard queue extend-attempts <id> --to <n> --reason <text>
 It should persist who/what changed the policy, old/new values, timestamp and
 reason, while still requiring `queue retry` before another dispatch.
 
-### 5. `execution-profile-routing-v0` (P0)
+### 5. WorkerLease at spawn + owner-death recovery (P0, next)
+
+This is the safety prerequisite for every later parallel slice. Persist a
+durable `WorkerLease` as soon as the worker identity exists, not after
+`collect()` returns. The lease must record run/task/attempt/profile, the
+controller's pid/host/process identity, the worker's pid/pgid/OS start
+identity/capture mode, workspace, timestamps and cleanup state.
+
+Controller-death policy:
+
+- a new controller reads the lease and verifies exact worker identity;
+- if the owned group is alive: terminate only that exact group, preserve the
+  worktree and prior evidence, and resume through an explicit new attempt or
+  provider-session continuation;
+- if the group is gone: inspect artifacts and verify only what can be proven;
+- ambiguous identity or cleanup: `needs_human`; never guess from pid, pgid or
+  process name alone.
+
+Reattaching to an orphaned CLI's old stdout is not a v1 promise. If the worker
+must outlive the controller, that requires an external guardian/OS service
+manager and a separate evidence protocol. No durable `WorkerLease` or
+owner-death recovery exists today, and manual adoption is not a substitute.
+
+### 6. `ProfileCatalog` + real binding activation (P0 after WorkerLease)
 
 Model the three real deployment shapes:
 
@@ -182,21 +250,25 @@ Model the three real deployment shapes:
 - many models + one usable CLI;
 - one model + many CLIs.
 
-Routing is deterministic feasibility filtering, scoring and binding selection;
-an LLM may recommend but does not own the decision. Persist runtime,
-endpoint/account binding, model, capabilities, health, quota/concurrency
-observations, balance/price states, estimated/actual cost and fallback in the
-dispatch provenance. Unknown capacity, balance or price is an explicit state
-and cannot inherit a public nominal number from the model name. See
+Routing is deterministic feasibility filtering and binding selection; an LLM
+may recommend but does not own the persisted decision. A selected profile is
+**not** proof that an endpoint or account was activated: the adapter must
+return or persist a binding activation result before dispatch. Persist runtime,
+endpoint/account binding, model, capabilities, health, observed
+quota/concurrency, balance/price states, cost and fallback in dispatch
+provenance. Unknown capacity, balance or price is an explicit state and cannot
+inherit a public nominal number from the model name. Dynamic scoring stays
+disabled until activation and fixed admission are measured. See
 [PRODUCT_STRATEGY_V2.md](PRODUCT_STRATEGY_V2.md#4-execution-model).
 
-### 6. Parallel Supervisor/queue spike (P0)
+### 7. Parallel Supervisor/queue spike (P0 after WorkerLease and activation)
 
-Current queue and Supervisor are sequential and repo-global. Before implementing
-parallel dispatch, choose between per-item isolated control clones and
-per-run Supervisor ownership with short Git-control locks. Define multiple
-`running` items, independent run manifests/worktrees/branches, provider/model
-slots, runtime/port leases, blocked isolation and independent crash recovery.
+Current queue and Supervisor are sequential and repo-global. Only after
+WorkerLease/owner-death recovery and real profile activation, choose between
+per-item isolated control clones and per-run Supervisor ownership with short
+Git-control locks. Define multiple `running` items, independent run
+manifests/worktrees/branches, provider/model slots, runtime/port leases,
+blocked isolation and independent crash recovery.
 
 This is the direct replacement for the developer's multiple terminal-tab
 workflow. See
@@ -218,7 +290,17 @@ paths are safe only when a transitive dependency makes the tasks serialize;
 otherwise they must be rejected or routed through a future integration
 envelope.
 
-### 7. Dynamic admission calibration (P0 after fixed admission)
+### 8. Fixed hierarchical admission (P0 after profile activation and per-run ownership)
+
+Admission must be conjunctive across queue-item slot, task slot,
+execution-profile slot, runtime/device slot, port/browser/database lease and
+budget/host capacity. Multiple local maxima must never multiply into an
+unbounded worker burst. An unknown profile starts with one in-flight probe,
+not a public nominal concurrency value. Add fixed limits for both queue items
+and Plan ready waves before any adaptive policy; this is the last gate before
+bounded parallel dispatch.
+
+### 9. Dynamic admission calibration (P0 after fixed admission)
 
 Implement a shared broker before enabling adaptive scaling. It must combine:
 
@@ -237,7 +319,7 @@ quota and price remain binding-specific and may be `unknown`.
 The detailed design is
 [design/dynamic-parallel-admission-v0.md](../design/dynamic-parallel-admission-v0.md).
 
-### 8. `foreground-controller-v0` (P1)
+### 10. `foreground-controller-v0` (P1)
 
 Add a finite-process controller command, tentatively:
 
@@ -286,9 +368,16 @@ considered as an external process-lifecycle concern.
 | P0 | No stable client-neutral Control API | Current DSH plugin reads a batch ledger and starts its own monitor | DSH becomes a de facto entry dependency and cannot show complete authority state | versioned local API + SSE/NDJSON |
 | P0 | Provider failures are not machine-classified | Three documentation attempts ended after several minutes with only `worker failed`; no final `is_error` or budget classification was retained | Cannot distinguish budget, network, provider protocol or worker failure automatically | **Closed by failure/cost v0:** durable ten-category `FailureRecord` plus bounded final provider detail |
 | P0 | The default `$5` budget limit was discovered by repeated provider exits | The same docs task completed only after increasing budget to `$12` | Wasted attempts/time and nearly exhausted queue retry budget | **Closed by failure/cost v0:** `budget_exhausted` category; per-task `guardBudgetUsd` records the configured guard (not spend) |
-| P0 | First active queue dispatch has no bound run id | Real run showed `status=running`, `attempts=1`, but queue `run=null`; Supervisor held the actual run | Operator must leave the single control view; unsafe once multiple runs exist | Pass a preallocated run id into Supervisor start and bind it before worker execution |
-| P0 | Failed attempts can retain files outside frozen write scope | A budget-exhausted docs attempt left `NEXT_STEP_CONTROLLER.md.tmp...` in its reusable worktree | Retry may inherit non-contract artifacts; normal path gate was skipped by non-zero exit | Audit paths after every worker exit and re-audit reused worktrees before start |
-| P1 | Budget and time cannot be extended from healthy live state | Real tasks exhausted guards; current CLI exposes failure only at exit and the Supervisor has no extension control path | Operators retry a whole attempt and lose/reconstruct context | Same-session budget continuation after clean exhaustion; health-gated deadline extension; both preauthorized and audited |
+| P0 | First active queue dispatch has no bound run id | Real run showed `status=running`, `attempts=1`, but queue `run=null`; Supervisor held the actual run | Operator must leave the single control view; unsafe once multiple runs exist | **Closed by queue run binding v0:** the run id is bound before worker execution (see [evidence/QUEUE_RUN_BINDING.md](evidence/QUEUE_RUN_BINDING.md)) |
+| P0 | Failed attempts can retain files outside frozen write scope | A budget-exhausted docs attempt left `NEXT_STEP_CONTROLLER.md.tmp...` in its reusable worktree | Retry may inherit non-contract artifacts; normal path gate was skipped by non-zero exit | **Closed by worker exit path audit v0:** paths are audited after every worker exit and reused worktrees are re-audited (see [evidence/WORKER_EXIT_PATH_AUDIT.md](evidence/WORKER_EXIT_PATH_AUDIT.md)) |
+| P1 | Budget and time cannot be extended from healthy live state | Real tasks exhausted guards; current CLI exposes failure only at exit and the Supervisor has no extension control path | Operators retry a whole attempt and lose/reconstruct context | **Closed by continuation v0:** same-session budget continuation and health-gated deadline extension are preauthorized and audited (see [evidence/BUDGET_CONTINUATION.md](evidence/BUDGET_CONTINUATION.md), [evidence/DEADLINE_EXTENSION.md](evidence/DEADLINE_EXTENSION.md)) |
+| P0 | A blocked run had no formal reviewed-work resolution | Operators manually merged reviewed work while the RunManifest stayed blocked | Ad-hoc recovery could hide the original failure or fake task acceptance | **Closed by queue manual adoption v1:** separate versioned `OperatorResolution`; source RunManifest remains historical truth (see [evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md)) |
+| P0 | No durable worker identity is written at spawn | Process-group cleanup exists, but ownership is not recoverable if cliyard itself is `SIGKILL`ed | A detached worker group cannot be safely reattached or terminated by a new controller | **Next:** persist `WorkerLease` at spawn; exact-identity owner-death recovery; ambiguous identity `needs_human` |
+| P0 | Controller death has no recovery policy | `SIGKILL` cannot run in-process cleanup; `active.json`/process name alone do not prove worker ownership | Unattended parallel work could leave orphan groups or kill the wrong process | Same WorkerLease slice: verify identity, terminate only the owned group, preserve worktree/evidence |
+| P0 | No profile catalog or real binding activation | Queue items carry `worker`/optional `model`; selection is not proof an endpoint/account is active | Routing would choose a label without a measured activation result | Secret-free `ProfileCatalog` + adapter activation result before dispatch |
+| P0 | No fixed hierarchical admission | Queue items are dispatched one at a time; intra-item waves lack shared caps | Enabling parallel dispatch would multiply local maxima into an unbounded burst | Fixed conjunctive admission for queue items + Plan ready waves; unknown profile starts at one probe |
+| P2 | Windows process-tree ownership is absent | Runtime group semantics are proven on macOS only; no Job Object provider | Windows parity cannot be claimed | Windows Job Object `ProcessOwnerProvider` after WorkerLease/profile/fixed admission |
+| P2 | Routing scores have no measured telemetry | No provider-reported cost, quota or stable telemetry history exists | Dynamic scoring would optimize unmeasured labels | Deterministic scoring only after activation, fixed admission and measured telemetry |
 | P1 | Task estimates are static heuristics rather than telemetry | Estimated L tasks `$8 / 6–15 min`; real attempts exhausted `$10` or `$5` guards and several tasks needed continuation | Misleading budget/time expectations and poor admission inputs | [task-estimation-v1.md](../design/task-estimation-v1.md): LLM supplies complexity signals, controller calculates calibrated ranges |
 | P0 | Attempt maximum cannot be changed through an audited command | During recovery, `maxAttempts` was manually changed from 3 to 4 in `.cliyard/queue.json` | Operator recovery bypasses a first-class control-plane path | audited `extend-attempts` command |
 | P1 | Provider session restarts are not first-class UI state | One queue attempt moved to a new worker session id and appended to the same task event file | Requires inspecting raw JSONL to understand whether the worker revived | session-generation events and aggregate status |
@@ -307,6 +396,9 @@ considered as an external process-lifecycle concern.
 - Progress, heartbeats, controller state and queue events never grant
   acceptance.
 - RunManifest remains task authority; queue remains dispatch coordination.
+- A blocked/interrupted RunManifest is historical truth. Manual adoption writes
+  a separate versioned `OperatorResolution`; it never rewrites the run, marks
+  its tasks accepted, or pretends the worker succeeded.
 - Verifier rejection always requires inspection, repair or explicit retry.
 - Automatic retry must be narrower than the queue's generic retry action and
   must have a reason code, attempt bound and audit record.
@@ -326,15 +418,26 @@ The controller slice is ready to start when:
 3. Operator-driven attempt extension is audited and does not dispatch by
    itself. **Not implemented.**
 4. The monitoring projection is demonstrably read-only. **Implemented.**
-5. The existing 290-test suite remains green.
-6. Execution routing can select CLI and model separately from current
-   endpoint/model/runtime capability and availability.
-7. Multiple queue items can be recovered independently and bounded by explicit
-   provider/model/runtime/resource admission.
-8. Intra-item ready waves have bounded task concurrency and are observable in
-   the same status projection as queue-item concurrency.
-9. Admission combines host/provider/runtime capacity and explains the binding
-   limit; the warm-start value 3 is not hardcoded as a permanent cap.
+5. The existing suite remains green. **Implemented** at **371/371**
+   (2026-10-28, HEAD `ce1157a`).
+6. A durable `WorkerLease` is persisted at spawn, and exact-identity
+   owner-death recovery is measured, including `needs_human` for ambiguous
+   ownership. **Not implemented; next prerequisite.**
+7. A secret-free `ProfileCatalog` and real endpoint/account binding activation
+   are measured. **Not implemented.**
+8. Execution routing can select CLI and model separately from current
+   endpoint/model/runtime capability and availability. **Not implemented.**
+9. Fixed hierarchical admission bounds multiple queue items and intra-item
+   ready waves; an unknown profile starts at one in-flight probe.
+   **Not implemented.**
+10. Admission combines host/provider/runtime capacity and explains the binding
+    limit; the warm-start value 3 is not hardcoded as a permanent cap.
+    **Not implemented.**
+11. Queue manual adoption closes a reviewed blocked item without rewriting the
+    source RunManifest or accepting its tasks. **Implemented.**
+12. Windows Job Object parity and dynamic scoring are not controller-start
+    prerequisites, but neither may be represented as done. **Not implemented.**
 
-Conditions 1, 2, 4 and 5 are met. Conditions 3 and 6-9 remain open; the
-controller is not ready to start.
+Conditions 1, 2, 4, 5 and 11 are met. Conditions 3 and 6-10 and 12 remain
+open; the controller is not ready to start. Parallel work must not begin
+before conditions 6-10 are measured.
