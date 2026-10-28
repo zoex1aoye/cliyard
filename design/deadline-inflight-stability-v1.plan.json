@@ -1,0 +1,44 @@
+{
+  "planId": "deadline-inflight-stability-v1",
+  "tasks": [
+    {
+      "taskId": "stabilize-inflight-deadline-grant",
+      "goal": "Fix the independently observed flake in tests/deadline-extension.test.ts test `collect waits for an in-flight grant checkpoint past child exit`, recorded in design/deadline-inflight-stability-v1.md. The focused test passes alone, but full npm test under normal local load failed once because a fixed 2,000ms wait for callbackStarted elapsed before the child/event-loop callback became observable. Diagnose whether this is fixture timing or a production deadline-state race. Make the test deterministic by synchronizing on an explicit extension callback signal or repeated marker with a separately generous diagnostic deadline rather than racing startup against a fixed short assertion window. Preserve the exact semantics: collect must remain pending after child exit while grant persistence is unresolved; the callback must observe cumulativeTimeoutMs 2600; after release, the same single extension permits a successful result. Keep the existing late-result timeout regression and all other deadline tests. If, and only if, a deterministic reproduction proves src/agents/claude.ts has a real race, make the narrowest production fix and explain it in code comments. Do not skip, delete, mark todo, or weaken the test. Run build, the full deadline-extension file repeatedly enough to demonstrate stability, and the complete test suite.",
+      "nonGoals": [
+        "Do not weaken timeout-after-deadline behavior.",
+        "Do not remove or skip the flaky test.",
+        "Do not add arbitrary long sleeps as the primary synchronization.",
+        "Do not change adoption, journal, routing or queue semantics.",
+        "Do not edit unrelated tests."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "design/deadline-inflight-stability-v1.md",
+        "src/agents/claude.ts",
+        "tests/deadline-extension.test.ts",
+        "docs/evidence/DEADLINE_EXTENSION.md"
+      ],
+      "writePaths": [
+        "src/agents/claude.ts",
+        "tests/deadline-extension.test.ts"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "node --import tsx --test tests/deadline-extension.test.ts",
+        "npm test"
+      ],
+      "deliverables": [
+        "The in-flight grant test synchronizes without a startup race.",
+        "The production deadline and persistence semantics remain unchanged unless a proven race is fixed.",
+        "The focused file and full suite pass independently."
+      ],
+      "forbidden": [
+        "Do not mark the test skipped or todo.",
+        "Do not change files outside writePaths.",
+        "Do not suppress a real bind or process failure."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}

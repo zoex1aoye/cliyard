@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "profileId": "deadline-inflight-claude-deepseek",
+  "runtimeId": "claude",
+  "modelId": "deepseek-flash",
+  "providerId": "deepseek",
+  "endpointRef": "deepseek-claude-default"
+}

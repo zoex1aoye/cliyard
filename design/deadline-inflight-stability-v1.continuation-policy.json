@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "deadlineExtension": {
+    "version": 1,
+    "baseTimeoutMs": 900000,
+    "extensionStepMs": 600000,
+    "maxExtensions": 2,
+    "maxTotalTimeoutMs": 2100000,
+    "healthyActivityWindowMs": 120000,
+    "autoExtend": true
+  },
+  "budgetContinuation": {
+    "version": 1,
+    "baseGuardUsd": 8,
+    "continuationGuardUsd": 4,
+    "maxContinuations": 2,
+    "maxCumulativeGuardUsd": 16,
+    "autoContinue": true,
+    "overshootReserveUsd": 2
+  }
+}
