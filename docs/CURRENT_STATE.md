@@ -39,6 +39,14 @@ self-host controller loaded the new code.
 - The v1.2 implementation draft is `fac4606`; its cutover run
   `3b07e58b-57a7-48d8-84cd-d6818478884a` completed with accepted evidence and
   integration head `7b4544f`. It is merged into the mainline by `14db47f`.
+- EvidenceBundle/Harness Eval implementation run `0517d3ba` remains blocked
+  history. Both root drafts completed full 473/473 locally, but the outer
+  manager reused a vanished nested-group leader PID and rejected cleanup with
+  `residualCount=0`.
+- The reviewed continuation base `1294869` contains draft `a026345`
+  (EvidenceBundle), draft `91369d4` (Eval core), and a focused pid-reuse cleanup
+  fix. That base passes focused 29/29, build and full 483/483; it is not yet an
+  accepted integration.
 - Post-merge build passed. The first complete-suite run was **463/464** because
   the deadline-extension in-flight checkpoint timed out once; that file then
   passed **13/13**, and a second complete run passed **464/464**. This is an
