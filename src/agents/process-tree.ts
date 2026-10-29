@@ -21,9 +21,15 @@
  *   by `setsid`), a re-listed membership that still belongs to it, and proof
  *   that the group is not cliyard's own group. Anything less fails closed.
  * - A nested external-group signal additionally requires a persisted exact
- *   leader identity, a fresh `capture(leader.pid)` match, and a fresh
- *   membership listing whose leader row still matches. The group is signalled
- *   as one unit; its members are never individual signal authority.
+ *   leader identity, a fresh exact match from a bounded process-table
+ *   projection (or `capture(leader.pid)` for the legacy single-group
+ *   inspector), and a fresh membership projection whose leader row still
+ *   matches. The group is signalled as one unit; its members are never
+ *   individual signal authority.
+ * - When bounded process-table snapshots are available, every observed pgid is
+ *   projected from one snapshot per cleanup phase instead of one full `ps -A`
+ *   membership listing per group. The legacy per-group inspector path remains
+ *   for inspectors without snapshots.
  * - Descendant snapshots are rooted at the worker leader and are used only
  *   when its exact identity still matches; a reused pid never contributes
  *   descendants.
@@ -396,6 +402,17 @@ interface NestedGroupCleanupOutcome {
   observed: number;
   signalled: number;
   residual: number;
+  failure?: string;
+}
+
+/**
+ * Per-group state while table-batched cleanup moves through its snapshot
+ * phases. `signalled` means at least one group signal was attempted; `gone`
+ * is set only when a fresh snapshot no longer contains the group.
+ */
+interface TableGroupOutcome {
+  gone: boolean;
+  signalled: boolean;
   failure?: string;
 }
 
@@ -1332,6 +1349,11 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
    * Clean every exact-led external group as one guarded unit. Groups run
    * concurrently so the bounded term/kill grace applies once, not once per
    * group. Any group that cannot be proven gone stays residual.
+   *
+   * With bounded process-table snapshots available, all observed pgids are
+   * projected from one snapshot per cleanup phase. A high-fanout external group
+   * set therefore never launches one full `ps -A` listing per group. Inspectors
+   * without snapshots keep the exact single-group path.
    */
   private async cleanNestedGroups(
     managedPgid: number,
@@ -1358,6 +1380,11 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     } catch {
       ownGroupId = undefined;
     }
+    if (this.manager.descendantInspection) {
+      return this.cleanNestedGroupsFromTable(groups, managedPgid, ownGroupId);
+    }
+    // Legacy fallback: no bounded snapshot source, so inspect one group at a
+    // time. Exact identity and membership guards are unchanged.
     const results = await Promise.all(
       groups.map((group) =>
         this.cleanNestedGroup(group, managedPgid, ownGroupId),
@@ -1381,6 +1408,394 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
       residual,
       ...(failure !== undefined ? { failure } : {}),
     };
+  }
+
+  /**
+   * Table-batched external-group cleanup.
+   *
+   * Each phase takes one bounded snapshot and projects exact leader identity
+   * plus membership for every observed pgid: initial inspection, the TERM
+   * wait, escalation revalidation and the KILL wait. No per-group listing or
+   * per-group leader capture runs on this path. A snapshot failure, a missing
+   * leader with members remaining, a changed/reused identity and an unclean
+   * group all stay residual and fail the cleanup closed.
+   */
+  private async cleanNestedGroupsFromTable(
+    groups: readonly WorkerNestedGroup[],
+    managedPgid: number,
+    ownGroupId: number | undefined,
+  ): Promise<NestedGroupCleanupOutcome> {
+    const outcomes = new Map<number, TableGroupOutcome>();
+    const fail = (
+      group: WorkerNestedGroup,
+      failure: string,
+      signalled = false,
+    ): void => {
+      outcomes.set(group.pgid, { gone: false, signalled, failure });
+    };
+
+    // Phase 1: leader identity and membership for every pgid from one table.
+    let memberships: Map<number, ProcessTableEntry[]>;
+    try {
+      memberships = await this.snapshotGroupMemberships(
+        groups.map((group) => group.pgid),
+      );
+    } catch (error) {
+      for (const group of groups) {
+        fail(
+          group,
+          `cannot snapshot external process groups: ${errorText(error)}`,
+        );
+      }
+      return this.summarizeTableGroups(groups, outcomes);
+    }
+
+    const awaitingTerm: WorkerNestedGroup[] = [];
+    const vanishedOnTerm: WorkerNestedGroup[] = [];
+    for (const group of groups) {
+      const inspection = await this.inspectGroupRows(
+        group,
+        memberships.get(group.pgid) ?? [],
+        managedPgid,
+        ownGroupId,
+        "inspect",
+      );
+      if (!inspection.ok) {
+        fail(group, inspection.reason);
+        continue;
+      }
+      if (inspection.gone) {
+        outcomes.set(group.pgid, { gone: true, signalled: false });
+        continue;
+      }
+      const term = this.signalNestedGroup(group.pgid, "SIGTERM");
+      if (term === "error") {
+        fail(group, `SIGTERM to external group ${group.pgid} failed`);
+        continue;
+      }
+      if (term === "gone") {
+        // ESRCH alone never proves a group gone: a fresh projection must still
+        // show that no member remains.
+        vanishedOnTerm.push(group);
+        continue;
+      }
+      awaitingTerm.push(group);
+    }
+
+    if (vanishedOnTerm.length > 0) {
+      let verification: Map<number, ProcessTableEntry[]>;
+      try {
+        verification = await this.snapshotGroupMemberships(
+          vanishedOnTerm.map((group) => group.pgid),
+        );
+      } catch (error) {
+        for (const group of vanishedOnTerm) {
+          fail(
+            group,
+            `external group ${group.pgid} disappeared and could not be ` +
+              `re-inspected: ${errorText(error)}`,
+          );
+        }
+        verification = new Map();
+      }
+      for (const group of vanishedOnTerm) {
+        if (outcomes.has(group.pgid)) continue;
+        const rows = verification.get(group.pgid) ?? [];
+        if (rows.length === 0) {
+          outcomes.set(group.pgid, { gone: true, signalled: false });
+        } else {
+          fail(
+            group,
+            `external group ${group.pgid} disappeared while member(s) remain`,
+          );
+        }
+      }
+    }
+
+    await this.settleTerminatedGroups(
+      awaitingTerm,
+      managedPgid,
+      ownGroupId,
+      outcomes,
+    );
+    return this.summarizeTableGroups(groups, outcomes);
+  }
+
+  /**
+   * Wait for TERM'd groups from shared snapshots, then revalidate each
+   * survivor's exact leader and membership before a guarded SIGKILL.
+   */
+  private async settleTerminatedGroups(
+    groups: readonly WorkerNestedGroup[],
+    managedPgid: number,
+    ownGroupId: number | undefined,
+    outcomes: Map<number, TableGroupOutcome>,
+  ): Promise<void> {
+    if (groups.length === 0) return;
+    const wait = await this.waitForGroupsEmpty(groups, this.manager.termGraceMs);
+    if (wait.error !== undefined) {
+      for (const group of groups) {
+        outcomes.set(group.pgid, {
+          gone: false,
+          signalled: true,
+          failure:
+            `external group ${group.pgid} became uninspectable after ` +
+            `SIGTERM: ${wait.error}`,
+        });
+      }
+      return;
+    }
+    const survivors: WorkerNestedGroup[] = [];
+    for (const group of groups) {
+      if (wait.survivors.has(group.pgid)) survivors.push(group);
+      else outcomes.set(group.pgid, { gone: true, signalled: true });
+    }
+    if (survivors.length === 0) return;
+
+    // One fresh snapshot supplies both the exact leader revalidation and the
+    // kill-phase membership guard for every survivor.
+    const awaitingKill: WorkerNestedGroup[] = [];
+    const vanishedOnKill: WorkerNestedGroup[] = [];
+    for (const group of survivors) {
+      const inspection = await this.inspectGroupRows(
+        group,
+        wait.survivors.get(group.pgid) ?? [],
+        managedPgid,
+        ownGroupId,
+        "escalate",
+      );
+      if (!inspection.ok) {
+        outcomes.set(group.pgid, {
+          gone: false,
+          signalled: true,
+          failure: inspection.reason,
+        });
+        continue;
+      }
+      if (inspection.gone) {
+        outcomes.set(group.pgid, { gone: true, signalled: true });
+        continue;
+      }
+      const kill = this.signalNestedGroup(group.pgid, "SIGKILL");
+      if (kill === "error") {
+        outcomes.set(group.pgid, {
+          gone: false,
+          signalled: true,
+          failure: `SIGKILL to external group ${group.pgid} failed`,
+        });
+        continue;
+      }
+      if (kill === "gone") {
+        vanishedOnKill.push(group);
+        continue;
+      }
+      awaitingKill.push(group);
+    }
+
+    if (vanishedOnKill.length > 0) {
+      let verification: Map<number, ProcessTableEntry[]>;
+      try {
+        verification = await this.snapshotGroupMemberships(
+          vanishedOnKill.map((group) => group.pgid),
+        );
+      } catch (error) {
+        for (const group of vanishedOnKill) {
+          outcomes.set(group.pgid, {
+            gone: false,
+            signalled: true,
+            failure:
+              `external group ${group.pgid} disappeared and could not be ` +
+              `re-inspected after SIGKILL: ${errorText(error)}`,
+          });
+        }
+        verification = new Map();
+      }
+      for (const group of vanishedOnKill) {
+        if (outcomes.has(group.pgid)) continue;
+        if ((verification.get(group.pgid) ?? []).length === 0) {
+          outcomes.set(group.pgid, { gone: true, signalled: true });
+          continue;
+        }
+        outcomes.set(group.pgid, {
+          gone: false,
+          signalled: true,
+          failure:
+            `external group ${group.pgid} disappeared while member(s) remain`,
+        });
+      }
+    }
+
+    if (awaitingKill.length === 0) return;
+    const afterKill = await this.waitForGroupsEmpty(
+      awaitingKill,
+      this.manager.killGraceMs,
+    );
+    if (afterKill.error !== undefined) {
+      for (const group of awaitingKill) {
+        outcomes.set(group.pgid, {
+          gone: false,
+          signalled: true,
+          failure:
+            `external group ${group.pgid} became uninspectable after ` +
+            `SIGKILL: ${afterKill.error}`,
+        });
+      }
+      return;
+    }
+    for (const group of awaitingKill) {
+      const rows = afterKill.survivors.get(group.pgid);
+      if (rows === undefined) {
+        outcomes.set(group.pgid, { gone: true, signalled: true });
+      } else {
+        outcomes.set(group.pgid, {
+          gone: false,
+          signalled: true,
+          failure:
+            `external group ${group.pgid} still has ${rows.length} member(s) ` +
+            "after SIGKILL",
+        });
+      }
+    }
+  }
+
+  /**
+   * Re-prove one persisted group from a fresh projection. The leader row must
+   * exist with the exact persisted `(pid, pgid, startedAt)`, membership must
+   * still belong to the group, and the group must be provably distinct from
+   * cliyard's and the managed worker's group. Anything less fails closed.
+   */
+  private async inspectGroupRows(
+    group: WorkerNestedGroup,
+    rows: readonly ProcessTableEntry[],
+    managedPgid: number,
+    ownGroupId: number | undefined,
+    phase: "inspect" | "escalate",
+  ): Promise<{ ok: true; gone: boolean } | { ok: false; reason: string }> {
+    const pgid = group.pgid;
+    if (rows.length === 0) return { ok: true, gone: true };
+    const leaderRow = rows.find((row) => row.pid === pgid);
+    if (!leaderRow) {
+      return {
+        ok: false,
+        reason:
+          phase === "escalate"
+            ? `external group ${pgid} leader identity is no longer exact ` +
+              "after SIGTERM; refusing SIGKILL"
+            : `external group ${pgid} leader is absent while ` +
+              `${rows.length} member(s) remain`,
+      };
+    }
+    const observed: RuntimeProcessIdentity = {
+      pid: leaderRow.pid,
+      pgid: leaderRow.pgid,
+      startedAt: leaderRow.startedAt,
+    };
+    if (compareProcessIdentity(group.leader, observed) !== "match") {
+      return {
+        ok: false,
+        reason:
+          phase === "escalate"
+            ? `external group ${pgid} leader identity is no longer exact ` +
+              "after SIGTERM; refusing SIGKILL"
+            : `external group ${pgid} leader identity changed or was reused; ` +
+              "refusing a group signal",
+      };
+    }
+    // The projection guarantees `row.pgid === pgid`; the guard re-checks the
+    // exact leader row, cliyard's own group/id and membership consistency.
+    const guard = await this.nestedGroupSignalAllowed(
+      group.leader,
+      observed,
+      rows,
+      managedPgid,
+      ownGroupId,
+    );
+    if (!guard.ok) return guard;
+    return { ok: true, gone: false };
+  }
+
+  /** Merge per-group phase outcomes into bounded cleanup counters/evidence. */
+  private summarizeTableGroups(
+    groups: readonly WorkerNestedGroup[],
+    outcomes: ReadonlyMap<number, TableGroupOutcome>,
+  ): NestedGroupCleanupOutcome {
+    let signalled = 0;
+    let residual = 0;
+    let failure: string | undefined;
+    for (const group of groups) {
+      const outcome = outcomes.get(group.pgid);
+      if (outcome === undefined) {
+        // Every observed group must reach an outcome. A missing one is an
+        // internal ambiguity, never a clean group.
+        residual += 1;
+        this.residualGroupIds.add(group.pgid);
+        failure ??= `external group ${group.pgid} was not inspected`;
+        continue;
+      }
+      if (outcome.signalled) signalled += 1;
+      if (outcome.gone) continue;
+      residual += 1;
+      this.residualGroupIds.add(group.pgid);
+      failure ??=
+        outcome.failure ?? `external group ${group.pgid} was not proven gone`;
+    }
+    return {
+      observed: groups.length,
+      signalled,
+      residual,
+      ...(failure !== undefined ? { failure } : {}),
+    };
+  }
+
+  /**
+   * Project membership for the requested pgids from one bounded process-table
+   * snapshot, sharing a single `ps -A` scan across every group in a phase.
+   */
+  private async snapshotGroupMemberships(
+    pgids: readonly number[],
+  ): Promise<Map<number, ProcessTableEntry[]>> {
+    const table = await this.manager.snapshotTable({
+      maxEntries: MAX_PROCESS_TABLE_ROWS,
+    });
+    return projectGroupMembers(table, new Set(pgids));
+  }
+
+  /**
+   * Poll one shared snapshot until every group is gone or the grace deadline
+   * passes, and return the last observed membership for each survivor. A
+   * snapshot failure is reported instead of treating an uninspectable group as
+   * gone.
+   */
+  private async waitForGroupsEmpty(
+    groups: readonly WorkerNestedGroup[],
+    graceMs: number,
+  ): Promise<{
+    survivors: Map<number, ProcessTableEntry[]>;
+    error?: string;
+  }> {
+    const pgids = groups.map((group) => group.pgid);
+    const deadline = Date.now() + graceMs;
+    for (;;) {
+      let memberships: Map<number, ProcessTableEntry[]>;
+      try {
+        memberships = await this.snapshotGroupMemberships(pgids);
+      } catch (error) {
+        return { survivors: new Map(), error: errorText(error) };
+      }
+      const survivors = new Map<number, ProcessTableEntry[]>();
+      for (const group of groups) {
+        const rows = memberships.get(group.pgid);
+        if (rows !== undefined && rows.length > 0) {
+          survivors.set(group.pgid, rows);
+        }
+      }
+      if (survivors.size === 0 || Date.now() >= deadline) {
+        return { survivors };
+      }
+      await sleep(
+        Math.min(this.manager.pollMs, Math.max(1, deadline - Date.now())),
+      );
+    }
   }
 
   private async cleanNestedGroup(
@@ -2984,6 +3399,54 @@ function parseNestedCleanup(
       : {}),
     ...(detail !== undefined ? { detail } : {}),
   };
+}
+
+/**
+ * Project per-pgid membership from one bounded process-table snapshot.
+ *
+ * The projection is fail-closed: an oversized table, a duplicate/invalid pid or
+ * a row for a requested group without a complete exact identity invalidates the
+ * whole snapshot, because a silently dropped member would make a live group
+ * look gone. Membership is keyed only by the row's exact pgid.
+ */
+function projectGroupMembers(
+  table: readonly ProcessTableEntry[],
+  pgids: ReadonlySet<number>,
+): Map<number, ProcessTableEntry[]> {
+  if (table.length > MAX_PROCESS_TABLE_ROWS) {
+    throw new Error(
+      `process table exceeds ${MAX_PROCESS_TABLE_ROWS} rows; refusing a ` +
+        "partial group projection",
+    );
+  }
+  const seen = new Set<number>();
+  const memberships = new Map<number, ProcessTableEntry[]>();
+  for (const entry of table) {
+    const entryPid: unknown = entry.pid;
+    if (
+      typeof entryPid !== "number" ||
+      !Number.isInteger(entryPid) ||
+      entryPid <= 0 ||
+      seen.has(entryPid)
+    ) {
+      throw new Error(
+        `process table contains a duplicate or invalid pid ` +
+          `${String(entryPid)}`,
+      );
+    }
+    seen.add(entryPid);
+    if (!pgids.has(entry.pgid)) continue;
+    const identityCandidate: unknown = entry;
+    if (!isProcessIdentity(identityCandidate)) {
+      throw new Error(
+        `process table row for pid ${entryPid} has no exact identity`,
+      );
+    }
+    const rows = memberships.get(entry.pgid);
+    if (rows) rows.push(entry);
+    else memberships.set(entry.pgid, [entry]);
+  }
+  return memberships;
 }
 
 /** `undefined` for absent, `null` for invalid. */
