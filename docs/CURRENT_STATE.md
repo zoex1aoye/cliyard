@@ -38,7 +38,11 @@ self-host controller loaded the new code.
   drafts, not accepted integration.
 - The v1.2 implementation draft is `fac4606`; its cutover run
   `3b07e58b-57a7-48d8-84cd-d6818478884a` completed with accepted evidence and
-  integration head `7b4544f`. This candidate is not merged into the mainline.
+  integration head `7b4544f`. It is merged into the mainline by `14db47f`.
+- Post-merge build passed. The first complete-suite run was **463/464** because
+  the deadline-extension in-flight checkpoint timed out once; that file then
+  passed **13/13**, and a second complete run passed **464/464**. This is an
+  observed flake, not a stable-green claim.
 - No active Supervisor lock, queue lock or WorkerLease remained after the
   cutover. Historic leases include released and cleanup-failed records; they
   must not be erased or rewritten.
@@ -81,7 +85,8 @@ recovery completeness. The independently reviewed focused set is **65/65**,
 build passes and the complete suite is **464/464**.
 
 Cutover run `3b07e58b` loaded Supervisor from that draft, targeted the main
-checkout and produced integration candidate `7b4544f`:
+checkout and produced integration candidate `7b4544f`, now integrated by
+merge commit `14db47f`:
 
 - path audit: only `docs/evidence/NESTED_REGISTRY_LIVE_CLEANUP_V1_2.md`;
 - WorkspaceBoundary: clean;
@@ -90,13 +95,12 @@ checkout and produced integration candidate `7b4544f`:
 - 297 live external groups observed, only 16 persisted;
 - CLI-estimated cost: `$2.006743`, non-authoritative.
 
-This is accepted evidence for a human diff/integration decision, not an
-automatic merge. The evidence document was authored while its Worker was alive,
-so it correctly marks its own terminal cleanup as pending and points to the
-RunManifest. The RunManifest now contains those terminal fields. That mismatch
-is a durable evidence-model gap: final evidence must be synthesized by the
-controller after Worker exit rather than requiring the Worker to predict its own
-post-exit record.
+The evidence document was authored while its Worker was alive, so it correctly
+marks its own terminal cleanup as pending and points to the RunManifest. The
+RunManifest contains those terminal fields. That mismatch is the next durable
+evidence-model gap: final evidence must be synthesized by the controller after
+Worker exit rather than requiring the Worker to predict its own post-exit
+record.
 
 ## Blocked history
 
@@ -122,48 +126,42 @@ neither earlier RunManifest is retroactively accepted.
 
 The order is a dependency order, not a promise of parallel delivery.
 
-1. **Human diff and integration decision for v1.2**
-   Review code draft `fac4606`, cutover evidence `7b4544f` and the remaining
-   controller-owned evidence gap. No automatic merge.
+1. **Controller EvidenceBundle + Harness Eval v0**
+   The next Plan adds a controller-owned final evidence bundle and a repeated,
+   deterministic local Harness eval. It includes the observed deadline flake as
+   a scenario and does not hide missing provider metrics.
 
-2. **Harness Eval v0**  
-   Create repeated, pinned baselines for normal work, high fanout, verifier
-   timeout, controller SIGKILL, path escape, compaction/handoff and budget
-   continuation. Measure pass rate, flipped tasks, requests, tokens, cache,
-   wall time, cost truth and human interventions. Include controller-owned final
-   evidence assembly after Worker exit.
-
-3. **Background VerificationTask**  
+2. **Background VerificationTask**
    Decouple long verification from Worker lifecycle. Persist owner, artifact
    commit, output offset, delivered latch, timeout, liveness and startup
    recovery, with explicit `queued/running/stopping/succeeded/failed/canceled/
    lost` states.
 
-4. **SandboxProvider**  
+3. **SandboxProvider**
    Add a provider-neutral OS isolation boundary. WorkspaceBoundary remains the
    fallback detector. Candidate backends include SPACE, microsandbox and
    platform-native wrappers; Node 22-only permission APIs are not assumed.
 
-5. **Clean-context Reviewer**  
+4. **Clean-context Reviewer**
    Review only the exact diff, approved requirement and bounded test/runtime
    evidence. Persist structured `ReviewFinding` records and verify every finding
    against code before repair.
 
-6. **Human intervention ledger**  
+5. **Human intervention ledger**
    Record Retry, Judge, Approve, Carry, Trigger and Stand-in interventions so
    design work can reduce repeated manual steps without treating silence or
    abandonment as success.
 
-7. **SkillPack provenance**  
+6. **SkillPack provenance**
    Version the rule/skill input by id, digest, entrypoint and capability. A run
    must be able to answer which instructions influenced its behavior.
 
-8. **ProfileCatalog, routing and hierarchical admission**  
+7. **ProfileCatalog, routing and hierarchical admission**
    Route only among activated provider/account/model/CLI bindings. Unknown
    concurrency begins with one probe; CPU/RAM/runtime/port/provider limits apply
    globally to queue items and Plan waves.
 
-9. **Versioned Control API and replaceable UI**  
+8. **Versioned Control API and replaceable UI**
    Stabilize a local API/SSE event model before making DSH or another GUI the
    product entry. UI clients display and request actions; they are never
    authority.
