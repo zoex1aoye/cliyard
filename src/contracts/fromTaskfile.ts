@@ -13,6 +13,11 @@ export interface FromTaskfileOptions {
   maxRepairs?: number;
   /** Applied when taskfile has no verify commands (default []). */
   verifyCommands?: string[];
+  /**
+   * Per-command verifier timeout in ms applied to every generated contract.
+   * Absent keeps the verifier's 30-second default for legacy imports.
+   */
+  verifyTimeoutMs?: number;
   /** Mark contracts frozen for dispatch (default true). */
   frozen?: boolean;
 }
@@ -38,6 +43,7 @@ export function taskItemToContract(
   const maxRepairs = opts.maxRepairs ?? DEFAULTS.maxRepairs;
   const frozen = opts.frozen ?? DEFAULTS.frozen;
   const verifyCommands = opts.verifyCommands ?? [...DEFAULTS.verifyCommands];
+  const verifyTimeoutMs = opts.verifyTimeoutMs;
 
   const writePaths = item.paths?.length ? [...item.paths] : [];
   const contractFiles = file.shared?.contract_files ?? [];
@@ -59,6 +65,7 @@ export function taskItemToContract(
     baseCommit,
     verifyCommands,
     maxRepairs,
+    ...(verifyTimeoutMs === undefined ? {} : { verifyTimeoutMs }),
   };
 
   const result = validateContract(raw);

@@ -6,6 +6,19 @@ import type {
 } from "../runtime/types.js";
 
 /**
+ * Legacy per-command verifier timeout. Contracts without `verifyTimeoutMs`
+ * keep this value so frozen legacy contracts do not change behavior.
+ */
+export const DEFAULT_VERIFY_TIMEOUT_MS = 30_000;
+
+/**
+ * Documented upper bound for an explicit contract `verifyTimeoutMs` (10
+ * minutes). Large enough for a full-suite gate, small enough to keep a stuck
+ * verifier bounded, and well below Node's 2^31-1 ms timer limit.
+ */
+export const MAX_VERIFY_TIMEOUT_MS = 600_000;
+
+/**
  * Frozen dispatch contract (Route C). Validated before mock or real workers run.
  * Aligns with docs/SCAFFOLD_FROM_OSS.md §4 and MVP_IMPLEMENTATION_PLAN §5.
  */
@@ -21,6 +34,13 @@ export interface TaskContract {
   sharedResources: string[];
   baseCommit: string;
   verifyCommands: string[];
+  /**
+   * Optional per-verifyCommand execution timeout in milliseconds, bounded by
+   * MAX_VERIFY_TIMEOUT_MS. Absent keeps DEFAULT_VERIFY_TIMEOUT_MS (30 s).
+   * Runtime readiness is configured separately on
+   * `runtime.services[].readiness.timeoutMs`.
+   */
+  verifyTimeoutMs?: number;
   deliverables?: string[];
   forbidden?: string[];
   maxRepairs: number;
@@ -97,6 +117,7 @@ export function validateContract(raw: unknown): {
   const sharedResources = strArr("sharedResources");
   const baseCommit = str("baseCommit");
   const verifyCommands = strArr("verifyCommands");
+  const verifyTimeoutMs = readVerifyTimeoutMs(o.verifyTimeoutMs, issues);
   const maxRepairs = num("maxRepairs");
   const nonGoals = strArr("nonGoals", false);
   const deliverables = strArr("deliverables", false);
@@ -132,12 +153,40 @@ export function validateContract(raw: unknown): {
       sharedResources: sharedResources!,
       baseCommit: baseCommit!,
       verifyCommands: verifyCommands!,
+      ...(verifyTimeoutMs === undefined ? {} : { verifyTimeoutMs }),
       deliverables: deliverables?.length ? deliverables : undefined,
       forbidden: forbidden?.length ? forbidden : undefined,
       maxRepairs: maxRepairs!,
       ...(runtime === undefined ? {} : { runtime }),
     },
   };
+}
+
+/**
+ * Optional contract field: explicit per-command verifier timeout. `null` and
+ * `undefined` mean legacy behavior (DEFAULT_VERIFY_TIMEOUT_MS at run time).
+ * Anything else must be a positive safe integer within MAX_VERIFY_TIMEOUT_MS.
+ */
+function readVerifyTimeoutMs(
+  value: unknown,
+  issues: ContractIssue[],
+): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value <= 0 ||
+    value > MAX_VERIFY_TIMEOUT_MS
+  ) {
+    issues.push({
+      path: "verifyTimeoutMs",
+      message:
+        "must be a positive safe integer of milliseconds no greater than " +
+        `${MAX_VERIFY_TIMEOUT_MS}`,
+    });
+    return undefined;
+  }
+  return value;
 }
 
 const SERVICE_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;

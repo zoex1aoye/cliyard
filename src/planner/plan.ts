@@ -22,6 +22,11 @@ export interface PlanCompileOptions {
   version?: number;
   /** Repair budget used when a task does not set one (default 1). */
   maxRepairs?: number;
+  /**
+   * Per-command verifier timeout for tasks that do not set their own
+   * `verifyTimeoutMs`. Absent keeps the contract/verifier 30-second default.
+   */
+  verifyTimeoutMs?: number;
 }
 
 export interface CompiledPlan {
@@ -103,6 +108,9 @@ export function compilePlan(
           baseCommit,
           version: opts.version ?? 1,
           maxRepairs: opts.maxRepairs ?? 1,
+          ...(opts.verifyTimeoutMs !== undefined
+            ? { verifyTimeoutMs: opts.verifyTimeoutMs }
+            : {}),
           issues,
         }),
       );
@@ -121,6 +129,7 @@ interface CompileTaskDefaults {
   baseCommit: string;
   version: number;
   maxRepairs: number;
+  verifyTimeoutMs?: number;
   issues: ContractIssue[];
 }
 
@@ -133,6 +142,7 @@ function compileTask(
     baseCommit,
     version,
     maxRepairs: defaultMaxRepairs,
+    verifyTimeoutMs: defaultVerifyTimeoutMs,
     issues,
   } = defaults;
   if (!isRecord(raw)) {
@@ -236,6 +246,11 @@ function compileTask(
     });
   }
 
+  // An explicit task value wins; otherwise the compile-time default applies.
+  // Bounds and integer checks stay in validateContract so Plan and direct
+  // contract loading share one rule.
+  const verifyTimeoutMs = raw.verifyTimeoutMs ?? defaultVerifyTimeoutMs;
+
   const runtime = raw.runtime;
   const result = validateContract({
     taskId: taskId ?? path,
@@ -252,6 +267,7 @@ function compileTask(
     deliverables,
     forbidden,
     maxRepairs: maxRepairsRaw,
+    ...(verifyTimeoutMs === undefined ? {} : { verifyTimeoutMs }),
     ...(runtime === undefined || runtime === null ? {} : { runtime }),
   });
   if (!result.ok) {
