@@ -4,6 +4,11 @@
 >
 > Accepted implementation base:
 > `14db47f8c4b46f1452f70576d65c981ef9b419ce` (the v1.2 merge).
+>
+> Frozen contracts use the docs-only mainline descendant containing this Plan
+> as their exact read-context base. Source and test code at that base remain
+> identical to `14db47f`; no implementation change occurs between the accepted
+> merge and contract freeze.
 
 Self-host provenance: the Supervisor will start from the code accepted at
 `14db47f` while targeting the main checkout. Code produced by this Plan cannot
