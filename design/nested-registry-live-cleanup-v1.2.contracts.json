@@ -1,0 +1,58 @@
+{
+  "planId": "nested-registry-live-cleanup-v1.2",
+  "contracts": [
+    {
+      "taskId": "nested-live-cleanup-separation",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Implement the v1.2 separation between live cleanup completeness and durable controller-death recovery completeness on top of reviewed draft a9d6e00 per design/nested-registry-live-cleanup-v1.2.md. Keep the persisted WorkerLease bounded, but stop letting persistence bounds for groups or ungrouped fallback identities fail a live cleanup when a validated current process-table snapshot can enumerate all currently reachable groups up to the existing 8192-row cap. During live cleanup, build a current in-memory group view independent of the 16-group lease persistence cap; use guarded negative-pgid cleanup for every current external group with fresh exact pid===pgid leader and membership proof, and exact-pid fallback only for truly ungrouped targets. Persist and report truncation separately as durable-recovery completeness. Mark live cleanup failed only for incomplete current inspection, unsafe identity/group proof, over-bound live ungrouped targets, signal failure or residual processes. A truncated persisted registry with a complete live cleanup may produce a released lease whose controller-death recovery evidence is explicitly truncated/needs_human; it must not reject an otherwise successful Worker. Preserve the reviewed exact leader identity, self/own-group guards, status projection, parser compatibility and no-broad-scan rules. Add real POSIX tests with more than 16 external groups and a 512-member group proving live cleanup succeeds and no residual remains while the durable registry is truncated, followed by recover-workers reporting needs_human with no signal from that truncated lease. Add tests that incomplete live inspection still fails closed, unsafe/reused leaders remain untouched and existing exact-fallback/lease/Supervisor behavior remains green. Do not change TaskContract, RunManifest acceptance, verifier timeouts, RuntimeManager, Windows or cross-host behavior."
+      ],
+      "nonGoals": [
+        "Do not make the lease or process scan unbounded.",
+        "Do not weaken exact group leader or membership guards.",
+        "Do not make controller-death recovery act on truncated evidence.",
+        "Do not change verifier timeout policy in this task.",
+        "Do not claim Windows, cross-host or OS write sandbox support.",
+        "Do not automatically accept or merge prior blocked runs."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/nested-registry-live-cleanup-v1.2.md",
+        "design/worker-process-tree-v1.md",
+        "docs/evidence/WORKER_PROCESS_TREE.md",
+        "docs/evidence/WORKER_LEASE.md",
+        "src/agents/process-tree.ts",
+        "src/agents/worker-lease.ts",
+        "src/runtime/process.ts",
+        "tests/worker-process-tree.test.ts",
+        "tests/worker-lease.test.ts"
+      ],
+      "writePaths": [
+        "src/agents/process-tree.ts",
+        "src/agents/worker-lease.ts",
+        "tests/worker-process-tree.test.ts",
+        "tests/worker-lease.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "a18b46ce63e581db886169052c41f6aa82866dbe",
+      "verifyCommands": [
+        "npx tsx --test tests/worker-process-tree.test.ts tests/worker-lease.test.ts",
+        "npm run build",
+        "npm test"
+      ],
+      "deliverables": [
+        "Separate live cleanup completeness from durable recovery completeness in code, status projection and tests.",
+        "Real POSIX evidence for more than 16 external groups, including a 512-member group, with zero residual processes.",
+        "Truncated durable lease recovery that reports needs_human without signalling."
+      ],
+      "forbidden": [
+        "Do not increase the durable lease without a new bounded schema and migration decision.",
+        "Do not treat a group id alone as ownership after controller death.",
+        "Do not make a truncated durable registry reject a proven complete live cleanup.",
+        "Do not use process names, ports or broad process scans as kill authority."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
