@@ -44,12 +44,15 @@ alwaysApply: true
 
 ## 当前下一层
 
-截至 2026-10-28，下一轮安全顺序是：
+截至 2026-10-29，下一轮安全顺序是：
 
-1. controller-death nested process ownership；
-2. provider-neutral `SandboxProvider`，实现 OS 写预防；
-3. secret-free `ProfileCatalog` + 真实 binding activation；
-4. per-run ownership 与 fixed hierarchical admission；
-5. 版本化 Control API/event stream。
+1. v1.2 live cleanup / durable recovery 语义分离；
+2. Harness Eval v0；
+3. 独立生命周期的 background `VerificationTask`；
+4. provider-neutral `SandboxProvider`；
+5. clean-context Reviewer、human intervention ledger 与 `SkillPack` provenance；
+6. ProfileCatalog、动态路由与 hierarchical admission；
+7. 版本化 Control API/event stream 与可替换 UI。
 
-这是优先级，不是已实现声明。动态路由评分、Windows Job Object parity、daemon 和长时间 soak 仍在其后。
+这是优先级，不是已实现声明。动态路由评分、Windows Job Object parity、daemon
+和长时间 soak 仍在其后。当前唯一状态页是 `docs/CURRENT_STATE.md`。

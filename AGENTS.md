@@ -3,6 +3,8 @@
 > 本文件回答“这个仓库是什么、真相在哪里、任务该走哪条流程”。
 > 常驻纪律在 `.agents/rules/`，任务 SOP 在 `.agents/skills/`。
 > `.cursor/rules` 与 `.cursor/skills` 只是指向同一份源的软链接。
+> 当前实现状态、下一步和优先级只以
+> [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) 为准。
 
 ## 1. 项目身份
 
@@ -50,7 +52,8 @@ DSH、WorkBuddy 或未来自有 Web UI 是可替换人机入口；cliyard 负责
 - **Replaceable execution**：按运行时、模型、能力、可用性、额度和历史证据路由；不绑定单一 CLI 或订阅。
 - **Recoverable project**：模型、Worker、Supervisor 或 GUI 可以退出，磁盘上的设计、任务、租约、证据和裁决不能丢。
 - **Current implementation is narrower than the target**：当前 Supervisor 是前台运行、单仓库锁；queue 顺序派发；
-  没有 daemon、无限并行、自动 Plan 批准、自动合入 `main`、跨宿主恢复或 Windows Job Object 等价能力。
+  没有 daemon、无限并行、自动 Plan 批准、自动合入 `main`、跨宿主恢复、完整嵌套进程恢复或
+  Windows Job Object 等价能力。长任务能力不等于已经具备 24 小时连续交付。
 
 ## 4. 任务路由
 
@@ -90,15 +93,24 @@ DSH、WorkBuddy 或未来自有 Web UI 是可替换人机入口；cliyard 负责
 
 ## 6. 当前安全与能力事实
 
-截至 2026-10-28：
+截至 2026-10-29，当前路线已调整为“先可信，再持续”：
 
-- WorkspaceBoundary v1 已验收但尚未合入当前主分支；它是 fail-closed 检测层。
-- WorkerProcessTree v1.1 已验收但尚未合入；它覆盖 live/sampled nested descendants，不覆盖 controller death 后已脱钩的 nested group。
-- 最高优先级仍未闭环项：controller-death nested process ownership、OS write prevention 的
-  provider-neutral `SandboxProvider`、ProfileCatalog/真实 binding activation、per-run ownership 与分层 admission、
-  版本化 Control API/event stream。
-- 完整事实、分支和验证计数只以 [KNOWN_GAPS_2026-10-28.md](docs/KNOWN_GAPS_2026-10-28.md)
-  与相关 evidence 为准；不要把本节的摘要当作动态状态缓存。
+1. v1.2 live cleanup / durable recovery 语义分离；
+2. Harness Eval v0；
+3. 独立生命周期的 background `VerificationTask`；
+4. provider-neutral `SandboxProvider`；
+5. clean-context Reviewer 与结构化 `ReviewFinding`；
+6. audit-first 的 human intervention ledger；
+7. `SkillPack` provenance；
+8. ProfileCatalog、动态路由与分层 admission；
+9. 版本化 Control API 与可替换 UI。
+
+WorkspaceBoundary v1 与 WorkerProcessTree v1.1 已验收但尚未合入当前主分支；
+controller-death nested-process 的 `af76d3a` / `a9d6e00` 是 reviewed draft，
+不是 accepted integration。完整事实、分支、current priority 和 release gate
+只以 [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) 为准；产品理由见
+[design/continuous-harness-v2.md](design/continuous-harness-v2.md)，历史缺口见
+[KNOWN_GAPS_2026-10-28.md](docs/KNOWN_GAPS_2026-10-28.md)。
 
 ## 7. 常用验证
 

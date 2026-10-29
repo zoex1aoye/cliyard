@@ -371,3 +371,29 @@ DSH / 自研 Web / 未来其他 UI 共用这一层。
 
 > **任何 UI 可以关，任何 Worker 可以换，任何模型 session 可以死；项目控制状态、证据和下一步仍然存在。**
 
+## 12. 2026-10-29 boundary correction
+
+The latest self-host attempts and public Harness work add five boundaries to
+the original layer model:
+
+1. Worker lifecycle and verification lifecycle are separate.
+2. A controller may compact or restart; durable state and a bounded handoff,
+   not conversation history, must reconstruct the next action.
+3. Clean-context review is a separate input boundary: exact diff, requirement
+   and test/runtime evidence only.
+4. Harness and prompt changes require repeated controlled evaluation, including
+   flipped-task and human-intervention metrics.
+5. Sandbox, routing and admission are provider-neutral capabilities, not
+   assumptions supplied by a favourably configured Agent CLI.
+
+The proposed objects and dependency order are in
+[continuous-harness-v2.md](../design/continuous-harness-v2.md). Current
+implementation status is in [CURRENT_STATE.md](./CURRENT_STATE.md).
+
+MiniMax Code's background-task module and mcode-stack's `harness-experiment`,
+`independent-review`, `long-command-check` and `handoff-doc` skills are useful
+reference implementations. Omnigent, SPACE and OpenAgentCore/microsandbox are
+sandbox/meta-harness references. Mission Control and Shipyard are observability
+and dev-box lifecycle references. None becomes cliyard's authority or replaces
+the Design-to-Evidence contract.
+

@@ -49,6 +49,26 @@ Harness / Master Shell / Key Mind 的边界、DSH 的可替换性和开源选型
 5. **人只保留设计权与不可逆决策权。**
    人确认视觉方向、关键取舍和最终合入；Supervisor 不应该要求人持续盯进程或重复校准方向。
 
+### 2.1 2026-10-29 连续性校正
+
+“长时间运行”不能只靠一个不遗忘的大上下文。可连续的 Harness 必须把
+Worker、Verifier、Reviewer 和 Controller 拆成不同生命周期，并让每一次状态
+转换都能从磁盘恢复：
+
+```text
+Worker result
+  -> background VerificationTask
+  -> clean-context ReviewFinding
+  -> verdict
+  -> human/integration decision
+  -> next ready task
+```
+
+Compaction、session resume 和 handoff 是正常运行状态。人工的 Retry、Judge、
+Approve、Carry、Trigger 和 Stand-in 需要进入干预账本，才能把重复劳动转化为
+脚本、检查、Skill 或有界自动化。Harness/Prompt/Skill 的变化必须经过重复
+Eval，而不是凭一次成功运行宣称改进。
+
 ## 3. 我们要完成的工作
 
 ### 3.1 设计阶段

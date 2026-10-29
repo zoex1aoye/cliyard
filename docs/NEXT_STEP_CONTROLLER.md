@@ -1,5 +1,13 @@
 # Next Steps: Observability, Routing and Parallel Delivery
 
+> Priority notice, 2026-10-29: the implementation order later in this file is
+> historical design detail and no longer the current priority. Read
+> [CURRENT_STATE.md](./CURRENT_STATE.md) for the authoritative order:
+> v1.2 cleanup/recovery separation -> Harness Eval v0 -> background verifier ->
+> SandboxProvider -> clean reviewer/human ledger/SkillPack -> routing and
+> admission -> Control API/UI. This file remains useful for capability design
+> and failure history.
+>
 > Recorded: 2026-10-27
 >
 > Baseline: `3065ad9` / `selfhost/chained-read-context-complete`

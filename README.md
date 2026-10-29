@@ -4,6 +4,10 @@ Thin orchestrator for coding CLIs: **Windows entry → WSL workers**, capability
 
 North star: stop babysitting AI. **CLI + local Control API = stable product boundary**；**DSH = current MVP cockpit, not the control plane**；cliyard owns contracts, routing, isolation, gates and ledger. State lives on disk—not in a collapsing chat.
 
+**Current status, priority and release gates:** [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md).
+Use that page instead of treating older roadmap lists in individual design and
+evidence documents as the current next step.
+
 **第一步用户故事：** [docs/USER_STORY_STEP1.md](docs/USER_STORY_STEP1.md)  
 **End state (Linus-shaped):** [docs/VISION.md](docs/VISION.md) §3.
 **Product thesis / competitive boundary:** [docs/KEY_MIND.md](docs/KEY_MIND.md).

@@ -1,5 +1,9 @@
 # 开源/商业相邻产品对照（选型纪要）
 
+> 2026-10-29：近期项目对比与路线结论已补到文末；当前优先级只以
+> [CURRENT_STATE.md](./CURRENT_STATE.md) 为准，完整设计见
+> [continuous-harness-v2.md](../design/continuous-harness-v2.md)。
+>
 > 目的：不要假设 cliyard 必须自研完整编排器；先分层看清「已解决什么」，再定差异化。  
 > 与 [VISION.md](./VISION.md)、[MVP_IMPLEMENTATION_PLAN.md](./MVP_IMPLEMENTATION_PLAN.md) 配套。
 > 产品命题、Codex/Claude Code/WorkBuddy/Qwen 边界与更完整的开源支撑矩阵见 [KEY_MIND.md](./KEY_MIND.md)。
@@ -75,3 +79,28 @@
 | 工程认知深度集成 | 需自扩 | 需自扩 | 长期差异化 |
 
 任务样例：两模块需求+原型 → DSH 整理两份 Plan → 并行隔离派 Codex/CodeBuddy → 监控台看 ledger → 人验收。
+
+## 2026-10-29 recent GitHub check
+
+This is a time-bounded comparison based on repository metadata, README,
+release and recent commit inspection. Versions and activity are observations,
+not adoption commitments.
+
+| Project | Observed recent state | Relevant capability | cliyard decision |
+|---|---|---|---|
+| [MiniMax Code](https://github.com/MiniMax-AI/minimax-code) | Open-sourced 2026-10-28; first-party default MIT; active | Detailed background-task lifecycle, output offsets, startup recovery, session cascade, compaction | Borrow lifecycle invariants; do not make it the control plane or raise cliyard from Node 20 |
+| [MiniMax mcode-stack](https://github.com/MiniMax-AI/mcode-stack) | Created 2026-10-28; MIT; active skill/workflow stack | Harness experiments, clean independent review, long-command audit, handoff, lifting loops | Adopt as eval/review methodology and future SkillPack source |
+| [Omnigent](https://github.com/omnigent-ai/omnigent) | v0.20.0 on 2026-10-28; Apache-2.0; alpha | Meta-harness, multi-agent/harness adapters, policy, sandbox providers | Reference interface and policy decomposition; no authority dependency |
+| [SPACE](https://github.com/perplexityai/SPACE) | Active 2026-10-29 updates; Apache-2.0 | Firecracker microVM sandbox over HTTP/SSE, lifecycle and output sessions | Strong candidate behind cliyard `SandboxProvider`; conformance probe first |
+| [Mission Control](https://github.com/builderz-labs/mission-control) | Active 2026-10-28 updates; MIT | Self-hosted task/review/spend/skills control surface, REST/MCP/SSE | UI/read-model reference; not design evidence authority |
+| [Shipyard](https://github.com/cosscom/shipyard) | v0.3.31 on 2026-10-27; active 2026-10-28; MIT | Dev-box daemon, worktrees, terminals, services, automations, desktop GUI | Borrow service persistence/observability patterns; avoid GUI lock-in |
+| [Genie](https://github.com/automagik-dev/genie) | Active 2026-10-28; MIT | Design interview -> parallel worktrees -> independent review -> PR | Closest delivery workflow reference; compare evidence and recovery semantics |
+| [pi-dynamic-workflows](https://github.com/QuintinShaw/pi-dynamic-workflows) | v3.15.0 on 2026-10-27; MIT | Code-mode subagents, journaled resume, worktree, model routing, cost | Reference journal/resume and routing UX; no wholesale adoption |
+| [planning-with-files](https://github.com/OthmanAdi/planning-with-files) | v3.26.0 on 2026-10-28; MIT | File-backed plans, crash recovery, completion gate, subagent isolation | Borrow recovery/completion-gate patterns |
+| [DeerFlow](https://github.com/bytedance/deer-flow) | Highly active 2026-10-29; MIT | Long-horizon harness, RunEvent isolation, model request admission, sandbox/context/subagents | Compare event isolation/admission; avoid large fork |
+
+The market is rapidly covering worktrees, multi-Agent boards, daemons, sandbox
+providers and model routing. Those are no longer sufficient differentiators by
+themselves. cliyard should buy/adapt those layers and keep its investment in
+the deterministic connection between design authority, frozen execution
+boundaries, independent evidence and human integration.

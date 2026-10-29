@@ -160,14 +160,17 @@ npx tsx src/cli.ts supervisor start <target>/design/<id>.contracts.json \
 
 ## Current Priority Guard
 
-截至 2026-10-28，不绕开安全前置直接做动态并行或长驻 daemon。
+截至 2026-10-29，不绕开安全与证据前置直接做动态并行或长驻 daemon。
 
 优先闭环：
 
-1. controller-death nested process ownership；
-2. provider-neutral `SandboxProvider`；
-3. ProfileCatalog + activation；
-4. per-run ownership + hierarchical admission；
-5. versioned Control API/event stream。
+1. v1.2 live cleanup / durable recovery 语义分离；
+2. Harness Eval v0；
+3. background `VerificationTask`；
+4. provider-neutral `SandboxProvider`；
+5. clean-context Reviewer、human intervention ledger 与 `SkillPack`；
+6. ProfileCatalog + routing + hierarchical admission；
+7. versioned Control API/event stream。
 
-在未测量完成前，不宣称 24 小时无人值守、全量并行或 OS 沙箱已具备。
+当前状态和 release gate 只以 `docs/CURRENT_STATE.md` 为准。在未测量完成前，
+不宣称 24 小时无人值守、全量并行或 OS 沙箱已具备。

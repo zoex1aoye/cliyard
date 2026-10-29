@@ -1,5 +1,9 @@
 # Known Gaps and Next Safety Work
 
+> Priority superseded 2026-10-29: use
+> [CURRENT_STATE.md](./CURRENT_STATE.md) for the current order. This file remains
+> the incident and evidence record for the process-ownership investigation.
+>
 > Recorded: 2026-10-28
 >
 > Accepted, not yet merged:
@@ -246,3 +250,20 @@ For subsequent self-host runs:
   while targeting the main checkout;
 - require a non-null guard record for the produced run;
 - keep the worktrees and require manual diff review before merge.
+
+## 2026-10-29 route correction
+
+The v1.2 Plan is approved for implementation but was not frozen at the end of
+this historical investigation. Its reviewed code base is `a9d6e00`; a docs-only
+descendant provides the v1.2 design/Plan read context without changing that
+code lineage. The implementation must preserve the distinction:
+
+```text
+live cleanup completeness
+durable controller-death recovery completeness
+```
+
+After v1.2, the next evidence gap is not ProfileCatalog. It is Harness Eval v0,
+because prompt, Skill, background-task and review changes need a repeated
+pinned baseline before routing automation can safely amplify them. Current
+ordering and release gates are in `CURRENT_STATE.md`.

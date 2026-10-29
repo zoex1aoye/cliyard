@@ -3,6 +3,10 @@
 > Recorded: 2026-10-27
 >
 > Baseline: `selfhost/chained-read-context-complete`
+>
+> Current implementation order is maintained only in
+> [CURRENT_STATE.md](./CURRENT_STATE.md). This document owns product rationale,
+> not the latest status.
 
 ## 1. Revised definition
 
@@ -183,6 +187,13 @@ interface TaskRequirements {
   requiredCapabilities?: string[];
 }
 ```
+
+The original route was too eager to build routing and admission before proving
+long-running verification and review. The current model also requires
+`HarnessEvalRun`, `VerificationTask`, `ReviewFinding`, `HumanInterventionEvent`
+and `SkillPack` as first-class durable objects. Their lifecycle and evidence
+boundaries are defined in
+[continuous-harness-v2.md](../design/continuous-harness-v2.md).
 
 `QueueItem` should eventually store a routing policy and the resolved
 `ExecutionProfile`, not just `worker` plus `model`.
@@ -548,25 +559,28 @@ patch ownership, upgrade tests and an exit plan.
 
 ## 8. Adjusted next-work order
 
-The earlier "observability -> foreground controller" ordering is too narrow.
-The revised execution order is:
+The 2026-10-29 self-host failures and external research moved controlled
+harness evaluation, independent verification lifetime and clean-context review
+ahead of routing and admission:
 
 ```text
-1. [implemented] ControlSnapshot + event journal + resource telemetry
-2. Failure taxonomy/cost + ExecutionProfile routing
-3. Parallel Supervisor/queue architecture spike
-4. Shared hierarchical admission broker with fixed limits
-5. Parallel queue + Plan-wave v0, warm start 3
-6. Measured adaptive ramp/backoff and calibration
-7. DSH better-sidebar cockpit + stable Control API client
-8. DesignRevision + EvidenceBundle/verdict v0
-9. Look-ahead scheduler/foreground controller
-10. Bounded soak and process-manager/daemon decision
+1. v1.2 live cleanup / durable recovery separation
+2. Harness Eval v0
+3. background VerificationTask
+4. provider-neutral SandboxProvider
+5. clean-context Reviewer + structured findings
+6. human intervention ledger
+7. SkillPack provenance
+8. ProfileCatalog + routing + hierarchical admission
+9. parallel queue + Plan-wave v0
+10. versioned Control API + replaceable UI
+11. bounded foreground controller/daemon decision and soak
 ```
 
-The controller is deliberately late because it automates whatever gates and
-scheduling semantics already exist. Automating weak acceptance only creates
-faster technical debt.
+The controller remains late because it automates whatever gates and scheduling
+semantics already exist. Automating weak acceptance only creates faster
+technical debt. The currently authoritative status and release gates are in
+[CURRENT_STATE.md](./CURRENT_STATE.md).
 
 ## 9. Product acceptance effect
 
