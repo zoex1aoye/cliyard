@@ -75,7 +75,7 @@ queue observe / status (implemented)
   -> Windows Job Object ProcessOwnerProvider
   -> telemetry-backed dynamic routing score + adaptive ramp/backoff
   -> parallel queue + Plan-wave v0
-  -> stable local Control API + DSH better-sidebar cockpit
+  -> stable local Control API + version-pinned native DSH cockpit
   -> DesignRevision + EvidenceBundle/verdict
   -> look-ahead foreground controller
   -> bounded soak
