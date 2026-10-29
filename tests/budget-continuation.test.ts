@@ -19,8 +19,14 @@ import {
   type BudgetContinuationTaskExtensionRecord,
   type TaskExtensionRecord,
 } from "../src/agents/continuation.js";
-import type { AgentResult } from "../src/agents/types.js";
+import type {
+  AgentAdapter,
+  AgentResult,
+  AgentStartInput,
+} from "../src/agents/types.js";
 import type { TaskContract } from "../src/contracts/schema.js";
+import { runClosedLoop, type LoopResult } from "../src/repair/loop.js";
+import type { Verifier, VerifyResult } from "../src/verification/verifier.js";
 import {
   createRunManifest,
   getActiveRunId,
@@ -212,6 +218,49 @@ async function runAdapter(
     ...(onExtension ? { onExtension } : {}),
   });
   return worker.collect(sessionId);
+}
+
+function scriptedVerifier(outcomes: boolean[]): Verifier {
+  let index = 0;
+  return {
+    async run(): Promise<VerifyResult> {
+      const ok = outcomes[index] ?? false;
+      index += 1;
+      return {
+        ok,
+        exitCode: ok ? 0 : 1,
+        commandResults: [],
+        logTail: ok ? "fixture verify ok" : "fixture verify failed",
+      };
+    },
+  };
+}
+
+/** Drive a real Claude adapter through runClosedLoop repairs. */
+function runLoop(
+  fixture: ClaudeFixture,
+  policyValue: BudgetContinuationPolicy,
+  verifyOutcomes: boolean[],
+  maxRepairs = 1,
+): Promise<LoopResult> {
+  const worker = createClaudeAdapter({
+    binary: fixture.binary,
+    cwd: fixture.repo,
+    model: "fixture-model",
+    maxBudgetUsd: policyValue.baseGuardUsd,
+    maxTransientRetries: 0,
+    heartbeatMs: 30,
+    budgetPolicy: policyValue,
+  });
+  return runClosedLoop({
+    contract: { ...fixture.contract, maxRepairs },
+    worker,
+    verifier: scriptedVerifier(verifyOutcomes),
+    // The supervisor supplies a durable sink; the loop only grants a budget
+    // continuation when this callback exists.
+    onExtension: () => undefined,
+    ledgerPath: join(fixture.root, "ledger.json"),
+  });
 }
 
 function readArgs(path: string): string[][] {
@@ -923,6 +972,169 @@ if (!resume) {
       process.env.CLIYARD_CLAUDE_BINARY = previousBinary;
     }
     fixture?.cleanup();
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("repair allocations are clipped by the task cumulative guard envelope", async () => {
+  // Each worker attempt succeeds, but the verifier keeps failing. The task
+  // envelope of $1.5 must bound the initial attempt plus its repair, and the
+  // next repair must fail before any provider process starts.
+  const fixture = claudeFixture(`
+fs.appendFileSync(
+  path.join(process.cwd(), "allowed.ts"),
+  "\\nexport const call" + callNumber + " = true;\\n"
+);
+successResult("call " + callNumber, 0.01);
+`);
+  try {
+    const result = await runLoop(
+      fixture,
+      policy({
+        maxContinuations: 0,
+        autoContinue: false,
+        maxCumulativeGuardUsd: 1.5,
+      }),
+      [false, false],
+      2,
+    );
+
+    assert.equal(result.verdict, "rejected");
+    assert.equal(result.failure?.category, "budget_exhausted");
+    assert.equal(result.failure?.code, "task_budget_exhausted");
+    assert.equal(result.failure?.stage, "policy");
+    assert.equal(result.taskBudget?.taskId, fixture.contract.taskId);
+    assert.equal(result.taskBudget?.cumulativeGuardUsd, 1.5);
+    assert.equal(result.taskBudget?.maxCumulativeGuardUsd, 1.5);
+    assert.equal(result.taskBudget?.continuationCount, 0);
+
+    const calls = readArgs(fixture.argsPath);
+    const guards = calls.map((args) =>
+      Number(argValue(args, "--max-budget-usd")),
+    );
+    assert.deepEqual(guards, [1, 0.5]);
+    assert.equal(
+      guards.reduce((sum, guard) => sum + guard, 0),
+      1.5,
+    );
+    // A third attempt has no remaining guard, so no provider invocation ran.
+    assert.equal(calls.length, 2);
+
+    // The CLI-reported subtotal stays separate from the local guard cap.
+    assert.equal(result.cost?.state, "cli-estimated");
+    assert.equal(result.cost?.authoritative, false);
+    assert.equal(result.cost?.amount, 0.02);
+    assert.equal(result.cost?.guardBudgetUsd, 1.5);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("a budget continuation after repair cannot reset the task ledger", async () => {
+  const fixture = claudeFixture(`
+if (callNumber === 1) {
+  assistant("initial progress");
+  budgetResult(0.01);
+} else if (callNumber === 2) {
+  fs.appendFileSync(
+    path.join(process.cwd(), "allowed.ts"),
+    "\\nexport const continued = true;\\n"
+  );
+  successResult("continued", 0.01);
+} else {
+  assistant("repair progress");
+  budgetResult(0.01);
+}
+`);
+  try {
+    const result = await runLoop(
+      fixture,
+      policy({ maxContinuations: 2, maxCumulativeGuardUsd: 3 }),
+      [false],
+    );
+
+    // Attempt 0: guard 1 then a continuation to guard 2. Attempt 1 (repair)
+    // allocates the remaining 1; another continuation would total 4 against
+    // the task cap of 3, so the task ledger must deny it.
+    const calls = readArgs(fixture.argsPath);
+    assert.deepEqual(
+      calls.map((args) => argValue(args, "--max-budget-usd")),
+      ["1", "2", "1"],
+    );
+    assert.equal(calls.length, 3);
+    assert.equal(
+      argValue(calls[1]!, "--resume"),
+      argValue(calls[0]!, "--session-id"),
+    );
+    assert.equal(argValue(calls[2]!, "--resume"), undefined);
+
+    assert.equal(result.verdict, "rejected");
+    assert.equal(result.failure?.category, "budget_exhausted");
+    assert.equal(result.failure?.code, "error_max_budget_usd");
+    assert.equal(result.extensions?.length, 1);
+    assert.equal(result.taskBudget?.cumulativeGuardUsd, 3);
+    assert.equal(result.taskBudget?.continuationCount, 1);
+    assert.equal(result.taskBudget?.maxCumulativeGuardUsd, 3);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("the loop rejects a repair ledger that would reset the envelope", async () => {
+  const starts: AgentStartInput[] = [];
+  let current: AgentStartInput | undefined;
+  const worker: AgentAdapter = {
+    id: "mock",
+    async discover() {
+      return { id: "mock", ok: true, notes: [] };
+    },
+    async start(input) {
+      starts.push(input);
+      current = input;
+      return { sessionId: `session-${input.attempt}` };
+    },
+    async collect(sessionId) {
+      if (!current) throw new Error("worker did not start");
+      return {
+        sessionId,
+        exitCode: 0,
+        touchedPaths: [],
+        logTail: "implemented",
+        taskBudget: {
+          version: 1,
+          taskId: current.contract.taskId,
+          // Attempt 1 misreports a lower allocation, which would let a later
+          // invocation reuse guard that was already allocated.
+          cumulativeGuardUsd: current.attempt === 0 ? 1 : 0.5,
+          continuationCount: 0,
+          maxCumulativeGuardUsd: 2,
+        },
+      };
+    },
+    async cancel() {},
+  };
+
+  const repo = initRepo();
+  const ledgerRoot = mkdtempSync(join(tmpdir(), "cliyard-budget-loop-"));
+  try {
+    const result = await runClosedLoop({
+      contract: { ...contract(repo), maxRepairs: 1 },
+      worker,
+      verifier: scriptedVerifier([false]),
+      onExtension: () => undefined,
+      ledgerPath: join(ledgerRoot, "ledger.json"),
+    });
+
+    assert.equal(starts.length, 2);
+    assert.equal(starts[1]?.taskBudget?.cumulativeGuardUsd, 1);
+    assert.equal(result.verdict, "rejected");
+    assert.equal(result.failure?.category, "policy_blocked");
+    assert.equal(result.failure?.code, "task_budget_state_invalid");
+    // The prior ledger survives; the reset is never accepted.
+    assert.equal(result.taskBudget?.cumulativeGuardUsd, 1);
+    assert.equal(result.taskBudget?.maxCumulativeGuardUsd, 2);
+  } finally {
+    rmSync(ledgerRoot, { recursive: true, force: true });
     rmSync(repo, { recursive: true, force: true });
   }
 });

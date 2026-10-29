@@ -9,6 +9,7 @@ export const DEADLINE_EXTENSION_POLICY_VERSION = 1 as const;
 export const BUDGET_CONTINUATION_POLICY_VERSION = 1 as const;
 export const QUEUE_CONTINUATION_POLICY_VERSION = 1 as const;
 export const TASK_EXTENSION_RECORD_VERSION = 1 as const;
+export const TASK_BUDGET_LEDGER_VERSION = 1 as const;
 
 /** Node timers do not reliably support delays beyond signed 32-bit ints. */
 export const MAX_DEADLINE_TIMEOUT_MS = 2_147_483_647;
@@ -156,7 +157,10 @@ export interface BudgetContinuationTaskExtensionRecord
   providerSessionId: string;
   additionalGuardUsd: number;
   cumulativeGuardUsd: number;
-  /** One-based position within this task attempt's budget continuation grant. */
+  /**
+   * One-based position within the task's budget continuation history. The
+   * count spans repair attempts, so a repair cannot restart it.
+   */
   continuationIndex: number;
 }
 
@@ -441,6 +445,72 @@ export function parseBudgetGuardUsd(value: unknown): number | undefined {
   return isBoundedUsd(value, false)
     ? roundBudgetUsd(value as number)
     : undefined;
+}
+
+/**
+ * Task-level guard ledger threaded from runClosedLoop into the next worker
+ * attempt. It counts locally configured guard allocations for one task,
+ * including repair invocations and budget continuations. It is never provider
+ * balance, invoice truth or observed CLI cost.
+ */
+export interface TaskBudgetContinuationState {
+  version: typeof TASK_BUDGET_LEDGER_VERSION;
+  taskId: string;
+  /** Sum of every invocation and continuation guard allocated so far. */
+  cumulativeGuardUsd: number;
+  /** Task-wide budget continuations already granted. */
+  continuationCount: number;
+  /** Configured task-wide cumulative guard cap. */
+  maxCumulativeGuardUsd: number;
+}
+
+export const MAX_TASK_BUDGET_ID_LENGTH = 128;
+
+/**
+ * Parse one task-level guard ledger without repairing a contradictory value.
+ * A ledger that allocates more than its own cap, or carries unknown fields,
+ * fails closed so a caller cannot silently widen or reset the envelope.
+ */
+export function parseTaskBudgetContinuationState(
+  value: unknown,
+): TaskBudgetContinuationState | undefined {
+  if (!isRecord(value)) return undefined;
+  if (value.version !== TASK_BUDGET_LEDGER_VERSION) return undefined;
+  if (
+    !hasOnlyKeys(value, [
+      "version",
+      "taskId",
+      "cumulativeGuardUsd",
+      "continuationCount",
+      "maxCumulativeGuardUsd",
+    ])
+  ) {
+    return undefined;
+  }
+  if (
+    !isBoundedText(value.taskId, MAX_TASK_BUDGET_ID_LENGTH) ||
+    !isBoundedUsd(value.cumulativeGuardUsd, false) ||
+    !isBoundedUsd(value.maxCumulativeGuardUsd, false) ||
+    !isBoundedInteger(value.continuationCount, MAX_BUDGET_CONTINUATIONS)
+  ) {
+    return undefined;
+  }
+
+  const cumulativeGuardUsd = roundBudgetUsd(
+    value.cumulativeGuardUsd as number,
+  );
+  const maxCumulativeGuardUsd = roundBudgetUsd(
+    value.maxCumulativeGuardUsd as number,
+  );
+  if (cumulativeGuardUsd > maxCumulativeGuardUsd) return undefined;
+
+  return {
+    version: TASK_BUDGET_LEDGER_VERSION,
+    taskId: value.taskId as string,
+    cumulativeGuardUsd,
+    continuationCount: value.continuationCount as number,
+    maxCumulativeGuardUsd,
+  };
 }
 
 /**
