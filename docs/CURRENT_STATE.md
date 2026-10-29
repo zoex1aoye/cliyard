@@ -28,19 +28,20 @@ self-host controller loaded the new code.
 ## Lineage at this checkpoint
 
 - Mainline branch: `codex/supervisor-v0-baseline`.
-- Latest Plan-only commit: `8da5da8` (`docs: plan live cleanup recovery
-  separation`).
+- v1.2 Plan commit: `36dd985`; implementation contracts commit: `ddfde41`.
+- v1.2 cutover Plan commit: `90b516e`; cutover contracts commit: `74b54b9`.
 - WorkspaceBoundary v1 is accepted at `c04bb96` but is not an ancestor of all
   current governance commits.
 - WorkerProcessTree v1.1 is accepted at `9a38174` but is not merged into the
   current mainline.
 - Controller-death nested-process drafts `af76d3a` and `a9d6e00` are reviewed
   drafts, not accepted integration.
-- The v1.2 Plan in this change is not frozen or dispatched until its separate
-  contracts commit exists.
-- No active Supervisor lock, queue lock or WorkerLease was observed at the start
-  of this checkpoint. Historic leases include released and cleanup-failed
-  records; they must not be erased or rewritten.
+- The v1.2 implementation draft is `fac4606`; its cutover run
+  `3b07e58b-57a7-48d8-84cd-d6818478884a` completed with accepted evidence and
+  integration head `7b4544f`. This candidate is not merged into the mainline.
+- No active Supervisor lock, queue lock or WorkerLease remained after the
+  cutover. Historic leases include released and cleanup-failed records; they
+  must not be erased or rewritten.
 - Node baseline remains 20. Node 22, SRT and OS permission experiments require a
   separate decision.
 
@@ -73,9 +74,33 @@ Commit `9a38174` tracks and cleans live/sampled nested descendants with exact
 POSIX identity and bounded process-table evidence. It does not yet provide a
 complete durable recovery path after controller death for nested groups.
 
-## Reviewed but blocked
+### Nested registry live cleanup v1.2
 
-The three controller-death attempts exposed a design error, not merely a test
+Implementation draft `fac4606` separates live cleanup completeness from durable
+recovery completeness. The independently reviewed focused set is **65/65**,
+build passes and the complete suite is **464/464**.
+
+Cutover run `3b07e58b` loaded Supervisor from that draft, targeted the main
+checkout and produced integration candidate `7b4544f`:
+
+- path audit: only `docs/evidence/NESTED_REGISTRY_LIVE_CLEANUP_V1_2.md`;
+- WorkspaceBoundary: clean;
+- process cleanup: `cleanupCompleteness=complete`,
+  `durableRecoveryCompleteness=truncated`, `residualCount=0`;
+- 297 live external groups observed, only 16 persisted;
+- CLI-estimated cost: `$2.006743`, non-authoritative.
+
+This is accepted evidence for a human diff/integration decision, not an
+automatic merge. The evidence document was authored while its Worker was alive,
+so it correctly marks its own terminal cleanup as pending and points to the
+RunManifest. The RunManifest now contains those terminal fields. That mismatch
+is a durable evidence-model gap: final evidence must be synthesized by the
+controller after Worker exit rather than requiring the Worker to predict its own
+post-exit record.
+
+## Blocked history
+
+The earlier controller-death attempts exposed a design error, not merely a test
 failure:
 
 ```text
@@ -89,23 +114,24 @@ truncation means a future controller cannot reconstruct the complete ownership
 set and must return `needs_human`; it does not prove that a live controller with
 a complete current process-table snapshot failed to clean the reachable tree.
 
-The next executable slice is therefore
-`design/nested-registry-live-cleanup-v1.2.plan.json`. It must preserve a bounded
-lease while allowing complete, exact live cleanup to succeed.
+Implementation run `d058568e` remains rejected history even though it produced
+the reviewed draft. The v1.2 cutover now demonstrates the corrected semantics;
+neither earlier RunManifest is retroactively accepted.
 
 ## Current priority
 
 The order is a dependency order, not a promise of parallel delivery.
 
-1. **v1.2 cleanup/recovery separation**  
-   Close the current self-host blocker and add real >16-group, 512-member-group
-   and truncated-recovery tests.
+1. **Human diff and integration decision for v1.2**
+   Review code draft `fac4606`, cutover evidence `7b4544f` and the remaining
+   controller-owned evidence gap. No automatic merge.
 
 2. **Harness Eval v0**  
    Create repeated, pinned baselines for normal work, high fanout, verifier
    timeout, controller SIGKILL, path escape, compaction/handoff and budget
    continuation. Measure pass rate, flipped tasks, requests, tokens, cache,
-   wall time, cost truth and human interventions.
+   wall time, cost truth and human interventions. Include controller-owned final
+   evidence assembly after Worker exit.
 
 3. **Background VerificationTask**  
    Decouple long verification from Worker lifecycle. Persist owner, artifact
@@ -151,6 +177,8 @@ Before claiming a continuously working harness:
 - a clean-context review is independent of the author's session;
 - one controlled eval shows no must-not-break regression;
 - sandbox and cleanup evidence bind to exact identities and commits;
+- terminal evidence is assembled after Worker exit, path audit, cleanup and cost
+  finalization;
 - human interventions and their outcomes are auditable;
 - parallel admission is observed, not hard-coded to three;
 - accepted branches still require a human integration decision;

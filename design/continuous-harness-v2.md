@@ -201,6 +201,29 @@ retry policy and durable record.
 The controller must be able to stop between any two arrows and reconstruct the
 next legal action from disk.
 
+### Controller-owned evidence finalization
+
+A Worker cannot write a complete final acceptance record for its own lifecycle:
+the controller writes terminal process cleanup, final path audit, boundary
+comparison and cost after the Worker exits. The v1.2 cutover exposed this
+directly: its Worker-authored evidence correctly marked those fields pending,
+while the completed RunManifest later contained the authoritative values.
+
+The durable model therefore needs a controller-owned `EvidenceBundle` assembled
+after execution settlement. It should reference, not duplicate, the immutable
+Worker output and should bind:
+
+- Plan and contracts hashes;
+- base, artifact and integration commits;
+- final path audit and WorkspaceBoundary records;
+- terminal process, runtime, lease and cleanup records;
+- focused/full/build/runtime/visual results;
+- failure and cost truth;
+- reviewer findings and the final human decision.
+
+The Worker-authored report remains useful context, but it is not the final
+acceptance artifact.
+
 ## 5. Continuity and context
 
 Long-horizon behavior comes from this loop:
@@ -327,6 +350,8 @@ Exit criteria:
 - repeated baseline/candidate runs;
 - pass, flipped-task, request/token/cache/time/cost and human-intervention
   metrics;
+- a controller-owned final EvidenceBundle produced only after Worker, verifier
+  and cleanup settlement;
 - a written decision record for every harness or prompt change.
 
 ### P0: Background VerificationTask

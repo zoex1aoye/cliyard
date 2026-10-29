@@ -95,7 +95,7 @@ DSH、WorkBuddy 或未来自有 Web UI 是可替换人机入口；cliyard 负责
 
 截至 2026-10-29，当前路线已调整为“先可信，再持续”：
 
-1. v1.2 live cleanup / durable recovery 语义分离；
+1. 人工审阅并决定是否集成 v1.2 候选 `7b4544f`（无自动合入）；
 2. Harness Eval v0；
 3. 独立生命周期的 background `VerificationTask`；
 4. provider-neutral `SandboxProvider`；
