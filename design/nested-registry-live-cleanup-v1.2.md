@@ -1,9 +1,14 @@
 # Nested registry and live cleanup boundary v1.2
 
-> Status: Plan only; not dispatched.
+> Status: approved for contract freeze and self-host dispatch on 2026-10-29;
+> contracts and run evidence do not yet exist.
 >
 > Reviewed implementation base:
 > `a9d6e0072703bd805d7eb33b629f0f9337337cb3`.
+>
+> The contracts base must be a docs-only descendant of `a9d6e00` containing
+> this design and its Plan. That descendant preserves the reviewed code exactly;
+> it is not an accepted integration and must not be labelled as one.
 
 ## Observed third failure
 
@@ -122,5 +127,7 @@ Required examples:
 The implementation should start from reviewed v1.1 draft `a9d6e00`. Its code
 already provides exact nested group ownership but still confuses live cleanup
 with durable-registry completeness. A subsequent validation run should load
-Supervisor from the new reviewed v1.2 draft if the outer manager itself needs
-to be exercised.
+Supervisor from the docs-composed reviewed base used by the contracts. The run
+that implements v1.2 cannot claim that the new v1.2 code managed its own outer
+lifecycle; that cutover requires a later run loaded from the reviewed v1.2
+implementation draft.

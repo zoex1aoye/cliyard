@@ -14,6 +14,7 @@
       ],
       "dependsOn": [],
       "readPaths": [
+        "design/nested-registry-live-cleanup-v1.2.md",
         "design/worker-process-tree-v1.md",
         "docs/evidence/WORKER_PROCESS_TREE.md",
         "docs/evidence/WORKER_LEASE.md",
@@ -33,6 +34,17 @@
         "npx tsx --test tests/worker-process-tree.test.ts tests/worker-lease.test.ts",
         "npm run build",
         "npm test"
+      ],
+      "deliverables": [
+        "Separate live cleanup completeness from durable recovery completeness in code, status projection and tests.",
+        "Real POSIX evidence for more than 16 external groups, including a 512-member group, with zero residual processes.",
+        "Truncated durable lease recovery that reports needs_human without signalling."
+      ],
+      "forbidden": [
+        "Do not increase the durable lease without a new bounded schema and migration decision.",
+        "Do not treat a group id alone as ownership after controller death.",
+        "Do not make a truncated durable registry reject a proven complete live cleanup.",
+        "Do not use process names, ports or broad process scans as kill authority."
       ],
       "maxRepairs": 1
     }
