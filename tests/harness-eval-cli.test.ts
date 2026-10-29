@@ -872,21 +872,57 @@ test("the example suite is the canonical six-scenario suite with existing test f
   }
 });
 
-test("the harness-eval npm script composes with the verifier's trailing run", async () => {
+const HARNESS_EVAL_PREFIX = ["tsx", "src/cli.ts", "eval"];
+const HARNESS_EVAL_GLOBAL_OPTIONS = new Set(["--snapshot", "--record-only"]);
+
+function readHarnessEvalScript(): string[] {
   const pkg = JSON.parse(
     readFileSync(join(ROOT, "package.json"), "utf8"),
   ) as { scripts: Record<string, string> };
   const script = pkg.scripts["harness-eval"];
   assert.ok(script, "package.json must define harness-eval");
-  const tokens = script.split(/\s+/);
-  assert.deepEqual(tokens.slice(0, 3), ["tsx", "src/cli.ts", "eval"]);
+  return script.split(/\s+/);
+}
 
-  // `npm run harness-eval -- run ...` appends the verifier's argv after the
-  // script; a leading --snapshot must compose with a following subcommand.
+/**
+ * npm appends the caller's `--` tail after the script. Compose that exact argv
+ * in-process. The script may only carry global options: naming a subcommand
+ * there would duplicate the appended tail (`eval run ... run ...`).
+ */
+function composeHarnessEvalTail(tail: string[]): string[] {
+  const tokens = readHarnessEvalScript();
+  assert.deepEqual(
+    tokens.slice(0, HARNESS_EVAL_PREFIX.length),
+    HARNESS_EVAL_PREFIX,
+  );
+  return [...tokens.slice(HARNESS_EVAL_PREFIX.length), ...tail];
+}
+
+test("the harness-eval npm script injects only global options and composes with the appended tail", async () => {
+  const tokens = readHarnessEvalScript();
+  const wrapperOptions = tokens.slice(HARNESS_EVAL_PREFIX.length);
+  for (const subcommand of ["run", "compare", "handoff"]) {
+    assert.equal(
+      wrapperOptions.includes(subcommand),
+      false,
+      `the wrapper must not name ${subcommand}; npm appends it`,
+    );
+  }
+  for (const option of wrapperOptions) {
+    assert.ok(
+      HARNESS_EVAL_GLOBAL_OPTIONS.has(option),
+      `unexpected wrapper option ${option}`,
+    );
+  }
+  assert.deepEqual([...wrapperOptions].sort(), [
+    "--record-only",
+    "--snapshot",
+  ]);
+
+  // A composed run still validates malformed input before Git or a scenario.
   const root = tempDir();
   const result = await runCli(
-    [
-      ...tokens.slice(3),
+    composeHarnessEvalTail([
       "run",
       "--suite",
       "missing.json",
@@ -896,11 +932,583 @@ test("the harness-eval npm script composes with the verifier's trailing run", as
       "1",
       "--out",
       "out-npm-script",
-    ],
+    ]),
     root,
   );
   assert.equal(result.code, 2, result.stderr);
+  assert.equal(result.stdout, "");
   assert.match(result.stderr, /cannot read suite file/);
+  assert.equal(existsSync(join(root, "out-npm-script")), false);
+});
+
+test("the harness-eval wrapper records failed scenarios, exits zero and preserves complete failure detail", async () => {
+  const root = tempDir();
+  const { dir: repo, commit: head } = createRepo(root);
+  // The wrapper must still apply its global --snapshot to run: an uncommitted
+  // file is visible only when the dirty tree is materialized.
+  writeFileSync(join(repo, "uncommitted-marker.txt"), "present\n", "utf8");
+  const witness =
+    "process.stdout.write(require('fs').existsSync('uncommitted-marker.txt') ? 'snapshot-present' : 'snapshot-missing');";
+  // A scenario whose second repetition fails proves both repetition outcomes
+  // survive in the report instead of being averaged or hidden.
+  const counter = join(root, "flaky-counter.txt");
+  const flakyScript =
+    "const fs=require('fs');const p=" +
+    JSON.stringify(counter) +
+    ";if(fs.existsSync(p)){process.exit(1)}fs.writeFileSync(p,'seen')";
+  writeSuiteFile(root, "wrapper-suite.json", [
+    makeScenario({
+      id: "fails-always",
+      commands: [["node", "-e", `${witness}process.exit(3)`]],
+    }),
+    makeScenario({ id: "flaky", commands: [["node", "-e", flakyScript]] }),
+    makeScenario({
+      id: "times-out",
+      commands: [["node", "-e", "setTimeout(() => {}, 30000)"]],
+      timeoutMsPerCommand: 100,
+    }),
+    makeScenario({
+      id: "passes",
+      commands: [["node", "-e", `${witness}process.exit(0)`]],
+    }),
+  ]);
+
+  const wrapped = await runCli(
+    composeHarnessEvalTail([
+      "run",
+      "--suite",
+      "wrapper-suite.json",
+      "--label",
+      "baseline",
+      "--repetitions",
+      "2",
+      "--out",
+      "runs/wrapper",
+      "--cwd",
+      "repo",
+      "--json",
+    ]),
+    root,
+  );
+  assert.equal(wrapped.code, 0, wrapped.stderr);
+  assert.equal(wrapped.stderr, "");
+  const run = parseHarnessEvalRun(JSON.parse(wrapped.stdout));
+  assert.equal(run.summary.scenarioCount, 4);
+  assert.equal(run.summary.passedScenarios, 1);
+  assert.equal(run.summary.failedScenarios, 3);
+  assert.equal(run.summary.repetitionCount, 8);
+  assert.equal(run.summary.passedRepetitions, 3);
+  assert.equal(run.summary.failedRepetitions, 5);
+  // The run bound the materialized dirty-tree snapshot, not HEAD, and the
+  // scenario observed the uncommitted content.
+  assert.notEqual(run.commit, head);
+  assert.equal(runGit(repo, ["cat-file", "-t", run.commit]), "commit");
+  const passes = run.scenarios.find((scenario) => scenario.id === "passes")!;
+  assert.equal(passes.repetitions[0]!.commands[0]!.stdout, "snapshot-present");
+
+  const failsAlways = run.scenarios.find(
+    (scenario) => scenario.id === "fails-always",
+  )!;
+  assert.equal(failsAlways.status, "failed");
+  assert.equal(failsAlways.passedRepetitions, 0);
+  assert.equal(failsAlways.failedRepetitions, 2);
+  assert.equal(failsAlways.repetitions.length, 2);
+  for (const repetition of failsAlways.repetitions) {
+    const command = repetition.commands[0]!;
+    assert.equal(command.exitCode, 3);
+    assert.equal(command.matchedExpectation, false);
+    assert.ok(command.logPath.length > 0);
+  }
+
+  const flaky = run.scenarios.find((scenario) => scenario.id === "flaky")!;
+  assert.equal(flaky.status, "failed");
+  assert.equal(flaky.passedRepetitions, 1);
+  assert.equal(flaky.failedRepetitions, 1);
+  assert.equal(flaky.repetitions[0]!.status, "passed");
+  assert.equal(flaky.repetitions[1]!.status, "failed");
+  assert.equal(flaky.repetitions[1]!.commands[0]!.exitCode, 1);
+
+  const timedOut = run.scenarios.find(
+    (scenario) => scenario.id === "times-out",
+  )!;
+  assert.equal(timedOut.status, "failed");
+  assert.equal(timedOut.failedRepetitions, 2);
+  assert.equal(timedOut.repetitions[0]!.commands[0]!.timedOut, true);
+
+  // The complete report is on disk and keeps every failed repetition detail.
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(root, "runs/wrapper/run.json"), "utf8")),
+    JSON.parse(wrapped.stdout),
+  );
+  const markdown = readFileSync(join(root, "runs/wrapper/run.md"), "utf8");
+  assert.match(markdown, /Failed repetition detail/);
+  assert.match(markdown, /`fails-always` repetition 1/);
+  assert.match(markdown, /`fails-always` repetition 2/);
+  assert.match(markdown, /`flaky` repetition 2/);
+  assert.match(markdown, /`times-out` repetition 1/);
+  assert.match(markdown, /`times-out` repetition 2/);
+  assert.match(markdown, /timed out/);
+  assert.match(markdown, /exit 3/);
+
+  // The caller's worktree and history remain untouched.
+  assert.equal(runGit(repo, ["rev-parse", "HEAD"]), head);
+  assert.equal(
+    readFileSync(join(repo, "uncommitted-marker.txt"), "utf8"),
+    "present\n",
+  );
+  assert.doesNotMatch(
+    runGit(repo, ["worktree", "list"]),
+    /cliyard-eval-snapshot/,
+  );
+
+  // The raw command stays strict: the same recorded failures exit nonzero and
+  // still write the complete report.
+  rmSync(join(repo, "uncommitted-marker.txt"));
+  rmSync(counter, { force: true });
+  const strict = await runCli(
+    [
+      "run",
+      "--suite",
+      "wrapper-suite.json",
+      "--label",
+      "strict",
+      "--repetitions",
+      "2",
+      "--out",
+      "runs/strict",
+      "--cwd",
+      "repo",
+      "--json",
+    ],
+    root,
+  );
+  assert.equal(strict.code, 1, strict.stderr);
+  assert.equal(strict.stderr, "");
+  const strictRun = parseHarnessEvalRun(JSON.parse(strict.stdout));
+  assert.equal(strictRun.summary.failedScenarios, 3);
+  assert.equal(strictRun.summary.failedRepetitions, 5);
+  assert.ok(existsSync(join(root, "runs/strict/run.json")));
+  assert.ok(existsSync(join(root, "runs/strict/run.md")));
+});
+
+test("global wrapper options are ignored by compare and handoff", async () => {
+  const root = tempDir();
+  const { dir: repo } = createRepo(root);
+  writeSuiteFile(root, "pass-suite.json", [
+    makeScenario({ id: "alpha", commands: [["node", "-e", "process.exit(0)"]] }),
+  ]);
+  const run = (label: string, out: string) =>
+    runCli(
+      [
+        "run",
+        "--suite",
+        "pass-suite.json",
+        "--label",
+        label,
+        "--repetitions",
+        "1",
+        "--out",
+        out,
+        "--cwd",
+        "repo",
+        "--json",
+      ],
+      root,
+    );
+  const baseline = await run("base", "runs/base");
+  assert.equal(baseline.code, 0, baseline.stderr);
+  const candidate = await run("cand", "runs/cand");
+  assert.equal(candidate.code, 0, candidate.stderr);
+
+  const compared = await runCli(
+    composeHarnessEvalTail([
+      "compare",
+      "--baseline",
+      "runs/base/run.json",
+      "--candidate",
+      "runs/cand/run.json",
+      "--out",
+      "comparisons/wrapper",
+      "--json",
+    ]),
+    root,
+  );
+  assert.equal(compared.code, 0, compared.stderr);
+  assert.equal(compared.stderr, "");
+  const comparison = JSON.parse(compared.stdout) as {
+    interpretation: string;
+    flippedScenarios: string[];
+  };
+  assert.equal(comparison.interpretation, "same-commit-repeatability");
+  assert.deepEqual(comparison.flippedScenarios, []);
+  assert.ok(existsSync(join(root, "comparisons/wrapper/comparison.json")));
+  assert.ok(existsSync(join(root, "comparisons/wrapper/comparison.md")));
+
+  const manifest = {
+    version: 1,
+    runId: "run-wrapper-handoff",
+    planId: "wrapper-handoff",
+    repoRoot: repo,
+    contractsPath: join(repo, "contracts.json"),
+    contractsHash: "d".repeat(64),
+    baseCommit: "a".repeat(40),
+    integrationBranch: "cliyard/integration/wrapper-handoff",
+    integrationHead: "c".repeat(40),
+    status: "completed",
+    createdAt: "2026-10-01T00:00:00.000Z",
+    updatedAt: "2026-10-01T01:00:00.000Z",
+    owner: { pid: 4321, host: "fixture-host" },
+    prompt: "TOP SECRET handoff prompt",
+    tasks: {
+      "task-a": {
+        taskId: "task-a",
+        status: "accepted",
+        accepted: true,
+        resultCommit: "b".repeat(40),
+        prompt: "TOP SECRET task prompt",
+      },
+    },
+  };
+  const fixture = join(root, "handoff-manifest.json");
+  writeFileSync(fixture, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  const handedOff = await runCli(
+    composeHarnessEvalTail(["handoff", fixture, "--json"]),
+    root,
+  );
+  assert.equal(handedOff.code, 0, handedOff.stderr);
+  assert.equal(handedOff.stderr, "");
+  const decision = JSON.parse(handedOff.stdout) as {
+    nextAction: string;
+    nextActionMatched: boolean;
+  };
+  assert.equal(decision.nextAction, "human-review");
+  assert.equal(decision.nextActionMatched, true);
+  assert.equal(handedOff.stdout.includes("TOP SECRET"), false);
+});
+
+test("record-only keeps malformed input, unsafe paths and Git/snapshot errors nonzero", async () => {
+  const root = tempDir();
+  const { dir: repo, commit } = createRepo(root);
+  writeSuiteFile(root, "suite.json", [
+    makeScenario({ id: "ok", commands: [["node", "-e", "process.exit(0)"]] }),
+  ]);
+  writeFileSync(join(root, "bad-suite.json"), "{not json", "utf8");
+  mkdirSync(join(root, "not-a-repo"), { recursive: true });
+
+  const cases: Array<{
+    name: string;
+    output: string;
+    args: string[];
+    pattern: RegExp;
+  }> = [
+    {
+      name: "malformed-suite",
+      output: "out-malformed",
+      args: composeHarnessEvalTail([
+        "run",
+        "--suite",
+        "bad-suite.json",
+        "--label",
+        "x",
+        "--repetitions",
+        "1",
+        "--out",
+        "out-malformed",
+        "--cwd",
+        "repo",
+      ]),
+      pattern: /not valid JSON/,
+    },
+    {
+      name: "unsafe-out",
+      output: "",
+      args: composeHarnessEvalTail([
+        "run",
+        "--suite",
+        "suite.json",
+        "--label",
+        "x",
+        "--repetitions",
+        "1",
+        "--out",
+        "/",
+        "--cwd",
+        "repo",
+      ]),
+      pattern: /filesystem root/,
+    },
+    {
+      name: "unsafe-label",
+      output: "out-label",
+      args: composeHarnessEvalTail([
+        "run",
+        "--suite",
+        "suite.json",
+        "--label",
+        "../escape",
+        "--repetitions",
+        "1",
+        "--out",
+        "out-label",
+        "--cwd",
+        "repo",
+      ]),
+      pattern: /safe id/,
+    },
+    {
+      name: "snapshot-commit-conflict",
+      output: "out-conflict",
+      args: composeHarnessEvalTail([
+        "run",
+        "--suite",
+        "suite.json",
+        "--label",
+        "x",
+        "--repetitions",
+        "1",
+        "--out",
+        "out-conflict",
+        "--cwd",
+        "repo",
+        "--commit",
+        commit,
+      ]),
+      pattern: /cannot be combined/,
+    },
+    {
+      name: "snapshot-git-error",
+      output: "out-git",
+      args: composeHarnessEvalTail([
+        "run",
+        "--suite",
+        "suite.json",
+        "--label",
+        "x",
+        "--repetitions",
+        "1",
+        "--out",
+        "out-git",
+        "--cwd",
+        "not-a-repo",
+      ]),
+      pattern: /could not inspect Git repository/,
+    },
+  ];
+
+  for (const item of cases) {
+    const result = await runCli(item.args, root);
+    assert.equal(
+      result.code,
+      2,
+      `${item.name}: ${result.stdout}${result.stderr}`,
+    );
+    assert.equal(result.stdout, "", item.name);
+    assert.match(result.stderr, item.pattern, item.name);
+    if (item.output.length > 0) {
+      assert.equal(existsSync(join(root, item.output)), false, item.name);
+    }
+  }
+
+  // Record-only does not bypass the clean-repository requirement.
+  writeFileSync(join(repo, "dirty.txt"), "dirty\n", "utf8");
+  const dirty = await runCli(
+    [
+      "run",
+      "--suite",
+      "suite.json",
+      "--label",
+      "x",
+      "--repetitions",
+      "1",
+      "--out",
+      "out-dirty",
+      "--record-only",
+      "--cwd",
+      "repo",
+    ],
+    root,
+  );
+  assert.equal(dirty.code, 2);
+  assert.match(dirty.stderr, /must be clean/);
+  assert.equal(existsSync(join(root, "out-dirty")), false);
+});
+
+test("record-only keeps execution infrastructure failures nonzero after writing the report", async () => {
+  const root = tempDir();
+  createRepo(root);
+  writeSuiteFile(root, "infra-suite.json", [
+    makeScenario({
+      id: "cannot-spawn",
+      commands: [["cliyard-eval-missing-executable-xyz"]],
+    }),
+  ]);
+  const args = (label: string, out: string, recordOnly: boolean) => [
+    "run",
+    "--suite",
+    "infra-suite.json",
+    "--label",
+    label,
+    "--repetitions",
+    "1",
+    "--out",
+    out,
+    "--cwd",
+    "repo",
+    "--json",
+    ...(recordOnly ? ["--record-only"] : []),
+  ];
+
+  const recorded = await runCli(args("record-only", "runs/record", true), root);
+  assert.equal(recorded.code, 1, recorded.stderr);
+  assert.match(recorded.stderr, /execution infrastructure failure/);
+  const run = parseHarnessEvalRun(JSON.parse(recorded.stdout));
+  assert.equal(run.summary.failedScenarios, 1);
+  const command = run.scenarios[0]!.repetitions[0]!.commands[0]!;
+  assert.equal(command.exitCode, null);
+  assert.equal(command.timedOut, false);
+  assert.equal(command.signal, null);
+  assert.equal(command.matchedExpectation, false);
+  assert.ok(command.error !== null && command.error.length > 0);
+  // The report is still complete so the failure remains auditable.
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(root, "runs/record/run.json"), "utf8")),
+    JSON.parse(recorded.stdout),
+  );
+  assert.match(
+    readFileSync(join(root, "runs/record/run.md"), "utf8"),
+    /no exit code/,
+  );
+
+  const strict = await runCli(args("strict", "runs/strict", false), root);
+  assert.equal(strict.code, 1, strict.stderr);
+  assert.equal(strict.stderr, "");
+  const strictRun = parseHarnessEvalRun(JSON.parse(strict.stdout));
+  assert.equal(strictRun.summary.failedScenarios, 1);
+  assert.equal(
+    strictRun.scenarios[0]!.repetitions[0]!.commands[0]!.exitCode,
+    null,
+  );
+});
+
+test("option precedence: global and subcommand flags combine without changing fail-closed rules", async () => {
+  const root = tempDir();
+  const { dir: repo, commit: head } = createRepo(root);
+  const witness =
+    "process.stdout.write(require('fs').existsSync('uncommitted-marker.txt') ? 'snapshot-present' : 'snapshot-missing');process.exit(4)";
+  writeSuiteFile(root, "fail-suite.json", [
+    makeScenario({ id: "fails", commands: [["node", "-e", witness]] }),
+  ]);
+
+  // A subcommand-level --record-only is equivalent to the global injection.
+  const tailOnly = await runCli(
+    [
+      "run",
+      "--suite",
+      "fail-suite.json",
+      "--label",
+      "tail-record-only",
+      "--repetitions",
+      "1",
+      "--out",
+      "runs/tail",
+      "--cwd",
+      "repo",
+      "--record-only",
+      "--json",
+    ],
+    root,
+  );
+  assert.equal(tailOnly.code, 0, tailOnly.stderr);
+  assert.equal(
+    parseHarnessEvalRun(JSON.parse(tailOnly.stdout)).summary.failedScenarios,
+    1,
+  );
+
+  // The wrapper injects global options and the caller may also repeat them in
+  // the tail; the options OR together instead of failing as duplicates.
+  writeFileSync(join(repo, "uncommitted-marker.txt"), "present\n", "utf8");
+  const duplicated = await runCli(
+    [
+      "--snapshot",
+      "--record-only",
+      "run",
+      "--suite",
+      "fail-suite.json",
+      "--label",
+      "duplicates",
+      "--repetitions",
+      "1",
+      "--out",
+      "runs/duplicates",
+      "--cwd",
+      "repo",
+      "--snapshot",
+      "--record-only",
+      "--json",
+    ],
+    root,
+  );
+  assert.equal(duplicated.code, 0, duplicated.stderr);
+  assert.equal(duplicated.stderr, "");
+  const duplicatedRun = parseHarnessEvalRun(JSON.parse(duplicated.stdout));
+  assert.notEqual(duplicatedRun.commit, head);
+  assert.equal(
+    duplicatedRun.scenarios[0]!.repetitions[0]!.commands[0]!.stdout,
+    "snapshot-present",
+  );
+
+  // A globally injected --snapshot still conflicts with an explicit --commit;
+  // record-only must not swallow that fail-closed error.
+  const conflicted = await runCli(
+    [
+      "--snapshot",
+      "--record-only",
+      "run",
+      "--suite",
+      "fail-suite.json",
+      "--label",
+      "conflict",
+      "--repetitions",
+      "1",
+      "--out",
+      "runs/conflict",
+      "--cwd",
+      "repo",
+      "--commit",
+      head,
+      "--json",
+    ],
+    root,
+  );
+  assert.equal(conflicted.code, 2);
+  assert.equal(conflicted.stdout, "");
+  assert.match(conflicted.stderr, /cannot be combined/);
+  assert.equal(existsSync(join(root, "runs/conflict")), false);
+
+  // Global options belong to the wrapper; compare/handoff ignore them but
+  // still reject experiment flags in their own tails.
+  const compareTail = await runCli(
+    [
+      "compare",
+      "--baseline",
+      "missing-baseline.json",
+      "--candidate",
+      "missing-candidate.json",
+      "--out",
+      "runs/compare-tail",
+      "--record-only",
+    ],
+    root,
+  );
+  assert.equal(compareTail.code, 2);
+  assert.match(compareTail.stderr, /unknown flag/);
+
+  const handoffTail = await runCli(
+    ["handoff", "missing-fixture.json", "--snapshot"],
+    root,
+  );
+  assert.equal(handoffTail.code, 2);
+  assert.match(handoffTail.stderr, /unknown flag/);
 });
 
 test("src/cli.ts dispatches eval and the eval CLI prints bounded help", () => {
@@ -908,6 +1516,7 @@ test("src/cli.ts dispatches eval and the eval CLI prints bounded help", () => {
   assert.equal(help.code, 0);
   assert.match(help.stdout, /cliyard eval/);
   assert.match(help.stdout, /no shell is used/);
+  assert.match(help.stdout, /--record-only/);
 
   const usage = runCliProcess(["eval"], ROOT);
   assert.equal(usage.code, 2);

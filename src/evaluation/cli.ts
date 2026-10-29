@@ -2,15 +2,26 @@
  * `cliyard eval` CLI.
  *
  *   cliyard eval run --suite <path> --label <id> --repetitions <n> \
- *                   --out <dir> [--cwd <repo>] [--commit <sha>] [--json]
+ *                   --out <dir> [--cwd <repo>] [--commit <sha>] \
+ *                   [--snapshot] [--record-only] [--json]
  *   cliyard eval compare --baseline <run.json> --candidate <run.json> \
  *                        --out <dir|file.json> [--json]
  *   cliyard eval handoff <fixture.json> [--json]
+ *   cliyard eval [--snapshot] [--record-only] <run|compare|handoff> ...
  *
  * Commands are argv arrays executed without a shell against a fixed cwd. The
  * run binds one exact clean Git commit; malformed suites, runs, ids and paths
  * fail closed before a scenario or Git probe runs. Reports stay below the
  * caller-owned output path. No provider call is made.
+ *
+ * `--snapshot` and `--record-only` are experiment-collection options for
+ * `run`. The npm `harness-eval` wrapper injects both before the caller's
+ * appended subcommand so one script composes with run, compare and handoff
+ * tails. Compare and handoff accept and ignore globally injected options.
+ * Record-only makes a complete report the deliverable: recorded scenario
+ * failures (including timeouts) exit zero, while malformed input, unsafe
+ * paths, Git/snapshot errors and commands that could not execute stay
+ * nonzero. Raw `cliyard eval run` remains strict.
  */
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -90,19 +101,59 @@ function usage(log: (line: string) => void): void {
 Usage:
   cliyard eval run --suite <suite.json> --label <id> --repetitions <n>
                   --out <dir> [--cwd <repo>] [--commit <sha>] [--snapshot]
-                  [--max-output-bytes <n>] [--json]
+                  [--record-only] [--max-output-bytes <n>] [--json]
   cliyard eval compare --baseline <run.json> --candidate <run.json>
                        --out <dir|comparison.json> [--json]
   cliyard eval handoff <run-manifest-or-evidence-bundle.json> [--json]
+  cliyard eval [--snapshot] [--record-only] <run|compare|handoff> ...
 
 Commands are argv arrays; no shell is used. A run requires a clean repository
 and binds the exact HEAD commit (or --commit). --snapshot additionally binds
 an uncommitted working tree by materializing it as a detached snapshot commit
 and evaluating that exact content in a temporary worktree; the caller's
 worktree and history are left untouched. --snapshot cannot be combined with
---commit. Metrics that were not observed stay null/unavailable. Exit codes:
-0 success, 1 failed scenarios, 2 invalid input. This makes no paid-model
-quality comparison.`);
+--commit. --record-only is explicit experiment collection: it exits 0 when a
+complete run report was written even if scenarios failed, preserving every
+failure detail; malformed input, unsafe paths, Git/snapshot errors and
+commands that could not execute still exit nonzero. The npm harness-eval
+wrapper injects --snapshot and --record-only before the appended subcommand;
+compare and handoff ignore those global wrapper options. Metrics that were
+not observed stay null/unavailable. Exit codes: 0 success, 1 failed scenarios
+or incomplete execution, 2 invalid input. This makes no paid-model quality
+comparison.`);
+}
+
+interface EvaluationGlobalOptions {
+  snapshot: boolean;
+  recordOnly: boolean;
+}
+
+/**
+ * Consume experiment-collection options that the npm `harness-eval` wrapper
+ * injects before the subcommand. npm appends the caller's `--` tail after the
+ * script, so the script may only carry global options; naming a subcommand
+ * there would duplicate the appended one. These options apply to `run` and
+ * are ignored by compare/handoff.
+ */
+function parseGlobalOptions(argv: string[]): {
+  options: EvaluationGlobalOptions;
+  offset: number;
+} {
+  let snapshot = false;
+  let recordOnly = false;
+  let offset = 0;
+  while (offset < argv.length) {
+    const token = argv[offset];
+    if (token === "--snapshot") {
+      snapshot = true;
+    } else if (token === "--record-only") {
+      recordOnly = true;
+    } else {
+      break;
+    }
+    offset += 1;
+  }
+  return { options: { snapshot, recordOnly }, offset };
 }
 
 /**
@@ -121,13 +172,8 @@ export async function runEvaluationCli(
       usage(logError);
       return 2;
     }
-    let offset = 0;
-    let snapshot = false;
-    while (argv[offset] === "--snapshot") {
-      snapshot = true;
-      offset += 1;
-    }
-    const [subcommand, ...rest] = argv.slice(offset);
+    const global = parseGlobalOptions(argv);
+    const [subcommand, ...rest] = argv.slice(global.offset);
     if (subcommand === undefined) {
       usage(logError);
       return 2;
@@ -142,11 +188,9 @@ export async function runEvaluationCli(
         baseCwd,
         log,
         logError,
-        snapshot,
+        snapshot: global.options.snapshot,
+        recordOnly: global.options.recordOnly,
       });
-    }
-    if (snapshot) {
-      throw new EvalCliUsageError("--snapshot is only valid for eval run");
     }
     if (subcommand === "compare") {
       return commandCompare(rest, { baseCwd, log, logError });
@@ -176,6 +220,7 @@ async function commandRun(
     inspectGit?: EvalGitInspector;
     resolveCommit?: (cwd: string) => Promise<string>;
     snapshot?: boolean;
+    recordOnly?: boolean;
   },
 ): Promise<number> {
   const { values, flags } = parseFlags(argv, {
@@ -186,6 +231,7 @@ async function commandRun(
     "--cwd": "value",
     "--commit": "value",
     "--snapshot": "boolean",
+    "--record-only": "boolean",
     "--max-output-bytes": "value",
     "--json": "boolean",
   });
@@ -222,6 +268,8 @@ async function commandRun(
       ? context.baseCwd
       : resolveExistingDirectory(cwdRaw, context.baseCwd, "--cwd");
   const snapshot = context.snapshot === true || flags.has("--snapshot");
+  const recordOnly =
+    context.recordOnly === true || flags.has("--record-only");
   const explicitCommit = values.get("--commit");
   if (snapshot && explicitCommit !== undefined) {
     throw new EvalCliUsageError("--snapshot cannot be combined with --commit");
@@ -279,10 +327,46 @@ async function commandRun(
     } else {
       context.log(formatRunSummary(run, paths.jsonPath, paths.markdownPath));
     }
+    if (recordOnly) {
+      // The complete report is the deliverable. A recorded scenario failure
+      // (including a timeout) is an experiment result, not a collection
+      // failure. A command that never produced a usable process outcome is
+      // still execution infrastructure and must stay nonzero even though the
+      // report was written so the failure remains auditable.
+      if (hasExecutionInfrastructureFailure(run)) {
+        context.logError(
+          "cliyard eval: record-only run recorded an execution infrastructure failure",
+        );
+        return 1;
+      }
+      return 0;
+    }
     return run.summary.failedScenarios === 0 ? 0 : 1;
   } finally {
     await cleanupSnapshot?.();
   }
+}
+
+/**
+ * A timeout or a completed nonzero exit is a scenario outcome that record-only
+ * preserves as evidence. A failure with no usable process outcome (missing
+ * executable, executor error or signal termination) is execution
+ * infrastructure, so record-only keeps it nonzero after writing the report.
+ */
+function hasExecutionInfrastructureFailure(run: HarnessEvalRun): boolean {
+  return run.scenarios.some((scenario) =>
+    scenario.repetitions.some((repetition) =>
+      repetition.commands.some(
+        (command) =>
+          !command.matchedExpectation &&
+          !command.timedOut &&
+          (command.exitCode === null ||
+            command.exitCode < 0 ||
+            command.signal !== null ||
+            command.error !== null),
+      ),
+    ),
+  );
 }
 
 interface SnapshotWorktree {
