@@ -3,6 +3,19 @@
 Thin bridge: **DSH GUI = Master 壳**，**cliyard = 控制面**。  
 用户故事：[docs/USER_STORY_STEP1.md](../../docs/USER_STORY_STEP1.md).
 
+## Compatibility status
+
+- Current local DSH Desktop: `0.2.1-rc.3`.
+- The plugin has not been conformance-tested against `0.2.1-rc.4` or
+  `0.2.2-alpha.2`.
+- cliyard core remains on Node 20. DSH alpha2 uses Node 24.9 or newer, so its
+  host/runtime compatibility must be tested as a separate plugin lane.
+- Native DSH sidebar tabs replace the assumption that
+  `dsh-better-sidebar` must be the first cockpit. The third-party sidebar
+  remains optional until native tab compatibility is measured.
+
+See [DSH 0.2.2-alpha.2 review](../../docs/evidence/DSH_0_2_2_ALPHA_2_REVIEW.md).
+
 ## Without DSH (macOS demo)
 
 From the cliyard repo root:
@@ -66,7 +79,8 @@ linked plugin source does not guarantee an active Host module is reloaded.
 
 ## Design rules
 
-- Business truth = cliyard ledger, not DSH chat history.
+- Control truth = frozen contracts, RunManifest and EvidenceBundle in cliyard;
+  the ledger is progress history, and DSH chat is never authority.
 - Parallel isolation = cliyard worktrees + non-overlapping `writePaths`, not DSH Jobs.
 - Plugin stays thin; DSH API churn should not rewrite the control plane.
 - `controlRoot` (cliyard) and `repoRoot` (business repo) are deliberately
@@ -74,3 +88,16 @@ linked plugin source does not guarantee an active Host module is reloaded.
 - Current worker-batch `dependsOn` orders starts but does **not** merge an upstream
   worktree into a dependent worktree. Use independent tasks for this slice;
   dependent modules need a separate integration/composition step.
+
+## Known limitations before production use
+
+- The bundled HTML monitor is a development cockpit, not an authenticated
+  production UI. It currently interpolates ledger fields into HTML and must be
+  replaced by a typed Control API client before it handles untrusted task text.
+- The plugin watches one ledger file. It does not yet expose the unified
+  RunManifest, EvidenceBundle, WorkerLease, runtime and cost view.
+- `cliyard_plan_dispatch` still accepts `worker`/`model`; it should move to
+  frozen `executionProfileId` values so the model cannot alter permissions or
+  routes.
+- Tool dispatch is backgrounded, but state delivery is still polling/ledger
+  based rather than a replayable Control API event stream.

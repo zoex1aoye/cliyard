@@ -2,7 +2,7 @@
 
 > 状态：架构决策记录
 >
-> 日期：2026-10-26
+> 日期：2026-10-26；DSH 更新复核：2026-10-29
 
 ## 1. 核心结论
 
@@ -163,6 +163,14 @@ Key Mind 不应该重写 Agent Harness，也不应该把 GUI 当调度真相。
 - 明确会有 compatibility-breaking changes；
 - Desktop profile 由 Electron 应用管理；
 - UI 插件、Host API、工具 API 可能变化。
+- `0.2.2-alpha.2` 将最低 Node.js 提升至 24.9，并改变 Session projection、
+  tool admission、model selection、Cordis timer 和插件兼容性元数据；
+- DSH 的 Forge、Statistics 与 `subagent_oar` 扩大了 cockpit/Agent Harness
+  覆盖面，但仍不提供 cliyard 的契约准入、独立 EvidenceBundle、预算账本和
+  human integration verdict。
+
+2026-10-29 的版本与 API 事实记录在
+[evidence/DSH_0_2_2_ALPHA_2_REVIEW.md](evidence/DSH_0_2_2_ALPHA_2_REVIEW.md)。
 
 ## 5. DSH 的正确使用方式
 
@@ -203,7 +211,8 @@ DSH GUI
 
 1. CLI 始终可独立运行；
 2. 本地版本化 Control API + event stream；
-3. DSH `dsh-better-sidebar` 薄插件作为第一 cockpit；
+3. `dsh-cliyard` 薄客户端优先使用 DSH 原生 `sidebarRightTabs` / browser tab；
+   `dsh-better-sidebar` 仅在确有额外 UI 能力时作为可选增强；
 4. 最小自有浏览器 UI 作为平台替代与恢复入口；
 5. 需要桌面集成时，用 Tauri/Electron 包装同一 Web UI，不重写业务层。
 
@@ -259,6 +268,30 @@ interface ControlClient {
 ```
 
 DSH / 自研 Web / 未来其他 UI 共用这一层。
+
+Control API 的观测模型应借鉴 DSH 的新 Session seam：
+
+```text
+GET snapshot(version)
+GET events(afterCursor)       # ordered replay plus live delivery
+GET status                    # lightweight liveness
+GET projections/:name         # rebuildable views, never authority
+```
+
+快照、事件、状态与 projection 必须分开；事件必须可重放，重连不能依赖聊天
+或内存状态。投影可以重建，不能反向成为 RunManifest、EvidenceBundle 或
+acceptance 的真相。
+
+### 7.2.1 DSH-specific compatibility
+
+- cliyard 核心保持 Node 20；DSH 插件在 DSH 要求的宿主运行时中单独测试。
+- 发布插件时必须声明经过验证的 `engines.dsh`，不能默认“无 peer 声明即兼容”。
+- 插件工具只应允许选择冻结的 execution profile alias，不能接受任意模型、
+  权限或 CLI 参数。
+- DSH `subagent_oar` 是单次文本委派参考，缺少 resume、结构化 progress、
+  Verifier、受管进程清理和副作用回滚，不能成为 Worker 控制面。
+- DSH Forge 可作为 PR/diff/Worktree cockpit，但其状态是 UI observation；
+  cliyard 仍必须保存 reviewed head，并在合入前拒绝 stale head。
 
 ### 7.3 ProtocolAdapter
 

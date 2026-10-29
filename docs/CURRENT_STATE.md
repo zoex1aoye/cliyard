@@ -54,15 +54,29 @@ self-host controller loaded the new code.
   and strict scenario-failure exits prevented `run -> compare` evidence
   collection. The closeout Plan addresses only that wrapper and records the
   observed deadline flake rather than rerunning until green.
+- Closeout run `c4d786ec-2dbe-449f-a65e-a23c6a6d673e` is blocked. Its wrapper
+  task is rejected because the outer Worker cleanup could not prove one
+  vanished external group after a 5-second `ps` timeout. The dependent evidence
+  task is policy-blocked. Independent review of the retained candidate passed
+  focused 33/33, build and full 513/513 in 28.01 seconds, but neither the run
+  nor the candidate is accepted.
+- Current mainline build passes and the complete suite passes **464/464** in
+  **26.45 seconds**. This is close to the verifier's fixed 30-second command
+  timeout and does not remove the observed flake risk.
 - Post-merge build passed. The first complete-suite run was **463/464** because
   the deadline-extension in-flight checkpoint timed out once; that file then
   passed **13/13**, and a second complete run passed **464/464**. This is an
   observed flake, not a stable-green claim.
-- No active Supervisor lock, queue lock or WorkerLease remained after the
-  cutover. Historic leases include released and cleanup-failed records; they
-  must not be erased or rewritten.
+- No active Supervisor lock or queue lock remained after the latest closeout.
+  Historic leases include released and cleanup-failed records; they must not be
+  erased or rewritten.
 - Node baseline remains 20. Node 22, SRT and OS permission experiments require a
   separate decision.
+- DSH is still a replaceable cockpit, not a control-plane dependency. The local
+  app is `0.2.1-rc.3`; upstream adds a low-risk `0.2.1-rc.4` and the
+  compatibility-heavy `0.2.2-alpha.2`. The plugin has not been tested against
+  either newer release. See
+  [DSH_0_2_2_ALPHA_2_REVIEW.md](evidence/DSH_0_2_2_ALPHA_2_REVIEW.md).
 
 ## Implemented and measured on the mainline
 
@@ -149,12 +163,19 @@ neither earlier RunManifest is retroactively accepted.
 
 The order is a dependency order, not a promise of parallel delivery.
 
-1. **Harness Eval evidence closeout**
-   Fix npm wrapper option composition and collection exit semantics, then
-   reproduce baseline/candidate experiments through the wrapper. Preserve the
-   observed deadline flake and unavailable provider metrics in the evidence
-   document. This closes the EvidenceBundle/Harness Eval gate before background
-   verification work starts.
+1. **Pilot safety and reliability closeout**
+   - Replace the per-external-group full `ps -A` cleanup scans with bounded
+     process-table snapshots and exact pgid projection. The latest failure
+     observed 1,302 external groups and one inspection timeout after its leader
+     disappeared.
+   - Add an explicit verifier command timeout policy. A 26-second current suite
+     against a fixed 30-second boundary is not enough headroom.
+   - Make the cumulative budget envelope span repairs and continuation
+     invocations, not reset with every new worker attempt.
+   - Finish the Harness Eval wrapper/evidence closeout and preserve all failed
+     repetitions. Infrastructure failures must remain visible.
+   - Remove ledger-string HTML injection from the development monitor, add CSP,
+     and add a tested DSH/Node compatibility lane with explicit `engines.dsh`.
 
 2. **Background VerificationTask**
    Decouple long verification from Worker lifecycle. Persist owner, artifact
@@ -172,24 +193,51 @@ The order is a dependency order, not a promise of parallel delivery.
    evidence. Persist structured `ReviewFinding` records and verify every finding
    against code before repair.
 
-5. **Human intervention ledger**
+5. **Secure Control API and replaceable cockpit**
+   Expose versioned snapshots, ordered events with replay cursors, lightweight
+   status and rebuildable projections. Authenticate future actions, and keep the
+   core on Node 20 while testing UI adapters on the host runtime required by
+   their versions.
+   Prefer DSH native sidebar registration when compatible; keep
+   `dsh-better-sidebar` optional.
+
+6. **Human intervention ledger**
    Record Retry, Judge, Approve, Carry, Trigger and Stand-in interventions so
    design work can reduce repeated manual steps without treating silence or
    abandonment as success.
 
-6. **SkillPack provenance**
+7. **SkillPack provenance**
    Version the rule/skill input by id, digest, entrypoint and capability. A run
    must be able to answer which instructions influenced its behavior.
 
-7. **ProfileCatalog, routing and hierarchical admission**
+8. **ProfileCatalog, routing and hierarchical admission**
    Route only among activated provider/account/model/CLI bindings. Unknown
    concurrency begins with one probe; CPU/RAM/runtime/port/provider limits apply
    globally to queue items and Plan waves.
 
-8. **Versioned Control API and replaceable UI**
-   Stabilize a local API/SSE event model before making DSH or another GUI the
-   product entry. UI clients display and request actions; they are never
-   authority.
+## Actual-project readiness
+
+These are capability gates, not date estimates or a percentage score.
+
+| Use mode | Current assessment | Gate before use |
+|---|---|---|
+| Supervised single-repository pilot | Near, but not yet recommended | Close process inspection/cleanup races, test full suites with explicit timeouts, enforce a task-level budget envelope, and remove the monitor's HTML injection path |
+| Small-team real project | Not ready | Add background verification, OS-level write isolation, authenticated Control API/event replay, stable DSH compatibility, and intervention history |
+| Parallel multi-module delivery | Not ready | Background verifier, per-run ownership, provider/runtime admission, deterministic integration lineage and measured DSH/UI lifecycle behavior |
+| Overnight or 24-hour unattended operation | Far | Durable controller/daemon recovery, complete process ownership, provider quota/balance handling, bounded soak, incident recovery and an auditable human-escalation path |
+
+Candidate pilot envelope after the reliability and monitor-security gates:
+
+- one trusted repository on one macOS host;
+- Claude Code using the currently exercised DeepSeek compatibility profile,
+  with no production guarantee for other models or providers;
+- one foreground Supervisor or explicitly sequenced runs;
+- human Plan approval, human diff review and no automatic merge or push;
+- no claim of OS sandboxing, unlimited parallel work or unattended operation.
+
+The first credible supervised pilot should start only after priority item 1 is
+accepted. Team use additionally requires the background verifier, sandbox,
+clean-context review and authenticated event/action API gates.
 
 ## Release gates
 

@@ -1072,7 +1072,8 @@ blocked item，不启用并行、路由或准入；Windows 与动态评分不得
      admission 完成后，才允许开启并行。
 6. **Control API、可替换入口与外部 UI（P0/P1，未实现）**
    - CLI 与版本化本地 Control API / event stream 是稳定入口；
-   - DSH 只做薄 cockpit，优先注册 `dsh-better-sidebar` tab；
+   - DSH 只做薄 cockpit，优先使用经过版本验证的原生
+     `sidebarRightTabs`/browser tab；`dsh-better-sidebar` 为可选增强；
    - 后续最小自有 Web UI 复用同一 API，DSH 停止维护不影响控制面；
    - 不自研完整编辑器、终端、diff、Git 或聊天客户端。
 7. **受监督的前台长时控制器（路由/并行/证据之后，未实现）**

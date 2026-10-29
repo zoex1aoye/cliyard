@@ -267,3 +267,23 @@ After v1.2, the next evidence gap is not ProfileCatalog. It is Harness Eval v0,
 because prompt, Skill, background-task and review changes need a repeated
 pinned baseline before routing automation can safely amplify them. Current
 ordering and release gates are in `CURRENT_STATE.md`.
+
+## 2026-10-29 closeout run and DSH compatibility gaps
+
+Closeout run `c4d786ec-2dbe-449f-a65e-a23c6a6d673e` remained blocked after the
+wrapper implementation itself passed focused 33/33, build and an independently
+reviewed 513/513 complete suite. The run is rejected for infrastructure
+reasons, not promoted from the candidate worktree.
+
+| Priority | Gap | Evidence | Next action |
+|---|---|---|---|
+| P0 | High-fanout external-group cleanup | Cleanup tracked 1,302 groups; `listGroupMembers` ran a full process-table scan per group, and one vanished group's inspection timed out after 5 seconds | Read one bounded process-table snapshot per cleanup cycle, project exact pgids in memory, and retain a bounded race retry |
+| P0 | DSH plugin compatibility is unmeasured | Local DSH is `0.2.1-rc.3`; upstream rc.4 is low risk, while alpha.2 requires Node 24.9 and changes tool/session/model APIs | Add a DSH/Node compatibility matrix and `engines.dsh`; keep core Node 20 |
+| P0 | Monitor output is not safely rendered | `plugins/dsh-cliyard/lib/monitor.js` interpolates ledger fields into `innerHTML` | Render through DOM/text nodes or typed components, add CSP, and authenticate future action endpoints |
+| P1 | Verifier command timeout | Mainline suite is 464/464 in 26.45 seconds against a fixed 30-second verifier limit; the candidate suite took 28.01 seconds | Add contract/project-level verifier command timeout |
+| P1 | Guard budget resets across repair attempts | The rejected task recorded two `$16` invocation guards and `guardBudgetUsd=32`, while the per-invocation cumulative policy did not span attempts | Build a task-level budget ledger used by initial and repair invocations |
+| P1 | No client-neutral Control API | The plugin reads one ledger file and its `watchLedger` callback is currently a no-op | Add snapshot/event/status/projection APIs with replay cursors and client conformance tests |
+| P1 | DSH features overlap without an integration seam | Forge, Statistics and `subagent_oar` now cover adjacent UI/worker capabilities | Reuse or link; keep contracts, evidence, budgets and integration verdict in cliyard |
+
+DSH-specific source review and non-claims are recorded in
+[evidence/DSH_0_2_2_ALPHA_2_REVIEW.md](evidence/DSH_0_2_2_ALPHA_2_REVIEW.md).

@@ -56,6 +56,11 @@
 - 适合做人机面：**整理 Plan、插件监控、会话**；不替代 cliyard 的契约/DAG/worktree/ledger。
 - 社区已有 workbench / HUD / agent-board 等监控插件可对照；我们的 Master 插件见 `plugins/dsh-cliyard`。
 - 风险：developer preview，API 可能 breaking → 插件保持薄，**业务状态只信 cliyard 磁盘**。
+- 2026-10-29 复核：本机为 `0.2.1-rc.3`；上游 rc.4 仅修 ACP stdout，
+  alpha2 增加原生 sidebar、Forge、Statistics、外部 Codex/Claude 委派和插件
+  更新，但要求 Node 24.9 并含多项 breaking API。cliyard 继续作为控制面，
+  插件按 DSH 版本做 adapter/conformance，详见
+  [evidence/DSH_0_2_2_ALPHA_2_REVIEW.md](evidence/DSH_0_2_2_ALPHA_2_REVIEW.md)。
 
 ## 三条路线
 

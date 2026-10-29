@@ -41,7 +41,8 @@
        └─ Worker B @ worktree B
 ```
 
-**状态出聊天**：业务真相在 `.cliyard/ledger.json`；DSH 会话只做人机面与短摘要。  
+**状态出聊天**：控制真相在冻结契约、RunManifest 与 EvidenceBundle；
+`.cliyard/ledger.json` 是进度历史，DSH 会话只做人机面与短摘要。
 **并行隔离**：以 cliyard worktree + paths 不重叠为准；不把 DSH 单会话 Jobs/子 Agent 当成多 CLI 隔离。
 
 ## Spike 路径

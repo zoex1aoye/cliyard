@@ -36,14 +36,16 @@ Workers（厚）：各自 worktree + 各家 CLI（Codex / CodeBuddy / …）
         ↓
 Verifier：重跑测试/build 等（不信任 Worker 自报「已通过」）
         ↓
-监控台（DSH 插件）：读 ledger；人审合入 / 上线（不可逆）
+监控台（DSH 插件 / 自有 Web）：读 Control API 快照、事件与 EvidenceBundle；
+人审合入 / 上线（不可逆）
 ```
 
 理想体验：
 
 - **少打断**：无人值守权限 + 可执行验收，代替人肉确认。  
 - **少纠偏**：方向写进冻结契约（paths、验收命令、反例）；漂了就 reject/requeue，而不是长聊劝说。  
-- **Master 不中断**：状态在磁盘（taskfile / ledger / 状态机），不在超长对话里；每轮只喂短摘要，或新会话 + resume pack。  
+- **Master 不中断**：状态在磁盘（contract / RunManifest / evidence / 状态机），
+  不在超长对话里；每轮只喂短摘要，或新会话 + resume pack。
 - **并行可控**：多模块 Plan 可连续派发；worktree + paths 不重叠；并发有上限（配额共用）。  
 - **验收可证伪**：有命令、有 diff、有退出码；「我说做完了」不算数。  
 - **监控可见**：不必翻终端才知道 running / verifying / repairing / accepted / rejected。

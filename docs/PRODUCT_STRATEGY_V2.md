@@ -440,6 +440,16 @@ POST /v1/actions/...        (explicit human actions only)
 
 All DTOs must be versioned and independent of DSH/Cordis.
 
+The DSH 0.2.2-alpha Session model confirms the required separation:
+
+- an authoritative snapshot with an opaque version;
+- an append-only, cursor-addressable event stream;
+- a lightweight live-status view;
+- rebuildable projections for task, run, cost, verification and evidence.
+
+A UI must be able to resubscribe and replay from its last cursor without reading
+the entire ledger or asking the chat session what happened.
+
 ### 6.2 UI decision
 
 Do not choose DSH as the only UI and do not build a full IDE.
@@ -449,7 +459,8 @@ Recommended sequence:
 1. CLI + JSON status remains fully functional.
 2. A local Control API exposes the unified project/queue/run/evidence view.
 3. DSH `dsh-cliyard` becomes a thin Control API client, initially registered
-   as a `dsh-better-sidebar` tab.
+   through DSH's native `sidebarRightTabs` contract. A browser tab may host the
+   standalone monitor during migration; `dsh-better-sidebar` is optional.
 4. Add a minimal self-owned browser UI for the same read-only views and
    essential human actions.
 5. If desktop integration is later required, wrap the same web UI with Tauri
@@ -476,7 +487,9 @@ terminal or generic chat client.
 - **Backend/API:** Node.js + TypeScript, reusing the existing cliyard control
   plane, with a loopback-only HTTP API and JSON/SSE event stream.
 - **CLI:** first-class and always usable; it must not depend on the UI server.
-- **First cockpit:** thin DSH plugin using `dsh-better-sidebar.registerTab`.
+- **First cockpit:** thin DSH plugin using the tested native sidebar API.
+  `dsh-better-sidebar` remains an optional enhancement rather than the base
+  contract.
 - **Fallback Web UI:** React + Vite consuming the same versioned Control API.
   Keep it read-only first, then add explicit human actions.
 - **Desktop wrapper:** defer. If tray, notifications or app lifecycle become
@@ -503,12 +516,14 @@ dependency.
 
 | Need | Existing support to reuse | Decision |
 |---|---|---|
-| UI shell and sidebar tabs | [DSH `dsh-better-sidebar`](https://github.com/omdsh-dev/DSH-better-sidebar) | use as optional cockpit base |
+| UI shell and sidebar tabs | DSH native `ctx.sidebarRightTabs`; [DSH `dsh-better-sidebar`](https://github.com/omdsh-dev/DSH-better-sidebar) as optional enhancement | pin a tested DSH version; do not treat either API as control authority |
 | Context/token/agent-fleet view | [DSH `dsh-context`](https://github.com/bowenliang123/dsh-context) | deep-link and borrow UX/data-model ideas |
 | Ambient master status | [DSH `dsh-pet`](https://github.com/zhu1090093659/dsh-pet) | optional read-only status mirror |
 | Account balance/quota widget | [DeepSeek whale widget](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget) | borrow accounting concepts, do not make it task authority |
 | Event wakeup/notification | [DSH `dsh-sentinel`](https://github.com/fuhefei/dsh-sentinel) | external event adapter |
-| Worktree/diff/PR UI | [`dsh-better-workspaces`](https://github.com/ds-hu/dsh-better-workspaces) or better-sidebar Git | do not rebuild |
+| Worktree/diff/PR UI | DSH Forge, [`dsh-better-workspaces`](https://github.com/ds-hu/dsh-better-workspaces) or better-sidebar Git | link from task/run state; preserve cliyard's reviewed-head invariant; do not rebuild |
+| Per-step context/cache/tool metrics | DSH Statistics projection | borrow the event-fold and unknown-value semantics; persist cliyard observations |
+| External Codex/Claude one-shot delegation | DSH `subagent_oar` | borrow constrained profile aliases; do not use as scheduling or acceptance authority |
 | Multi-CLI execution and workflow | Cezar (MIT) | reference; potential integration/adapter |
 | Team issue board/daemon | Multica | reference/adapter after license review |
 | Multi-agent server/control center | OpenHands Agent Canvas | worker/backend integration option |
