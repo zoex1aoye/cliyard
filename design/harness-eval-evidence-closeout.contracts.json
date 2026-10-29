@@ -1,0 +1,109 @@
+{
+  "planId": "harness-eval-evidence-closeout",
+  "contracts": [
+    {
+      "taskId": "harness-eval-wrapper-semantics",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Fix the Harness Eval npm wrapper and CLI option composition on the docs-composed Plan base whose accepted implementation head is 3abbc7952389d8f7337377238bc7d3a0bc3808a6. Use the contract's full baseCommit as the exact execution base. In src/evaluation/cli.ts and package.json, make the harness-eval convenience script suitable for repeated experiment collection: it may materialize a snapshot for run and must not make compare or handoff reject the injected snapshot option. Add an explicit record-only experiment mode used by the convenience script that exits 0 only when a complete run report was successfully produced, even if one or more scenarios failed, while preserving all scenario failure details. The raw cliyard eval run command must remain strict and exit nonzero for scenario failures; malformed input, unsafe paths, Git/snapshot errors and execution infrastructure failures must remain nonzero in both modes. Ensure npm run harness-eval composes with run, compare and handoff tails appended by npm. Update tests/harness-eval-cli.test.ts with regression coverage for the current double-run failure, global snapshot option across subcommands, record-only failed scenario reporting, strict raw CLI behavior and preservation of infrastructure failures. Do not modify eval core, report format, Supervisor, suite definitions or design authority files."
+      ],
+      "nonGoals": [
+        "Do not change Eval core or report schemas.",
+        "Do not hide scenario failures or rerun until green.",
+        "Do not weaken Git snapshot/path validation.",
+        "Do not make infrastructure failures exit zero."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/CURRENT_STATE.md",
+        "design/evidence-and-harness-eval-v0.md",
+        "design/harness-eval-evidence-closeout.md",
+        "src/evaluation/cli.ts",
+        "src/evaluation/core.ts",
+        "src/evaluation/report.ts",
+        "src/evaluation/types.ts",
+        "src/evaluation/handoff.ts",
+        "src/cli.ts",
+        "tests/harness-eval-cli.test.ts",
+        "package.json"
+      ],
+      "writePaths": [
+        "src/evaluation/cli.ts",
+        "tests/harness-eval-cli.test.ts",
+        "package.json"
+      ],
+      "sharedResources": [],
+      "baseCommit": "9f5a5046c88fd2f0b092e9257460f13e94e0afcf",
+      "verifyCommands": [
+        "npx tsx --test tests/harness-eval-core.test.ts tests/harness-eval-cli.test.ts tests/harness-eval-handoff.test.ts",
+        "npm run build",
+        "npm test"
+      ],
+      "deliverables": [
+        "A convenience wrapper that composes with run/compare/handoff.",
+        "Record-only failed-scenario collection with strict raw CLI behavior.",
+        "Regression tests for option composition and exit semantics."
+      ],
+      "forbidden": [
+        "Do not modify eval core or report types.",
+        "Do not suppress malformed input or execution errors.",
+        "Do not hide failed repetitions."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "harness-eval-v0-evidence-closeout",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "After harness-eval-wrapper-semantics is accepted, rerun the complete Harness Eval evidence flow on this exact continuation base and rewrite docs/evidence/HARNESS_EVAL_V0.md with only observed facts. Use two repetitions per scenario for baseline and candidate, compare the resulting reports through the fixed harness-eval wrapper, preserve all failed scenarios and flipped repetitions instead of hiding or retrying them away, and record exact commands, commit/tree identities, report hashes, wall times, missing metrics and any known deadline or high-fanout flake. Rebuild the EvidenceBundle handoff fixtures and verify a fresh process reconstructs the next action from only the fixture; record clean and tampered fixture outcomes. Run focused, build and the complete suite. Clearly state that baseline/candidate at the same tree are repeatability checks, not a Harness improvement or paid-model quality result. Do not modify source, tests, Plan or contracts."
+      ],
+      "nonGoals": [
+        "Do not edit implementation or tests.",
+        "Do not claim improvement from same-code repeats.",
+        "Do not hide failed repetitions or flips.",
+        "Do not claim provider-level compaction."
+      ],
+      "dependsOn": [
+        "harness-eval-wrapper-semantics"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/CURRENT_STATE.md",
+        "design/evidence-and-harness-eval-v0.md",
+        "design/harness-eval-evidence-closeout.md",
+        "src/evaluation/cli.ts",
+        "src/evaluation/scenarios.ts",
+        "src/evaluation/handoff.ts",
+        "examples/harness-eval/suite.json",
+        "src/supervisor/evidence-bundle.ts",
+        "tests/harness-eval-cli.test.ts",
+        "tests/harness-eval-handoff.test.ts"
+      ],
+      "writePaths": [
+        "docs/evidence/HARNESS_EVAL_V0.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "9f5a5046c88fd2f0b092e9257460f13e94e0afcf",
+      "verifyCommands": [
+        "npm run harness-eval -- run --suite examples/harness-eval/suite.json --label baseline --repetitions 2 --out .cliyard/evals/harness-eval-v0-baseline --json",
+        "npm run harness-eval -- run --suite examples/harness-eval/suite.json --label candidate --repetitions 2 --out .cliyard/evals/harness-eval-v0-candidate --json",
+        "npm run harness-eval -- compare --baseline .cliyard/evals/harness-eval-v0-baseline/run.json --candidate .cliyard/evals/harness-eval-v0-candidate/run.json --out .cliyard/evals/harness-eval-v0-comparison.json --json",
+        "npm test"
+      ],
+      "deliverables": [
+        "A complete measured Harness Eval v0 evidence document.",
+        "Preserved failure/flake samples and exact comparison provenance.",
+        "Fresh-process handoff reconstruction evidence."
+      ],
+      "forbidden": [
+        "Do not edit source, tests, Plan or contracts.",
+        "Do not report only aggregate pass rates.",
+        "Do not claim stable green from one comparison."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
