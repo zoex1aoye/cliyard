@@ -6,6 +6,10 @@
 > `3abbc7952389d8f7337377238bc7d3a0bc3808a6`.
 >
 > Target checkout: `codex/supervisor-v0-baseline`.
+>
+> Frozen contracts use a docs-composed reviewed base: the accepted
+> implementation commit above plus this committed Plan. That composition SHA,
+> not the shorter accepted code SHA, is the exact contract `baseCommit`.
 
 ## Why this continuation exists
 
