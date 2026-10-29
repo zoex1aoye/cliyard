@@ -1,0 +1,263 @@
+{
+  "planId": "evidence-and-harness-eval-v0",
+  "contracts": [
+    {
+      "taskId": "controller-evidence-bundle",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Implement the pure controller-owned EvidenceBundle v0 model and atomic writer in src/supervisor/evidence-bundle.ts with focused tests in tests/evidence-bundle.test.ts. Build a deterministic, bounded, credential-free bundle from a terminal RunManifest and validated repository facts. Include run/plan identity, terminal status, contracts and manifest hashes, base/integration commits, task verdicts, result commits, failures, cost truth, path audits, process-tree records, WorkspaceBoundary records, missing observations, humanReviewRequired and a bounded nextAction. Refuse running manifests; support completed, blocked and interrupted terminal states. Compute deterministic serialization and idempotent atomic writes under .cliyard/evidence/<runId>.json. Never copy prompts, transcripts, file contents, environment dumps or unbounded logs, never mutate a RunManifest and never grant acceptance or merge. Test success, terminal failure, missing required evidence, malformed manifest/input, path bounds, deterministic bytes, idempotent rewrite and no secret-bearing fields. Do not modify the Supervisor CLI, RunManifest schema or other source files."
+      ],
+      "nonGoals": [
+        "Do not integrate the bundle into Supervisor commands in this task.",
+        "Do not change RunManifest authority or task acceptance.",
+        "Do not copy raw transcripts, prompts or file contents.",
+        "Do not claim EvidenceBundle replaces verification."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "design/evidence-and-harness-eval-v0.md",
+        "docs/CURRENT_STATE.md",
+        "src/supervisor/types.ts",
+        "src/supervisor/store.ts",
+        "src/failures.ts",
+        "src/agents/process-tree.ts",
+        "src/agents/workspace-boundary.ts"
+      ],
+      "writePaths": [
+        "src/supervisor/evidence-bundle.ts",
+        "tests/evidence-bundle.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "93715ffd357a00425de8920834d7747fbc8f4368",
+      "verifyCommands": [
+        "npx tsx --test tests/evidence-bundle.test.ts",
+        "npm run build",
+        "npm test"
+      ],
+      "deliverables": [
+        "A typed EvidenceBundle v0 builder and atomic writer.",
+        "Focused tests for terminal-state validation, bounded projection, determinism, idempotence and missing evidence."
+      ],
+      "forbidden": [
+        "Do not claim Bundle creation changes acceptance.",
+        "Do not persist secrets or raw provider payloads.",
+        "Do not edit files outside writePaths."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "harness-eval-core",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Implement the deterministic Harness Eval v0 engine in src/evaluation/types.ts, src/evaluation/core.ts and src/evaluation/report.ts with tests in tests/harness-eval-core.test.ts. Define versioned suite, scenario, repetition, HarnessEvalRun and baseline/candidate comparison types. The core must parse and validate argv-array command scenarios without shell strings, require every run to bind an exact clean Git starting commit, run injected executors with fixed cwd, per-command timeout and bounded retained output, support configured repetitions, scenario pass only when all repetitions match an explicit zero/nonzero expectation, record wall time and null/unknown request/token/cache/cost/human-intervention observations with missing reasons, compute pass rate and flipped scenario ids against a baseline, and render deterministic JSON plus bounded Markdown reports. Fail closed on malformed suites, unsafe ids/paths, empty scenarios/commands, invalid timeout/repetition bounds, duplicate ids or malformed baseline reports. A comparison must require compatible suite id/version and repetition counts but must allow different exact baseline and candidate Git commits so a real Harness change can be evaluated. Do not add CLI wiring, call a real model or write outside the task-owned output directory supplied by the caller."
+      ],
+      "nonGoals": [
+        "Do not compare paid model quality.",
+        "Do not add a CLI command or package script in this task.",
+        "Do not use an LLM judge.",
+        "Do not treat unavailable metrics as zero."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "design/evidence-and-harness-eval-v0.md",
+        "design/continuous-harness-v2.md",
+        "docs/CURRENT_STATE.md",
+        "docs/TASK_ESTIMATION.md",
+        "src/runtime/failure-drills.ts",
+        "src/failures.ts",
+        "tests/runtime-failure-drills.test.ts",
+        "tests/deadline-extension.test.ts"
+      ],
+      "writePaths": [
+        "src/evaluation/types.ts",
+        "src/evaluation/core.ts",
+        "src/evaluation/report.ts",
+        "tests/harness-eval-core.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "93715ffd357a00425de8920834d7747fbc8f4368",
+      "verifyCommands": [
+        "npx tsx --test tests/harness-eval-core.test.ts",
+        "npm run build",
+        "npm test"
+      ],
+      "deliverables": [
+        "A versioned deterministic eval engine with repeated scenario execution.",
+        "Baseline/candidate comparison with pass rate, flips, durations and explicit missing metrics.",
+        "JSON and bounded Markdown report generation."
+      ],
+      "forbidden": [
+        "Do not invoke a paid provider in v0 core tests.",
+        "Do not hide unavailable measurements behind zero or an average.",
+        "Do not accept a one-run pass as a flake-rate claim."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "supervisor-evidence-integration",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Integrate the accepted controller EvidenceBundle v0 module into the Supervisor CLI without changing RunManifest task authority. In src/supervisor/cli.ts, generate the evidence bundle after the Worker batch has returned terminal path, cleanup, boundary and cost facts; expose a bounded evidence status projection and a supervisor evidence command that reads or regenerates .cliyard/evidence/<runId>.json. A completed-run resume must also repair a missing bundle before returning. Missing or invalid evidence must be reported as degraded and must not be converted into success. Add tests in tests/supervisor-evidence-bundle.test.ts and update tests/supervisor-cli.test.ts to cover completed and blocked terminal runs, automatic bundle creation, evidence status JSON/human output, missing/invalid bundle reporting, explicit regeneration without RunManifest mutation, completed resume repair, path/process/boundary/cost inclusion and unsupported running inputs. Preserve existing status/start/resume/stop output and all current behavior."
+      ],
+      "nonGoals": [
+        "Do not modify the EvidenceBundle core or eval engine.",
+        "Do not mutate task verdicts or RunManifest acceptance.",
+        "Do not auto-merge or push accepted work.",
+        "Do not turn status into a state-changing command."
+      ],
+      "dependsOn": [
+        "controller-evidence-bundle"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "design/evidence-and-harness-eval-v0.md",
+        "src/supervisor/evidence-bundle.ts",
+        "src/supervisor/cli.ts",
+        "src/supervisor/store.ts",
+        "src/supervisor/types.ts",
+        "tests/evidence-bundle.test.ts",
+        "tests/supervisor-cli.test.ts"
+      ],
+      "writePaths": [
+        "src/supervisor/cli.ts",
+        "tests/supervisor-cli.test.ts",
+        "tests/supervisor-evidence-bundle.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "93715ffd357a00425de8920834d7747fbc8f4368",
+      "verifyCommands": [
+        "npx tsx --test tests/evidence-bundle.test.ts tests/supervisor-evidence-bundle.test.ts tests/supervisor-cli.test.ts",
+        "npm run build",
+        "npm test"
+      ],
+      "deliverables": [
+        "Automatic final EvidenceBundle generation for terminal runs.",
+        "Read-only degraded status plus explicit regeneration command.",
+        "Completed-run resume evidence repair and integration tests."
+      ],
+      "forbidden": [
+        "Do not rewrite a RunManifest to claim evidence exists.",
+        "Do not hide missing evidence as clean.",
+        "Do not auto-merge or push."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "harness-eval-cli-and-suite",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Integrate Harness Eval v0 into the CLI and add the required deterministic scenario suite. Add src/evaluation/cli.ts and src/evaluation/scenarios.ts, add a real context-reload handoff helper in src/evaluation/handoff.ts, wire the top-level src/cli.ts and package.json script, and add examples/harness-eval/suite.json. Implement cliyard eval run --suite <path> --label <id> --repetitions <n> --out <dir> --json and eval compare --baseline <run.json> --candidate <run.json> --out <path> --json using the accepted eval core. Execute argv arrays without a shell, bounded timeout/output and fixed cwd; reject dirty/wrong commits and unsafe paths. The suite must name six scenarios: normal-work, high-fanout-process-tree, verifier-timeout-and-extension, controller-sigkill-recovery, path-escape and context-reload-handoff. Reuse real existing focused tests where appropriate and add tests/harness-eval-cli.test.ts plus tests/harness-eval-handoff.test.ts; the handoff test must start a fresh process that reads only a terminal RunManifest/EvidenceBundle fixture and reconstructs the next action. Tests must cover malformed suites, command timeout, expected nonzero, repetition failures, unavailable metrics, flipped scenarios in compare, unsafe ids/paths and bounded secrets-free output. Do not add paid provider calls or change Supervisor behavior."
+      ],
+      "nonGoals": [
+        "Do not call paid models.",
+        "Do not auto-change prompts or skills.",
+        "Do not add dynamic routing, daemon or parallel admission.",
+        "Do not claim provider-level compaction."
+      ],
+      "dependsOn": [
+        "controller-evidence-bundle",
+        "harness-eval-core"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "design/evidence-and-harness-eval-v0.md",
+        "src/supervisor/evidence-bundle.ts",
+        "src/evaluation/types.ts",
+        "src/evaluation/core.ts",
+        "src/evaluation/report.ts",
+        "src/cli.ts",
+        "tests/harness-eval-core.test.ts",
+        "tests/deadline-extension.test.ts",
+        "tests/worker-process-tree.test.ts",
+        "tests/runtime-verifier.test.ts",
+        "tests/worker-lease.test.ts",
+        "tests/workspace-boundary-integration.test.ts"
+      ],
+      "writePaths": [
+        "src/cli.ts",
+        "src/evaluation/cli.ts",
+        "src/evaluation/scenarios.ts",
+        "src/evaluation/handoff.ts",
+        "tests/harness-eval-cli.test.ts",
+        "tests/harness-eval-handoff.test.ts",
+        "examples/harness-eval/suite.json",
+        "package.json"
+      ],
+      "sharedResources": [],
+      "baseCommit": "93715ffd357a00425de8920834d7747fbc8f4368",
+      "verifyCommands": [
+        "npx tsx --test tests/harness-eval-core.test.ts tests/harness-eval-cli.test.ts tests/harness-eval-handoff.test.ts",
+        "npm run harness-eval -- run --suite examples/harness-eval/suite.json --label smoke --repetitions 1 --out .cliyard/evals/smoke --json",
+        "npm run build",
+        "npm test"
+      ],
+      "deliverables": [
+        "A working argv-only eval run/compare CLI and package script.",
+        "Six bounded local scenarios, including a fresh-process handoff reconstruction.",
+        "Machine-readable and Markdown reports with explicit missing metrics and flipped scenarios."
+      ],
+      "forbidden": [
+        "Do not run commands through a shell.",
+        "Do not treat unavailable provider metrics as zero.",
+        "Do not add a paid eval path to the critical tests."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "harness-eval-v0-evidence",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Run the accepted Harness Eval v0 CLI twice at the exact task base to validate repeatability, then compare the two named runs and add docs/evidence/HARNESS_EVAL_V0.md with only observed facts. Use at least two repetitions per scenario and record each scenario's repetition outcomes, pass rate, flipped scenarios, durations, the known deadline-extension flake if it appears, missing request/token/cache/cost/human-intervention measurements, exact commands, exact base commit, report paths and final focused/build/full results. Also record how a fresh process reconstructs the next action from the EvidenceBundle handoff fixture. Clearly state that baseline and candidate here are same-code repeatability checks, not a Harness improvement or provider-quality comparison. Preserve non-goals: no paid model eval, LLM judge, dynamic routing, daemon, OS sandbox, automatic prompt optimization, merge or push. Do not modify source, tests, Plan or contracts."
+      ],
+      "nonGoals": [
+        "Do not modify source or tests.",
+        "Do not claim a Harness improvement from same-code runs.",
+        "Do not hide a flaky scenario behind aggregate pass rate.",
+        "Do not claim provider-level compaction or paid-model quality."
+      ],
+      "dependsOn": [
+        "supervisor-evidence-integration",
+        "harness-eval-cli-and-suite"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "design/evidence-and-harness-eval-v0.md",
+        "docs/CURRENT_STATE.md",
+        "src/evaluation/cli.ts",
+        "src/evaluation/scenarios.ts",
+        "src/evaluation/handoff.ts",
+        "examples/harness-eval/suite.json",
+        "src/supervisor/evidence-bundle.ts"
+      ],
+      "writePaths": [
+        "docs/evidence/HARNESS_EVAL_V0.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "93715ffd357a00425de8920834d7747fbc8f4368",
+      "verifyCommands": [
+        "npm run harness-eval -- run --suite examples/harness-eval/suite.json --label baseline --repetitions 2 --out .cliyard/evals/harness-eval-v0-baseline --json",
+        "npm run harness-eval -- run --suite examples/harness-eval/suite.json --label candidate --repetitions 2 --out .cliyard/evals/harness-eval-v0-candidate --json",
+        "npm run harness-eval -- compare --baseline .cliyard/evals/harness-eval-v0-baseline/run.json --candidate .cliyard/evals/harness-eval-v0-candidate/run.json --out .cliyard/evals/harness-eval-v0-comparison.json --json",
+        "npm test"
+      ],
+      "deliverables": [
+        "Measured two-profile repeatability evidence for six Harness scenarios.",
+        "A durable report that exposes flips and unavailable metrics rather than hiding them.",
+        "A clean separation between eval infrastructure evidence and a real Harness improvement claim."
+      ],
+      "forbidden": [
+        "Do not edit implementation, tests, Plan or contracts.",
+        "Do not report an aggregate pass rate without repetition-level failures.",
+        "Do not claim a stable green gate from one local comparison."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
