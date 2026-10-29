@@ -16,6 +16,7 @@ import { runArchitectCli } from "./architect/cli.js";
 import { runRuntimeDrillCli } from "./runtime/failure-drills.js";
 import { runSupervisorCli } from "./supervisor/cli.js";
 import { runQueueCli } from "./orchestration/cli.js";
+import { runEvaluationCli } from "./evaluation/cli.js";
 import type { PermissionIntent, WorkerId } from "./types.js";
 
 function usage(): never {
@@ -60,6 +61,12 @@ Usage:
   cliyard queue cancel <queue-id> --repo <path> [--json]
   cliyard queue run --repo <path> [--continue-on-blocked]
                     [--max-dispatches n] [--json]
+  cliyard eval run --suite <suite.json> --label <id> --repetitions <n>
+                   --out <dir> [--cwd <repo>] [--commit <sha>]
+                   [--snapshot] [--max-output-bytes <n>] [--json]
+  cliyard eval compare --baseline <run.json> --candidate <run.json>
+                       --out <dir|comparison.json> [--json]
+  cliyard eval handoff <run-manifest-or-evidence-bundle.json> [--json]
 
 Master (DeepSeek Harness plugin / local demo):
   npm run master-monitor
@@ -84,6 +91,12 @@ async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const cmd = argv[0];
   if (!cmd || cmd === "-h" || cmd === "--help") usage();
+
+  if (cmd === "eval") {
+    // Let Node exit naturally so stdout is flushed before the process ends.
+    process.exitCode = await runEvaluationCli(argv.slice(1));
+    return;
+  }
 
   const cfg = loadConfig();
 
