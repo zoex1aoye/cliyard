@@ -1,0 +1,364 @@
+{
+  "planId": "pilot-safety-reliability-v1",
+  "contracts": [
+    {
+      "taskId": "verifier-command-timeout",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Add an optional bounded per-command verifier timeout to frozen TaskContracts and Plans. Extend the TaskContract schema with verifyTimeoutMs, validate it as a positive safe integer within a documented bound, preserve the existing 30-second default when absent, accept the field through Plan compilation and Taskfile defaults where appropriate, and make createShellVerifier use the contract-specific timeout for each verifyCommand. Keep runtime readiness timeout separate. Add tests for legacy default behavior, explicit timeout override, invalid values, Plan round-trip and generation, and timeout failure classification. Do not change repair counts, budget continuation, provider cost truth, process cleanup or default Node version."
+      ],
+      "nonGoals": [
+        "Do not add a global verifier daemon or background VerificationTask.",
+        "Do not change the default timeout for legacy contracts.",
+        "Do not treat a timeout as accepted evidence."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/CURRENT_STATE.md",
+        "design/pilot-safety-reliability-v1.md",
+        "src/contracts/schema.ts",
+        "src/contracts/fromTaskfile.ts",
+        "src/planner/plan.ts",
+        "src/verification/verifier.ts",
+        "tests/contract-runtime.test.ts",
+        "tests/fromTaskfile.test.ts",
+        "tests/plan.test.ts",
+        "tests/verifier-shell.test.ts"
+      ],
+      "writePaths": [
+        "src/contracts/schema.ts",
+        "src/contracts/fromTaskfile.ts",
+        "src/planner/plan.ts",
+        "src/verification/verifier.ts",
+        "tests/contract-runtime.test.ts",
+        "tests/plan.test.ts",
+        "tests/verifier-shell.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "8b5f9f1f362b951cd0b66b534eba8c71a9faaba4",
+      "verifyCommands": [
+        "npx tsx --test tests/verifier-shell.test.ts tests/plan.test.ts tests/fromTaskfile.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "A version-compatible verifyTimeoutMs contract field with bounded validation.",
+        "Plan/Taskfile and shell verifier support with legacy default preservation.",
+        "Focused regression tests."
+      ],
+      "forbidden": [
+        "Do not use runtime readiness.timeoutMs for command execution.",
+        "Do not exceed the existing negative-value and malformed-input safety."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "process-table-batch-cleanup",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Refactor external process-group cleanup to use bounded process-table snapshots for grouped inspection. When snapshotProcessTable is available, a high-fanout cleanup must derive exact leader identity and membership for all observed pgids from a bounded snapshot (or bounded fresh snapshots per term/kill phase) instead of launching listGroupMembers once per group. Preserve fail-closed semantics for absent, changed or reused identities, cliyard's own group, malformed/oversized tables and race ambiguity. Keep the legacy single-group inspector fallback, exact pid identity checks and negative-pgid signaling guards. Add deterministic high-fanout regression tests that count inspector calls, cover leader disappearance during snapshot/listing races, and prove no broad/name-based kill."
+      ],
+      "nonGoals": [
+        "Do not add Windows Job Object support.",
+        "Do not weaken exact identity or fail-closed behavior.",
+        "Do not change process-tree evidence schema fields."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/CURRENT_STATE.md",
+        "docs/KNOWN_GAPS_2026-10-28.md",
+        "design/pilot-safety-reliability-v1.md",
+        "design/nested-registry-live-cleanup-v1.2.md",
+        "src/agents/process-tree.ts",
+        "src/runtime/process.ts",
+        "src/agents/worker-lease.ts",
+        "tests/worker-process-tree.test.ts",
+        "tests/runtime-process.test.ts"
+      ],
+      "writePaths": [
+        "src/agents/process-tree.ts",
+        "tests/worker-process-tree.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "8b5f9f1f362b951cd0b66b534eba8c71a9faaba4",
+      "verifyCommands": [
+        "npx tsx --test tests/worker-process-tree.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "Batched process-table membership inspection for external-group cleanup.",
+        "Exact identity guards retained across snapshot and signal races.",
+        "High-fanout call-count and ambiguity regression tests."
+      ],
+      "forbidden": [
+        "Do not signal by process name, port or unverified pgid.",
+        "Do not continue cleanup after an incomplete process-table snapshot."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "task-budget-ledger",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Make configured Claude guard budget cumulative across all attempts of one task, including repair invocations. Add a bounded task-level budget continuation state to AgentStartInput or an equivalent typed seam, pass accumulated guard usage from runClosedLoop into each Claude attempt, and make Claude's continuation decision and cost observations honor the remaining task cumulative guard without resetting it at attempt boundaries. Preserve unchanged behavior when no budget policy is configured. Record guard caps separately from CLI-reported cost, usage-only and unavailable cost, and never claim provider balance or invoice truth. Add deterministic tests proving an initial attempt plus repair cannot exceed maxCumulativeGuardUsd, a continuation cannot reset after repair, exhaustion is classified as budget_exhausted or an equivalent bounded failure, and existing continuation semantics still pass."
+      ],
+      "nonGoals": [
+        "Do not implement ProfileCatalog or dynamic provider routing.",
+        "Do not treat guard caps as actual spend.",
+        "Do not add budget support to Codex."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/CURRENT_STATE.md",
+        "docs/TASK_ESTIMATION.md",
+        "design/pilot-safety-reliability-v1.md",
+        "src/agents/types.ts",
+        "src/agents/continuation.ts",
+        "src/agents/claude.ts",
+        "src/repair/loop.ts",
+        "src/failures.ts",
+        "tests/budget-continuation.test.ts",
+        "tests/claude-failure-cost.test.ts",
+        "tests/loop.test.ts"
+      ],
+      "writePaths": [
+        "src/agents/types.ts",
+        "src/agents/continuation.ts",
+        "src/agents/claude.ts",
+        "src/repair/loop.ts",
+        "tests/budget-continuation.test.ts",
+        "tests/claude-failure-cost.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "8b5f9f1f362b951cd0b66b534eba8c71a9faaba4",
+      "verifyCommands": [
+        "npx tsx --test tests/budget-continuation.test.ts",
+        "npx tsx --test tests/claude-failure-cost.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "Task-level cumulative guard state across attempts.",
+        "Fail-closed continuation and repair budget checks.",
+        "Regression tests separating guard, CLI estimate and unknown cost truth."
+      ],
+      "forbidden": [
+        "Do not mutate an already running provider process to extend budget.",
+        "Do not invent remaining provider quota or balance."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "dsh-plugin-hardening",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Harden the dsh-cliyard development cockpit and compatibility surface. In plugins/dsh-cliyard/lib/monitor.js, render ledger-derived values with safe DOM text nodes rather than dynamic innerHTML, move inline behavior to a served script if needed to support a restrictive Content-Security-Policy, add CSP/security headers, and test malicious taskId/event text as data rather than markup. In plugins/dsh-cliyard/index.js and package.json, declare a conservative tested engines.dsh range without changing cliyard core Node 20, and replace model-visible worker/model selection with configured executionProfileId aliases that map server-side to worker/model values; reject unknown aliases and arbitrary permission/model injection. Preserve standalone API use and existing dispatch defaults. Add tests for safe rendering/header policy, package compatibility metadata, profile mapping and unknown-profile rejection. Do not claim DSH alpha2 runtime compatibility or implement a native sidebar UI in this task."
+      ],
+      "nonGoals": [
+        "Do not install or upgrade DSH.",
+        "Do not add a Control API or new UI framework.",
+        "Do not grant dispatch permission from UI input."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/CURRENT_STATE.md",
+        "docs/HARNESS_BOUNDARIES.md",
+        "docs/evidence/DSH_0_2_2_ALPHA_2_REVIEW.md",
+        "design/pilot-safety-reliability-v1.md",
+        "plugins/dsh-cliyard/index.js",
+        "plugins/dsh-cliyard/lib/dispatch.js",
+        "plugins/dsh-cliyard/lib/monitor.js",
+        "plugins/dsh-cliyard/package.json",
+        "plugins/dsh-cliyard/README.md",
+        "tests/master-plugin.test.ts"
+      ],
+      "writePaths": [
+        "plugins/dsh-cliyard/index.js",
+        "plugins/dsh-cliyard/lib/monitor.js",
+        "plugins/dsh-cliyard/package.json",
+        "tests/master-plugin.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "8b5f9f1f362b951cd0b66b534eba8c71a9faaba4",
+      "verifyCommands": [
+        "npx tsx --test tests/master-plugin.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "Safe ledger rendering and CSP-backed monitor responses.",
+        "Conservative DSH package compatibility metadata.",
+        "Configured executionProfileId aliases with bounded mapping tests."
+      ],
+      "forbidden": [
+        "Do not interpolate task/event text into HTML markup.",
+        "Do not let model-visible arguments choose arbitrary permissions or unknown profiles."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "harness-eval-wrapper-semantics",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Fix the accepted Harness Eval npm wrapper composition and experiment collection exit semantics. The harness-eval script must compose with npm-appended run, compare and handoff tails; --snapshot and an explicit record-only mode may be injected globally, used by run, and ignored by compare/handoff. Record-only mode returns zero only after a complete report is written even when scenario outcomes fail; malformed input, unsafe paths, snapshot/Git failures and execution infrastructure failures remain nonzero. Raw cliyard eval run stays strict and returns nonzero on failed scenarios. Preserve all failed repetition and command details. Add regression tests for npm composition, all three subcommands, complete failed reports, strict raw exits, infrastructure failures and option precedence. Do not modify Eval core, report schema, Supervisor, suite definitions or design authority files."
+      ],
+      "nonGoals": [
+        "Do not hide or rerun away scenario failures.",
+        "Do not change report formats.",
+        "Do not add paid provider calls."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/CURRENT_STATE.md",
+        "design/evidence-and-harness-eval-v0.md",
+        "design/harness-eval-evidence-closeout.md",
+        "design/pilot-safety-reliability-v1.md",
+        "src/evaluation/cli.ts",
+        "src/evaluation/core.ts",
+        "src/evaluation/report.ts",
+        "src/evaluation/types.ts",
+        "src/evaluation/handoff.ts",
+        "src/cli.ts",
+        "tests/harness-eval-cli.test.ts",
+        "package.json"
+      ],
+      "writePaths": [
+        "src/evaluation/cli.ts",
+        "tests/harness-eval-cli.test.ts",
+        "package.json"
+      ],
+      "sharedResources": [],
+      "baseCommit": "8b5f9f1f362b951cd0b66b534eba8c71a9faaba4",
+      "verifyCommands": [
+        "npx tsx --test tests/harness-eval-core.test.ts tests/harness-eval-cli.test.ts tests/harness-eval-handoff.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "A composable experiment collection wrapper.",
+        "Strict raw Eval semantics with record-only collection semantics.",
+        "Regression coverage for failure truth and infrastructure errors."
+      ],
+      "forbidden": [
+        "Do not modify eval core or report types.",
+        "Do not weaken Git snapshot or path validation."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "harness-eval-evidence-closeout",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "After harness-eval-wrapper-semantics is accepted, run the complete Harness Eval v0 evidence flow from this integrated dependency base and write docs/evidence/HARNESS_EVAL_V0.md with observed facts only. Use two repetitions per scenario for baseline and candidate through the npm harness-eval wrapper; compare the reports through the wrapper; preserve every failed scenario, timeout and flip rather than retrying for green. Rebuild the EvidenceBundle handoff fixture and run the fresh-process handoff CLI, recording source hashes, matched/mismatched nextAction, clean and tampered outcomes. Record exact commands, commits/tree state, report paths and SHA-256 hashes, wall times, unavailable metrics and known deadline/high-fanout flakes. State explicitly that same-tree baseline/candidate is repeatability testing, not Harness or model improvement."
+      ],
+      "nonGoals": [
+        "Do not edit source, tests, Plan or contracts.",
+        "Do not hide failed repetitions.",
+        "Do not claim provider-level compaction."
+      ],
+      "dependsOn": [
+        "harness-eval-wrapper-semantics"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/CURRENT_STATE.md",
+        "design/evidence-and-harness-eval-v0.md",
+        "design/harness-eval-evidence-closeout.md",
+        "design/pilot-safety-reliability-v1.md",
+        "src/evaluation/cli.ts",
+        "src/evaluation/scenarios.ts",
+        "src/evaluation/handoff.ts",
+        "examples/harness-eval/suite.json",
+        "src/supervisor/evidence-bundle.ts",
+        "tests/harness-eval-cli.test.ts",
+        "tests/harness-eval-handoff.test.ts",
+        "package.json"
+      ],
+      "writePaths": [
+        "docs/evidence/HARNESS_EVAL_V0.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "8b5f9f1f362b951cd0b66b534eba8c71a9faaba4",
+      "verifyCommands": [
+        "npm run harness-eval -- run --suite examples/harness-eval/suite.json --label baseline --repetitions 2 --out .cliyard/evals/harness-eval-v0-baseline --json",
+        "npm run harness-eval -- run --suite examples/harness-eval/suite.json --label candidate --repetitions 2 --out .cliyard/evals/harness-eval-v0-candidate --json",
+        "npm run harness-eval -- compare --baseline .cliyard/evals/harness-eval-v0-baseline/run.json --candidate .cliyard/evals/harness-eval-v0-candidate/run.json --out .cliyard/evals/harness-eval-v0-comparison.json --json",
+        "npm run test:harness-eval"
+      ],
+      "deliverables": [
+        "A complete measured Harness Eval v0 evidence document.",
+        "Preserved failure and flake samples with exact provenance.",
+        "Fresh-process EvidenceBundle handoff evidence."
+      ],
+      "forbidden": [
+        "Do not report only aggregate pass rates.",
+        "Do not claim stable green from one comparison."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "pilot-foundation-evidence",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "After all foundation tasks are accepted, write docs/evidence/PILOT_FOUNDATION_RELIABILITY.md using only observed evidence from the integrated result. Record the exact accepted task commits and integration head, contract hash, path audits, the high-fanout cleanup call strategy and outcomes, verifier timeout behavior, task-level budget guard behavior, DSH plugin safety/compatibility results, Harness Eval evidence path/hash, and exhaustive test results. Run the complete test inventory in three shell-expanded alphabetical groups because the current 30-second verifier window is too tight for npm test in one command, plus build; record each group count and duration. Explicitly list remaining blockers: background verifier, SandboxProvider, Control API, DSH alpha2 runtime conformance, provider balance/quota, Windows process ownership and bounded soak. Do not claim pilot acceptance, merge authorization, 24-hour operation or OS sandboxing."
+      ],
+      "nonGoals": [
+        "Do not edit source, tests, Plan or contracts.",
+        "Do not update CURRENT_STATE to claim completion before human review.",
+        "Do not hide residual gaps."
+      ],
+      "dependsOn": [
+        "verifier-command-timeout",
+        "process-table-batch-cleanup",
+        "task-budget-ledger",
+        "dsh-plugin-hardening",
+        "harness-eval-wrapper-semantics",
+        "harness-eval-evidence-closeout"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/CURRENT_STATE.md",
+        "docs/KNOWN_GAPS_2026-10-28.md",
+        "docs/HARNESS_BOUNDARIES.md",
+        "docs/evidence/DSH_0_2_2_ALPHA_2_REVIEW.md",
+        "design/pilot-safety-reliability-v1.md",
+        "design/pilot-safety-reliability-v1.plan.json",
+        "design/harness-eval-evidence-closeout.md",
+        "plugins/dsh-cliyard/README.md",
+        "tests/master-plugin.test.ts",
+        "tests/worker-process-tree.test.ts",
+        "tests/budget-continuation.test.ts",
+        "tests/verifier-shell.test.ts"
+      ],
+      "writePaths": [
+        "docs/evidence/PILOT_FOUNDATION_RELIABILITY.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "8b5f9f1f362b951cd0b66b534eba8c71a9faaba4",
+      "verifyCommands": [
+        "npx tsx --test tests/[a-i]*.test.ts",
+        "npx tsx --test tests/[j-r]*.test.ts",
+        "npx tsx --test tests/[s-z]*.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "A precise pilot foundation evidence and residual-gap record.",
+        "Exhaustive grouped test and build evidence tied to the integration result."
+      ],
+      "forbidden": [
+        "Do not claim all tests passed from only focused suites.",
+        "Do not copy guard estimates as provider cost or balance.",
+        "Do not claim DSH compatibility without a measured host run."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
