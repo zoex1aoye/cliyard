@@ -19,6 +19,12 @@ export const MAX_PATH_AUDIT_ERROR_LENGTH = 2_000;
 /** Bounded cumulative process-tree evidence records per task. */
 export const MAX_PROCESS_TREES = 32;
 
+/** Bounded WorkspaceBoundary v1 evidence (design/workspace-boundary-v1.md). */
+export const WORKSPACE_BOUNDARY_RECORD_VERSION = 1 as const;
+export const MAX_WORKSPACE_BOUNDARY_CHANGES = 1_024;
+export const MAX_WORKSPACE_BOUNDARY_PATH_LENGTH = 4_096;
+export const MAX_WORKSPACE_BOUNDARY_ERROR_LENGTH = 2_048;
+
 export type RunStatus = "running" | "interrupted" | "completed" | "blocked";
 
 export interface RunOwner {
@@ -39,6 +45,41 @@ export interface PathAuditRecord {
   changedPaths: string[];
   outsideWritePaths: string[];
   changedPathsError?: string;
+}
+
+export type WorkspaceBoundaryRecordStatus =
+  | "clean"
+  | "violation"
+  | "inspection_error";
+
+/** Bounded path-level change evidence; never contains file contents. */
+export interface WorkspaceBoundaryChangeRecord {
+  /** Index into the guarded policy root list; 0 is the authority root. */
+  rootIndex: number;
+  change: "added" | "removed" | "modified";
+  kind: "file" | "symlink" | "directory";
+  /** Root-relative normalized evidence path. */
+  path: string;
+  beforeDigest?: string;
+  afterDigest?: string;
+}
+
+/**
+ * Durable, bounded workspace-boundary evidence for one dispatched wave.
+ * Full snapshots (and any file content) never enter durable state; only
+ * digests and bounded path-level changes do. Detection only: the record is
+ * observational and never grants acceptance.
+ */
+export interface WorkspaceBoundaryRecord {
+  version: typeof WORKSPACE_BOUNDARY_RECORD_VERSION;
+  status: WorkspaceBoundaryRecordStatus;
+  /** v1 detects and blocks; it never prevents writes. */
+  enforcement: "guard-only";
+  capturedAt: string;
+  comparedAt: string;
+  changes: WorkspaceBoundaryChangeRecord[];
+  /** Bounded inspection-error diagnostic; absent when comparison succeeded. */
+  error?: string;
 }
 
 export interface RunTaskState {
@@ -93,6 +134,13 @@ export interface RunTaskState {
    * this record was never accepted on worker success alone.
    */
   cleanupFailure?: FailureRecord;
+  /**
+   * WorkspaceBoundary v1 evidence for the latest dispatched wave this task
+   * belonged to. Durable but observational: it records detection, never
+   * grants acceptance, and never contains snapshot contents. Older manifests
+   * may omit this field.
+   */
+  workspaceBoundary?: WorkspaceBoundaryRecord;
 }
 
 /** A rejected attempt whose worktree still validates for reuse. */

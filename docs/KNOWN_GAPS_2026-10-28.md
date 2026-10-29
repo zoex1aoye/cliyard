@@ -6,9 +6,11 @@
 >
 > Recorded: 2026-10-28
 >
-> Accepted, not yet merged:
+> Integrated by the v1.2 merge:
 > WorkspaceBoundary v1 `c04bb96ea98004493b4d88cc5cbe56e052fa0915` and
-> WorkerProcessTree v1.1 `9a38174a872d70b7a250225c31fa7ce4efdcf06e`
+> WorkerProcessTree v1.1 `9a38174a872d70b7a250225c31fa7ce4efdcf06e`;
+> nested registry live cleanup v1.2 code `fac4606` and cutover evidence
+> `7b4544f`.
 
 ## Current state
 
@@ -250,13 +252,11 @@ For subsequent self-host runs:
   while targeting the main checkout;
 - require a non-null guard record for the produced run;
 - keep the worktrees and require manual diff review before merge.
-
 ## 2026-10-29 route correction
 
-The v1.2 Plan is approved for implementation but was not frozen at the end of
-this historical investigation. Its reviewed code base is `a9d6e00`; a docs-only
-descendant provides the v1.2 design/Plan read context without changing that
-code lineage. The implementation must preserve the distinction:
+The v1.2 Plan was frozen, dispatched and validated through a second cutover run
+loaded from the reviewed implementation draft. Its code base is `fac4606`; the
+cutover integration candidate is `7b4544f`. The implemented distinction is:
 
 ```text
 live cleanup completeness

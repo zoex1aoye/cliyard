@@ -28,6 +28,7 @@ import {
 } from "../runtime/resource-snapshot.js";
 import {
   buildStatus,
+  type SupervisorBoundaryTaskEvidence,
   type SupervisorStatus,
   type WorkerProgressStatus,
 } from "../supervisor/cli.js";
@@ -105,6 +106,14 @@ export interface ControlRunSnapshot {
   lastAccepted: RunTaskState | null;
   reusableAttempts: ReusableAttempt[];
   workerProgress: WorkerProgressStatus[];
+  /** Concise WorkspaceBoundary projection; detection only, never acceptance. */
+  workspaceBoundary: {
+    tasks: number;
+    clean: number;
+    violations: number;
+    inspectionErrors: number;
+    evidence: SupervisorBoundaryTaskEvidence[];
+  };
 }
 
 /**
@@ -480,6 +489,16 @@ function controlRun(
       ...progress,
       event: { ...progress.event },
     })),
+    workspaceBoundary: {
+      tasks: status.workspaceBoundary.tasks,
+      clean: status.workspaceBoundary.clean,
+      violations: status.workspaceBoundary.violations,
+      inspectionErrors: status.workspaceBoundary.inspectionErrors,
+      evidence: status.workspaceBoundary.evidence.map((entry) => ({
+        ...entry,
+        changedPaths: [...entry.changedPaths],
+      })),
+    },
   };
 }
 

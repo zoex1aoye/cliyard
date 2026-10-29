@@ -42,7 +42,11 @@ import {
   MAX_PATH_AUDIT_ERROR_LENGTH,
   MAX_PATH_AUDIT_PATHS,
   MAX_PROCESS_TREES,
+  MAX_WORKSPACE_BOUNDARY_CHANGES,
+  MAX_WORKSPACE_BOUNDARY_ERROR_LENGTH,
+  MAX_WORKSPACE_BOUNDARY_PATH_LENGTH,
   RUN_MANIFEST_VERSION,
+  WORKSPACE_BOUNDARY_RECORD_VERSION,
   type ActiveRunPointer,
   type PathAuditRecord,
   type RunManifest,
@@ -50,7 +54,10 @@ import {
   type RunStatus,
   type RunTaskState,
   type SupervisorLockInfo,
+  type WorkspaceBoundaryChangeRecord,
+  type WorkspaceBoundaryRecord,
 } from "./types.js";
+import { normalizeEvidencePath } from "../agents/workspace-boundary.js";
 
 export const SUPERVISOR_DIR = ".cliyard";
 export const RUNS_DIR = "runs";
@@ -849,9 +856,170 @@ function parseRunManifest(raw: unknown, source: string): RunManifest {
       }
       task.cleanupFailure = cleanupFailure;
     }
+    // Workspace-boundary evidence is optional so older manifests stay
+    // readable, but a present record must validate completely. Nothing is
+    // repaired by guessing; a malformed record rejects the manifest.
+    if (task.workspaceBoundary !== undefined) {
+      task.workspaceBoundary = parseWorkspaceBoundaryRecord(
+        task.workspaceBoundary,
+        `${source}: task ${key}.workspaceBoundary`,
+      );
+    }
   }
 
   return raw as unknown as RunManifest;
+}
+
+function parseWorkspaceBoundaryRecord(
+  raw: unknown,
+  source: string,
+): WorkspaceBoundaryRecord {
+  if (!isRecord(raw)) {
+    throw new RunManifestError(`${source} must be an object`);
+  }
+  if (raw.version !== WORKSPACE_BOUNDARY_RECORD_VERSION) {
+    throw new RunManifestError(
+      `${source}.version must be ${WORKSPACE_BOUNDARY_RECORD_VERSION}`,
+    );
+  }
+  if (
+    raw.status !== "clean" &&
+    raw.status !== "violation" &&
+    raw.status !== "inspection_error"
+  ) {
+    throw new RunManifestError(
+      `${source}.status must be clean, violation or inspection_error`,
+    );
+  }
+  if (raw.enforcement !== "guard-only") {
+    throw new RunManifestError(
+      `${source}.enforcement must be "guard-only" (v1 detects; it never prevents)`,
+    );
+  }
+  if (
+    typeof raw.capturedAt !== "string" ||
+    raw.capturedAt.length === 0 ||
+    Number.isNaN(Date.parse(raw.capturedAt))
+  ) {
+    throw new RunManifestError(`${source}.capturedAt must be a timestamp`);
+  }
+  if (
+    typeof raw.comparedAt !== "string" ||
+    raw.comparedAt.length === 0 ||
+    Number.isNaN(Date.parse(raw.comparedAt))
+  ) {
+    throw new RunManifestError(`${source}.comparedAt must be a timestamp`);
+  }
+
+  let error: string | undefined;
+  if (raw.error !== undefined) {
+    if (
+      typeof raw.error !== "string" ||
+      raw.error.length === 0 ||
+      raw.error.length > MAX_WORKSPACE_BOUNDARY_ERROR_LENGTH
+    ) {
+      throw new RunManifestError(
+        `${source}.error must be a non-empty string of at most ` +
+          `${MAX_WORKSPACE_BOUNDARY_ERROR_LENGTH} characters`,
+      );
+    }
+    error = raw.error;
+  }
+
+  return {
+    version: WORKSPACE_BOUNDARY_RECORD_VERSION,
+    status: raw.status,
+    enforcement: "guard-only",
+    capturedAt: raw.capturedAt,
+    comparedAt: raw.comparedAt,
+    changes: parseWorkspaceBoundaryChanges(raw.changes, `${source}.changes`),
+    ...(error !== undefined ? { error } : {}),
+  };
+}
+
+function parseWorkspaceBoundaryChanges(
+  raw: unknown,
+  source: string,
+): WorkspaceBoundaryChangeRecord[] {
+  if (!Array.isArray(raw)) {
+    throw new RunManifestError(`${source} must be an array`);
+  }
+  if (raw.length > MAX_WORKSPACE_BOUNDARY_CHANGES) {
+    throw new RunManifestError(
+      `${source} must contain at most ${MAX_WORKSPACE_BOUNDARY_CHANGES} records`,
+    );
+  }
+
+  const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
+  return raw.map((value, index) => {
+    const path = `${source}[${index}]`;
+    if (!isRecord(value)) {
+      throw new RunManifestError(`${path} must be an object`);
+    }
+    if (!Number.isInteger(value.rootIndex) || (value.rootIndex as number) < 0) {
+      throw new RunManifestError(
+        `${path}.rootIndex must be a non-negative integer`,
+      );
+    }
+    if (
+      value.change !== "added" &&
+      value.change !== "removed" &&
+      value.change !== "modified"
+    ) {
+      throw new RunManifestError(
+        `${path}.change must be added, removed or modified`,
+      );
+    }
+    if (
+      value.kind !== "file" &&
+      value.kind !== "symlink" &&
+      value.kind !== "directory"
+    ) {
+      throw new RunManifestError(
+        `${path}.kind must be file, symlink or directory`,
+      );
+    }
+    if (
+      typeof value.path !== "string" ||
+      value.path.length === 0 ||
+      value.path.length > MAX_WORKSPACE_BOUNDARY_PATH_LENGTH ||
+      normalizeEvidencePath(value.path) !== value.path
+    ) {
+      throw new RunManifestError(
+        `${path}.path must be a bounded, safe root-relative evidence path`,
+      );
+    }
+
+    const change: WorkspaceBoundaryChangeRecord = {
+      rootIndex: value.rootIndex as number,
+      change: value.change,
+      kind: value.kind,
+      path: value.path,
+    };
+    if (value.beforeDigest !== undefined) {
+      if (
+        typeof value.beforeDigest !== "string" ||
+        !DIGEST_PATTERN.test(value.beforeDigest)
+      ) {
+        throw new RunManifestError(
+          `${path}.beforeDigest must be a SHA-256 hex digest`,
+        );
+      }
+      change.beforeDigest = value.beforeDigest;
+    }
+    if (value.afterDigest !== undefined) {
+      if (
+        typeof value.afterDigest !== "string" ||
+        !DIGEST_PATTERN.test(value.afterDigest)
+      ) {
+        throw new RunManifestError(
+          `${path}.afterDigest must be a SHA-256 hex digest`,
+        );
+      }
+      change.afterDigest = value.afterDigest;
+    }
+    return change;
+  });
 }
 
 function parseTaskExtensions(

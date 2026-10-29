@@ -37,6 +37,12 @@ import { auditPathScope } from "../agents/path-scope.js";
 import type { WorkerProcessRecord } from "../agents/process-tree.js";
 import { createWorkerLeaseAttacher } from "../agents/worker-lease.js";
 import {
+  sanitizeDiagnosticText,
+  WorkspaceBoundaryGuard,
+  type WorkspaceBoundaryComparison,
+  type WorkspaceBoundaryPolicy,
+} from "../agents/workspace-boundary.js";
+import {
   isWorkerProgressEvent,
   type AgentAdapter,
   type WorkerProgressEvent,
@@ -46,7 +52,7 @@ import {
   createShellVerifier,
 } from "../verification/verifier.js";
 import { defaultLedgerPath } from "../persistence/ledger.js";
-import { createFailureRecord } from "../failures.js";
+import { createFailureRecord, type FailureRecord } from "../failures.js";
 import { runClosedLoop, type LoopResult } from "../repair/loop.js";
 import {
   assertContractsHash,
@@ -57,10 +63,12 @@ import {
 import {
   MAX_PATH_AUDITS,
   MAX_PROCESS_TREES,
+  MAX_WORKSPACE_BOUNDARY_ERROR_LENGTH,
   type PathAuditRecord,
   type ReusableAttempt,
   type RunManifest,
   type RunTaskState,
+  type WorkspaceBoundaryRecord,
 } from "../supervisor/types.js";
 import {
   addWorktree,
@@ -100,6 +108,15 @@ export interface CodexBatchOptions {
     cwd: string,
   ) => AgentAdapter;
   /**
+   * WorkspaceBoundary v1 deterministic test seam
+   * (design/workspace-boundary-v1.md). Production runs the real
+   * protected-root guard; this factory exists only so integration tests can
+   * inject clean, dirty and failing guards without writing outside their
+   * temporary repositories. The returned guard is validated and can never
+   * silently disable enforcement.
+   */
+  workspaceBoundaryGuardFactory?: WorkspaceBoundaryGuardFactory;
+  /**
    * Durable Supervisor checkpoint (RunManifest). When provided, the batch:
    *   - rejects changed contracts or a changed base commit,
    *   - checks work out of the recorded integration branch,
@@ -135,6 +152,16 @@ export interface CodexBatchResult {
   /** Final checkpoint, when the batch ran with `runManifest`. */
   manifest?: RunManifest;
 }
+
+/** Minimal guard contract; the real `WorkspaceBoundaryGuard` satisfies it. */
+export interface WorkspaceBoundaryGuardLike {
+  capture(): Promise<void>;
+  compare(): Promise<WorkspaceBoundaryComparison>;
+}
+
+export type WorkspaceBoundaryGuardFactory = (
+  policy: WorkspaceBoundaryPolicy,
+) => WorkspaceBoundaryGuardLike;
 
 // ---------------------------------------------------------------------------
 // Worker progress events
@@ -531,6 +558,201 @@ function isPathInside(parent: string, child: string): boolean {
   );
 }
 
+// ---------------------------------------------------------------------------
+// WorkspaceBoundary v1 wave guard (design/workspace-boundary-v1.md)
+// ---------------------------------------------------------------------------
+
+/**
+ * The production default is the real protected-root guard. An injected
+ * factory is validated; a missing or malformed guard is a hard error so
+ * enforcement can never be silently disabled by an option.
+ */
+function createWorkspaceBoundaryGuard(
+  opts: CodexBatchOptions,
+  policy: WorkspaceBoundaryPolicy,
+): WorkspaceBoundaryGuardLike {
+  const factory = opts.workspaceBoundaryGuardFactory;
+  if (factory === undefined) return new WorkspaceBoundaryGuard(policy);
+  if (typeof factory !== "function") {
+    throw new Error(
+      "worker-batch: workspaceBoundaryGuardFactory must be a function",
+    );
+  }
+  const guard = factory(policy);
+  if (
+    !guard ||
+    typeof guard.capture !== "function" ||
+    typeof guard.compare !== "function"
+  ) {
+    throw new Error(
+      "worker-batch: workspaceBoundaryGuardFactory returned an invalid guard; " +
+        "workspace boundary enforcement can never be disabled",
+    );
+  }
+  return guard;
+}
+
+function workspaceBoundaryPolicy(
+  repoRoot: string,
+  ledgerPath: string,
+  requestedRunId: string | undefined,
+): WorkspaceBoundaryPolicy {
+  // Default exclusions cover the mutable control plane (worktrees, runtime,
+  // worker/queue events, leases, logs) and the ledger; the authority checkout
+  // source, important Git state and control authority files stay protected.
+  //
+  // The control plane legitimately checkpoints the *active* RunManifest while
+  // a wave runs (deadline and budget extension grants). Exclude exactly that
+  // manifest path and nothing else: every other RunManifest under
+  // `.cliyard/runs` stays guarded, and a plain batch without a requested
+  // manifest gains no `.cliyard/runs` exclusion at all.
+  return {
+    authorityRoot: repoRoot,
+    ledgerPath,
+    ...(requestedRunId !== undefined
+      ? { excludedPaths: [runManifestPath(repoRoot, requestedRunId)] }
+      : {}),
+  };
+}
+
+/**
+ * Fail closed: an unreadable root returns a bounded inspection error instead
+ * of dispatching an unguarded wave. `undefined` means the snapshot captured.
+ */
+async function captureWorkspaceBoundaryGuard(
+  guard: WorkspaceBoundaryGuardLike,
+): Promise<string | undefined> {
+  try {
+    await guard.capture();
+    return undefined;
+  } catch (error) {
+    return sanitizeDiagnosticText(
+      error instanceof Error ? error.message : String(error),
+      MAX_WORKSPACE_BOUNDARY_ERROR_LENGTH,
+    );
+  }
+}
+
+/** An injected guard that throws still fails the wave closed. */
+async function compareWorkspaceBoundaryGuard(
+  guard: WorkspaceBoundaryGuardLike,
+): Promise<WorkspaceBoundaryComparison> {
+  try {
+    return await guard.compare();
+  } catch (error) {
+    return {
+      status: "inspection_failed",
+      error: sanitizeDiagnosticText(
+        error instanceof Error ? error.message : String(error),
+        MAX_WORKSPACE_BOUNDARY_ERROR_LENGTH,
+      ),
+      changes: [],
+    };
+  }
+}
+
+/**
+ * Durable record for one wave. Full snapshots stay in memory; only bounded
+ * path-level change evidence and digests enter the RunManifest.
+ */
+function buildWorkspaceBoundaryRecord(
+  capturedAt: string,
+  comparedAt: string,
+  comparison: WorkspaceBoundaryComparison,
+): WorkspaceBoundaryRecord {
+  const status =
+    comparison.status === "clean"
+      ? "clean"
+      : comparison.status === "dirty"
+        ? "violation"
+        : "inspection_error";
+  return {
+    version: 1,
+    status,
+    enforcement: "guard-only",
+    capturedAt,
+    comparedAt,
+    changes: comparison.changes.map((change) => ({ ...change })),
+    ...(comparison.status === "inspection_failed" && comparison.error
+      ? { error: comparison.error }
+      : {}),
+  };
+}
+
+/** Stable policy failure codes for boundary-blocked successful results. */
+function workspaceBoundaryPolicyFailure(
+  comparison: WorkspaceBoundaryComparison,
+  observedAt: string,
+): FailureRecord {
+  const dirty = comparison.status === "dirty";
+  const detail =
+    comparison.status === "inspection_failed"
+      ? comparison.error
+      : `${comparison.changes.length} protected path(s) changed`;
+  return createFailureRecord({
+    policyBlocked: true,
+    stage: "policy",
+    code: dirty
+      ? "workspace_boundary_violation"
+      : "workspace_boundary_inspection_failed",
+    messageDetail: detail,
+    observedAt,
+  });
+}
+
+function boundaryRejectionReason(
+  comparison: WorkspaceBoundaryComparison,
+  beforeDispatch: boolean,
+): string {
+  if (comparison.status === "dirty") {
+    return "workspace boundary violation: protected roots changed while the wave ran";
+  }
+  return (
+    `workspace boundary inspection failed ` +
+    `${beforeDispatch ? "before dispatch" : "after the wave"}` +
+    (comparison.status === "inspection_failed" && comparison.error
+      ? `: ${comparison.error}`
+      : "")
+  );
+}
+
+/** Wave never dispatched: every task fails closed with an inspection error. */
+function boundaryBlockedWithoutDispatch(
+  taskId: string,
+  ledgerPath: string,
+  comparison: WorkspaceBoundaryComparison,
+  comparedAt: string,
+): LoopResult {
+  return {
+    taskId,
+    status: "blocked",
+    repairCount: 0,
+    verdict: "rejected",
+    reason: boundaryRejectionReason(comparison, true),
+    ledgerPath,
+    events: [],
+    failure: workspaceBoundaryPolicyFailure(comparison, comparedAt),
+    pathAudits: [],
+    extensions: [],
+    processTrees: [],
+  };
+}
+
+/** A successful worker result becomes a policy_blocked rejection. */
+function convertToBoundaryRejection(
+  result: LoopResult,
+  comparison: WorkspaceBoundaryComparison,
+  comparedAt: string,
+): LoopResult {
+  return {
+    ...result,
+    status: "blocked",
+    verdict: "rejected",
+    reason: boundaryRejectionReason(comparison, false),
+    failure: workspaceBoundaryPolicyFailure(comparison, comparedAt),
+  };
+}
+
 export async function runCodexBatch(
   opts: CodexBatchOptions,
 ): Promise<CodexBatchResult> {
@@ -710,11 +932,13 @@ export async function runCodexBatch(
             // A previous owner may have died mid-task; rebuild it as ready.
             // Rejected status is kept so resume can decide whether to reuse or
             // discard the recorded attempt before this dispatch overwrites it.
-            // The prior attempt's failure/cost do not describe the new attempt.
+            // The prior attempt's failure/cost/boundary evidence do not
+            // describe the new attempt.
             task.status = "ready";
             delete task.reason;
             delete task.failure;
             delete task.cost;
+            delete task.workspaceBoundary;
           }
           manifest.tasks[contract.taskId] = task;
         }
@@ -813,9 +1037,10 @@ export async function runCodexBatch(
             task.status = "running";
             task.accepted = false;
             delete task.reason;
-            // A new attempt supersedes the previous structured observation.
+            // A new attempt supersedes the previous structured observations.
             delete task.failure;
             delete task.cost;
+            delete task.workspaceBoundary;
             task.attemptWorktree = handle.worktreePath;
             task.attemptBranch = handle.branch;
             task.attemptBaseCommit = attemptBaseCommit;
@@ -827,8 +1052,26 @@ export async function runCodexBatch(
         await linkDependencies(repoRoot, handle.worktreePath, log);
       }
 
-      const waveResults = await Promise.all(
-        ready.map(async (id) => {
+      // WorkspaceBoundary v1: one authority snapshot per ready wave after
+      // every attempt worktree is ready and before any worker starts. A
+      // capture failure is an inspection failure for the whole wave and no
+      // worker is dispatched.
+      const boundaryGuard = createWorkspaceBoundaryGuard(
+        opts,
+        workspaceBoundaryPolicy(repoRoot, ledgerPath, requestedManifest?.runId),
+      );
+      const boundaryCapturedAt = new Date().toISOString();
+      const boundaryPreError = await captureWorkspaceBoundaryGuard(
+        boundaryGuard,
+      );
+      if (boundaryPreError !== undefined) {
+        log(
+          `[${workerKind}-batch] workspace boundary capture failed before ` +
+            `dispatch: ${boundaryPreError}`,
+        );
+      }
+
+      const dispatchWave = async (id: string): Promise<LoopResult> => {
           const contract = {
             ...byId.get(id)!,
             baseCommit: attemptRecords.get(id)!.baseCommit,
@@ -913,15 +1156,63 @@ export async function runCodexBatch(
               : {}),
             ...(onWorkerLease ? { onWorkerLease } : {}),
           });
-        }),
+        };
+      const waveResults =
+        boundaryPreError === undefined
+          ? await Promise.all(ready.map(dispatchWave))
+          : [];
+
+      // Compare before any result is accepted or merged and before the
+      // RunManifest advances past this wave.
+      const boundaryComparedAt = new Date().toISOString();
+      const boundaryComparison =
+        boundaryPreError !== undefined
+          ? ({
+              status: "inspection_failed",
+              error: boundaryPreError,
+              changes: [],
+            } as const satisfies WorkspaceBoundaryComparison)
+          : await compareWorkspaceBoundaryGuard(boundaryGuard);
+      const boundaryClean = boundaryComparison.status === "clean";
+      if (!boundaryClean) {
+        log(
+          `[${workerKind}-batch] workspace boundary ` +
+            `${boundaryComparison.status}: no task in this wave may be ` +
+            "accepted or merged",
+        );
+      }
+
+      const boundaryRecord = buildWorkspaceBoundaryRecord(
+        boundaryCapturedAt,
+        boundaryComparedAt,
+        boundaryComparison,
       );
 
       for (let i = 0; i < ready.length; i++) {
         const id = ready[i]!;
-        const result = waveResults[i]!;
+        const rawResult = waveResults[i];
+        // Dirty or uninspectable boundary: an already-rejected worker keeps
+        // its original structured failure; a successful result is converted
+        // to a policy_blocked failure. No task in the wave is merged.
+        const result =
+          boundaryClean || rawResult === undefined
+            ? (rawResult ??
+              boundaryBlockedWithoutDispatch(
+                id,
+                ledgerPath,
+                boundaryComparison,
+                boundaryComparedAt,
+              ))
+            : rawResult.verdict === "rejected"
+              ? rawResult
+              : convertToBoundaryRejection(
+                  rawResult,
+                  boundaryComparison,
+                  boundaryComparedAt,
+                );
         results.push(result);
         pending.delete(id);
-        if (result.verdict === "accepted") {
+        if (boundaryClean && result.verdict === "accepted") {
           accepted.add(id);
           const snapshot = await snapshotTask(
             handles.get(id)!,
@@ -961,6 +1252,7 @@ export async function runCodexBatch(
                     result.extensions,
                   ),
                   ...(result.cost !== undefined ? { cost: result.cost } : {}),
+                  workspaceBoundary: boundaryRecord,
                 };
                 manifest.integrationHead = integrationHead;
               },
@@ -1010,6 +1302,9 @@ export async function runCodexBatch(
                     manifest.tasks[id]?.extensions,
                     result.extensions,
                   ),
+                  // One bounded evidence record for every task in the wave,
+                  // accepted or rejected. Full snapshots stay in memory.
+                  workspaceBoundary: boundaryRecord,
                 };
                 manifest.tasks[id] = task;
               },
@@ -1047,6 +1342,9 @@ export async function runCodexBatch(
             messageDetail: item.reason,
           });
           delete task.cost;
+          // Never dispatched in this invocation; any stale wave evidence from
+          // an earlier attempt does not describe this dependency block.
+          delete task.workspaceBoundary;
           manifest.tasks[item.taskId] = task;
         }
         manifest.status = allAccepted ? "completed" : "blocked";

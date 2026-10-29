@@ -22,17 +22,23 @@
 > implemented. **WorkerLease v1 (same-host controller-death recovery)** is also
 > implemented: Supervisor-backed invocations persist a bounded, credential-free
 > lease at spawn, and `supervisor recover-workers` terminates only an exactly
-> verified dead-controller POSIX worker group. The next P0 slice is
-> **WorkspaceBoundary v1**: a worker must not be treated as contained merely
-> because its task worktree is clean. A self-host WorkerLease run wrote an
-> uncommitted fragment into the main control checkout; the worktree path audit
-> did not see it. After WorkspaceBoundary: a secret-free `ProfileCatalog` with
-> real binding activation, per-run Supervisor ownership and fixed hierarchical
-> admission. Windows Job Object ownership and dynamic routing scores stay
-> behind those prerequisites.
+> verified dead-controller POSIX worker group. **WorkspaceBoundary v1
+> (guard-only detection)** is also implemented: every parallel ready wave
+> compares a deterministic protected-root snapshot before accepting or merging
+> any result. The exact active RunManifest is excluded because deadline/budget
+> extension checkpoints legitimately rewrite it during the wave; every other
+> RunManifest, `queue.json`, plans/contracts, authority source and protected
+> Git state stay guarded. A self-host WorkerLease run had written an
+> uncommitted fragment into the main control checkout that the worktree path
+> audit did not see. The remaining P0 safety gap is **prevention**: a
+> provider-neutral `SandboxProvider` for OS-level write confinement. After
+> that: a secret-free `ProfileCatalog` with real binding activation, per-run
+> Supervisor ownership and fixed hierarchical admission. Windows Job Object
+> ownership and dynamic routing scores stay behind those prerequisites.
 > Evidence:
 > [evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md),
 > [evidence/WORKER_LEASE.md](evidence/WORKER_LEASE.md),
+> [evidence/WORKSPACE_BOUNDARY.md](evidence/WORKSPACE_BOUNDARY.md),
 > [evidence/CONTROL_SNAPSHOT.md](evidence/CONTROL_SNAPSHOT.md) and
 > [evidence/FAILURE_COST_TRUTH.md](evidence/FAILURE_COST_TRUTH.md).
 
@@ -61,7 +67,8 @@ queue observe / status (implemented)
   -> adoption journal unification (implemented)
   -> telemetry-backed task estimates (design only)
   -> WorkerLease persisted at spawn + controller owner-death recovery (implemented)
-  -> WorkspaceBoundary v1: write confinement or protected-root integrity guard (NEXT)
+  -> WorkspaceBoundary v1: protected-root integrity guard, guard-only detection (implemented)
+  -> provider-neutral SandboxProvider: OS-level write prevention (NEXT safety task)
   -> secret-free ProfileCatalog + real endpoint/account binding activation
   -> per-run Supervisor ownership + short control-store locks
   -> fixed hierarchical admission for queue items + Plan ready waves
@@ -169,11 +176,13 @@ identity capture stays `unknown`; no identity is fabricated.
 same-host command. It skips foreign hosts, live matching controllers, identity
 mismatches, unknown identities, non-active leases and malformed records. Only
 after proving the controller dead and the worker's exact POSIX leader identity
-does it signal the dedicated group (bounded SIGTERM, then SIGKILL), append a
-bounded recovery record and report `resumeNeeded`. Recovery never reattaches
-stdout, never resumes automatically and never writes a `RunManifest`; the
-`RunManifest` remains task authority. Windows exact-child captures are preserved
-as `needs_human`, not signalled.
+does it signal that dedicated **top-level** group (bounded SIGTERM, then
+SIGKILL), append a bounded recovery record and report `resumeNeeded`. The lease
+and recovery have no registry of groups a worker created with `setsid`, so
+nested groups are not recoverable after controller death. Recovery never
+reattaches stdout, never resumes automatically and never writes a
+`RunManifest`; the `RunManifest` remains task authority. Windows exact-child
+captures are preserved as `needs_human`, not signalled.
 
 Measured on integrated HEAD `e6f922e`: build exit `0`; focused worker-lease
 **19/19** (4652.98 ms), including the real SIGKILL controller-death fixture
@@ -182,9 +191,44 @@ recovery, stdout reattachment, Windows Job Objects, automatic resume and a
 daemon are not implemented. Evidence:
 [evidence/WORKER_LEASE.md](evidence/WORKER_LEASE.md).
 
+### Worker process tree v1.1 (2026-10-28)
+
+The accepted group cleanup now also handles descendants that call `setsid`.
+`ProcessInspector.snapshotProcessTable()` exposes a bounded
+`ps -A -o pid= -o ppid= -o pgid= -o lstart=` snapshot (8,192-row cap;
+malformed rows and duplicate pids fail closed). While the worker leader is
+alive, a sampler no faster than 250 ms records bounded recursive descendants.
+At timeout, cancel or child-close, sampling stops, a fresh snapshot is merged
+only when its root still matches the captured leader identity, and every
+descendant whose `pgid` differs from the managed group is re-read; only an
+exact `(pid, pgid, lstart)` match authorizes an exact-pid SIGTERM → SIGKILL.
+Same-group members keep the existing dedicated-group path. pid 1, cliyard
+itself, cliyard's own group, changed/reused identities, malformed evidence and
+over-bound target sets are refused; assignment ambiguity fails the result
+closed. Version-1 records remain readable because the new fields are optional.
+
+Measured on 2026-10-28 (macOS, Node `v20.20.2`): build exit `0`; focused
+`tests/worker-process-tree.test.ts` **22/22** (7741.68 ms) with real detached
+helpers in their own POSIX groups (timeout and cancel both clean top-level and
+nested groups; sampled evidence works after leader SIGKILL; a forged `lstart`
+on an otherwise matching pid/pgid is refused and the unrelated process is not
+signalled; an incomplete nested cleanup fails closed and still round-trips);
+full suite **440/440** (25853.11 ms, 0 fail). **Limit:** this is
+in-process cleanup only. WorkerLease v1 still persists only the top-level
+group, so controller-death recovery of nested groups remains open and is the
+next process-ownership follow-up. Evidence:
+[evidence/WORKER_PROCESS_TREE.md](evidence/WORKER_PROCESS_TREE.md).
+
+WorkspaceBoundary v1 (guard-only detection) is implemented separately: wave
+snapshots fail closed before acceptance on protected-root changes. It is
+detection, not containment; OS-level write prevention via a provider-neutral
+`SandboxProvider` is the remaining safety task. Evidence:
+[evidence/WORKSPACE_BOUNDARY.md](evidence/WORKSPACE_BOUNDARY.md).
+
 These earlier slices do **not** implement profile activation, admission,
-parallel dispatch, Windows parity or a daemon; the WorkerLease slice above is
-implemented.
+parallel dispatch, Windows parity or a daemon; the WorkerLease, WorkspaceBoundary
+and Worker process tree v1.1 slices above are implemented. Nested-group recovery
+after controller death remains an explicit gap.
 
 ## Immediate next slices
 
@@ -473,9 +517,10 @@ considered as an external process-lifecycle concern.
 | P0 | Failed attempts can retain files outside frozen write scope | A budget-exhausted docs attempt left `NEXT_STEP_CONTROLLER.md.tmp...` in its reusable worktree | Retry may inherit non-contract artifacts; normal path gate was skipped by non-zero exit | **Closed by worker exit path audit v0:** paths are audited after every worker exit and reused worktrees are re-audited (see [evidence/WORKER_EXIT_PATH_AUDIT.md](evidence/WORKER_EXIT_PATH_AUDIT.md)) |
 | P1 | Budget and time cannot be extended from healthy live state | Real tasks exhausted guards; current CLI exposes failure only at exit and the Supervisor has no extension control path | Operators retry a whole attempt and lose/reconstruct context | **Closed by continuation v0:** same-session budget continuation and health-gated deadline extension are preauthorized and audited (see [evidence/BUDGET_CONTINUATION.md](evidence/BUDGET_CONTINUATION.md), [evidence/DEADLINE_EXTENSION.md](evidence/DEADLINE_EXTENSION.md)) |
 | P0 | A blocked run had no formal reviewed-work resolution | Operators manually merged reviewed work while the RunManifest stayed blocked | Ad-hoc recovery could hide the original failure or fake task acceptance | **Closed by queue manual adoption v1:** separate versioned `OperatorResolution`; source RunManifest remains historical truth (see [evidence/QUEUE_ADOPTION.md](evidence/QUEUE_ADOPTION.md)) |
-| P0 | No durable worker identity is written at spawn | Process-group cleanup exists, but ownership is not recoverable if cliyard itself is `SIGKILL`ed | A detached worker group cannot be safely reattached or terminated by a new controller | **Closed by WorkerLease v1:** bounded lease written at spawn; `supervisor recover-workers` verifies exact identity; ambiguous identity `needs_human` (see [evidence/WORKER_LEASE.md](evidence/WORKER_LEASE.md)) |
-| P0 | Controller death has no recovery policy | `SIGKILL` cannot run in-process cleanup; `active.json`/process name alone do not prove worker ownership | Unattended parallel work could leave orphan groups or kill the wrong process | **Closed by WorkerLease v1:** same-host recovery terminates only the verified POSIX group, preserves worktree/evidence and reports resume-needed without changing RunManifest |
-| P0 | Worker path isolation is not a filesystem boundary | During WorkerLease self-hosting, a worker wrote an uncommitted fragment into the main control checkout while its audited worktree was elsewhere; worktree path audit did not see it | A compromised or confused worker can mutate the authority checkout or unrelated absolute paths | WorkspaceBoundary v1: OS sandbox where possible, plus protected-root pre/post integrity guard; detection is not prevention |
+| P0 | No durable worker identity is written at spawn | Process-group cleanup exists, but ownership is not recoverable if cliyard itself is `SIGKILL`ed | A detached worker group cannot be safely reattached or terminated by a new controller | **Closed by WorkerLease v1 for the top-level dedicated group:** bounded lease written at spawn; `supervisor recover-workers` verifies exact identity; ambiguous identity `needs_human` (see [evidence/WORKER_LEASE.md](evidence/WORKER_LEASE.md)) |
+| P0 | Controller death has no recovery policy | `SIGKILL` cannot run in-process cleanup; `active.json`/process name alone do not prove worker ownership | Unattended parallel work could leave orphan groups or kill the wrong process | **Closed by WorkerLease v1 for the verified top-level POSIX group:** same-host recovery preserves worktree/evidence and reports resume-needed without changing RunManifest; nested groups remain open (next row) |
+| P1 | Controller-death recovery cannot see nested `setsid` groups | Worker process tree v1.1 cleans external-group descendants only while the controller is alive; WorkerLease v1 stores one top-level `pid`/`pgid`/identity | A controller SIGKILL can still orphan a detached test-runner group after the in-process sampler is gone | Bounded nested-group registration in the lease plus exact-identity recovery; no name matching or broad scan |
+| P0 | Worker path isolation is not a filesystem boundary | During WorkerLease self-hosting, a worker wrote an uncommitted fragment into the main control checkout while its audited worktree was elsewhere; worktree path audit did not see it | A compromised or confused worker can mutate the authority checkout or unrelated absolute paths | **Guard closed by WorkspaceBoundary v1 (detection only):** deterministic pre/post protected-root snapshots fail the wave closed; the exact active RunManifest is trusted/excluded for live extension checkpoints (see [evidence/WORKSPACE_BOUNDARY.md](evidence/WORKSPACE_BOUNDARY.md)). **Prevention remains open:** provider-neutral `SandboxProvider` / OS-level write confinement |
 | P0 | No profile catalog or real binding activation | Queue items carry `worker`/optional `model`; selection is not proof an endpoint/account is active | Routing would choose a label without a measured activation result | Secret-free `ProfileCatalog` + adapter activation result before dispatch |
 | P0 | No fixed hierarchical admission | Queue items are dispatched one at a time; intra-item waves lack shared caps | Enabling parallel dispatch would multiply local maxima into an unbounded burst | Fixed conjunctive admission for queue items + Plan ready waves; unknown profile starts at one probe |
 | P2 | Windows process-tree ownership is absent | Runtime group semantics are proven on macOS only; no Job Object provider; WorkerLease recovery deliberately refuses `windows-exact-child` as `needs_human` | Windows parity cannot be claimed | Windows Job Object `ProcessOwnerProvider` after profile activation and fixed admission |

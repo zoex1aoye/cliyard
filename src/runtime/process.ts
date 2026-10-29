@@ -16,6 +16,8 @@ import type { RuntimeOwner, RuntimeProcessIdentity } from "./types.js";
 
 const DEFAULT_PS_TIMEOUT_MS = 5_000;
 const MAX_PS_OUTPUT_BYTES = 8 * 1024 * 1024;
+/** Hard bound for one process-table snapshot; larger tables fail closed. */
+export const MAX_PROCESS_TABLE_ROWS = 8_192;
 const SUPPORTED_PLATFORMS: ReadonlySet<NodeJS.Platform> = new Set<NodeJS.Platform>(
   ["darwin", "linux"],
 );
@@ -23,8 +25,35 @@ const SUPPORTED_PLATFORMS: ReadonlySet<NodeJS.Platform> = new Set<NodeJS.Platfor
 /** pid, pgid, then the remaining text is `lstart` (which contains spaces). */
 const PS_ROW_PATTERN = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/;
 
+/** pid, ppid, pgid, then the remaining text is `lstart`. */
+const PS_TABLE_ROW_PATTERN = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+?)\s*$/;
+
 /** One process that belongs to an inspected process group. */
 export type ProcessGroupMember = RuntimeProcessIdentity;
+
+/**
+ * One row of a bounded process-table snapshot, including its parent link.
+ *
+ * `pgid` may be 0 for kernel threads (Linux) or the out-of-scope kernel task,
+ * which is why this is not a {@link RuntimeProcessIdentity}: only rows with a
+ * positive `pid` and `pgid` can ever authorize a signal.
+ */
+export interface ProcessTableEntry {
+  pid: number;
+  ppid: number;
+  pgid: number;
+  /** Normalized OS start identity (`lstart`). */
+  startedAt: string;
+}
+
+export interface ProcessTableSnapshotOptions {
+  /**
+   * Maximum rows accepted for one snapshot. Clamped to
+   * {@link MAX_PROCESS_TABLE_ROWS}; exceeding the bound fails closed instead of
+   * returning a partial relationship graph.
+   */
+  maxEntries?: number;
+}
 
 /**
  * - `match`: every component of the exact identity agrees.
@@ -225,6 +254,77 @@ export class ProcessInspector {
     return members;
   }
 
+  /**
+   * Take one bounded read-only snapshot of the process table with parent
+   * links: `(pid, ppid, pgid, lstart)`, ordered by pid.
+   *
+   * The snapshot is the only source used to derive descendant relationships.
+   * A malformed row, a duplicate pid, or a table larger than `maxEntries`
+   * throws: silently dropping a row would make the relationship graph
+   * incomplete, which callers must treat as ambiguous, not as proof.
+   */
+  async snapshotProcessTable(
+    options: ProcessTableSnapshotOptions = {},
+  ): Promise<ProcessTableEntry[]> {
+    this.assertSupported("snapshot the process table");
+    if (options === null || typeof options !== "object") {
+      throw new ProcessInspectorError(
+        "process-table snapshot options must be an object",
+      );
+    }
+    const requested = options.maxEntries ?? MAX_PROCESS_TABLE_ROWS;
+    if (!Number.isInteger(requested) || requested <= 0) {
+      throw new ProcessInspectorError("maxEntries must be a positive integer");
+    }
+    const maxEntries = Math.min(requested, MAX_PROCESS_TABLE_ROWS);
+
+    const result = await this.exec([
+      "-A",
+      "-o",
+      "pid=",
+      "-o",
+      "ppid=",
+      "-o",
+      "pgid=",
+      "-o",
+      "lstart=",
+    ]);
+    if (result.exitCode !== 0) {
+      throw this.psFailure("snapshot the process table", result);
+    }
+
+    const entries: ProcessTableEntry[] = [];
+    const seen = new Set<number>();
+    for (const line of result.stdout.split(/\r?\n/)) {
+      if (line.trim() === "") continue;
+      const row = parsePsTableRow(line);
+      if (row === undefined) {
+        throw new ProcessInspectorError(
+          `cannot parse ps process table row: ${JSON.stringify(line)}`,
+        );
+      }
+      // A pid-0 row (macOS kernel_task when visible) is the OS idle task:
+      // never a worker, never reachable as a descendant of one. Skipping it
+      // keeps the user-process relationship graph complete.
+      if (row.pid === 0) continue;
+      if (seen.has(row.pid)) {
+        throw new ProcessInspectorError(
+          `ps process table contains duplicate pid ${row.pid}`,
+        );
+      }
+      seen.add(row.pid);
+      entries.push(row);
+      if (entries.length > maxEntries) {
+        throw new ProcessInspectorError(
+          `process table exceeds ${maxEntries} rows; refusing a partial snapshot`,
+        );
+      }
+    }
+
+    entries.sort((a, b) => a.pid - b.pid);
+    return entries;
+  }
+
   private assertSupported(action: string): void {
     if (this.supported) return;
     throw new ProcessInspectorUnsupportedPlatformError(
@@ -353,6 +453,29 @@ function parsePsRow(row: string): RuntimeProcessIdentity | undefined {
     return undefined;
   }
   return { pid, pgid, startedAt };
+}
+
+function parsePsTableRow(row: string): ProcessTableEntry | undefined {
+  const match = PS_TABLE_ROW_PATTERN.exec(row);
+  if (match === null) return undefined;
+  const pid = Number(match[1]);
+  const ppid = Number(match[2]);
+  const pgid = Number(match[3]);
+  const startedAt = normalizeStartIdentity(match[4]);
+  if (
+    !Number.isSafeInteger(pid) ||
+    pid < 0 ||
+    !Number.isSafeInteger(ppid) ||
+    ppid < 0 ||
+    // Linux kernel threads report pgid 0. They are valid rows, never
+    // signalable descendants; callers must not treat them as identities.
+    !Number.isSafeInteger(pgid) ||
+    pgid < 0 ||
+    startedAt === ""
+  ) {
+    return undefined;
+  }
+  return { pid, ppid, pgid, startedAt };
 }
 
 function firstNonEmptyLine(text: string): string | undefined {

@@ -84,6 +84,7 @@ import type {
   RunStatus,
   RunTaskState,
   SupervisorLockInfo,
+  WorkspaceBoundaryRecordStatus,
 } from "./types.js";
 
 const STOP_TIMEOUT_MS = 5_000;
@@ -122,6 +123,27 @@ export interface WorkerProgressStatus {
   event: WorkerProgressEvent;
   ageMs: number;
   stale: boolean;
+}
+
+/** Concise, bounded per-task WorkspaceBoundary evidence for status output. */
+export interface SupervisorBoundaryTaskEvidence {
+  taskId: string;
+  status: WorkspaceBoundaryRecordStatus;
+  capturedAt: string;
+  comparedAt: string;
+  /** Total bounded change count from the durable record. */
+  changeCount: number;
+  /** Display preview of evidence paths; the durable record is the authority. */
+  changedPaths: string[];
+  error?: string;
+}
+
+export interface SupervisorWorkspaceBoundaryStatus {
+  tasks: number;
+  clean: number;
+  violations: number;
+  inspectionErrors: number;
+  evidence: SupervisorBoundaryTaskEvidence[];
 }
 
 export interface SupervisorStatus {
@@ -166,6 +188,11 @@ export interface SupervisorStatus {
    * acceptance or the manifest; malformed/missing records only degrade it.
    */
   workerLeases: WorkerLeaseStatusReport;
+  /**
+   * Concise WorkspaceBoundary v1 projection. Detection only: it records
+   * guard outcomes and never grants acceptance or claims prevention.
+   */
+  workspaceBoundary: SupervisorWorkspaceBoundaryStatus;
 }
 
 export async function runSupervisorCli(
@@ -341,6 +368,7 @@ async function resumeCommand(
           delete task.reason;
           delete task.failure;
           delete task.cost;
+          delete task.workspaceBoundary;
         }
       }
     });
@@ -509,6 +537,53 @@ export async function buildStatus(
     // plans, signals, releases a lease, or rewrites a manifest.
     runtimeRecovery: readRuntimeRecoveryRecords(repoRoot),
     workerLeases,
+    workspaceBoundary: buildWorkspaceBoundaryStatus(tasks),
+  };
+}
+
+const BOUNDARY_STATUS_PATHS_PREVIEW = 8;
+
+/**
+ * Project the durable per-task records into a concise status view. The
+ * RunManifest record stays the authority; this projection truncates path
+ * lists for display only.
+ */
+function buildWorkspaceBoundaryStatus(
+  tasks: RunTaskState[],
+): SupervisorWorkspaceBoundaryStatus {
+  const evidence: SupervisorBoundaryTaskEvidence[] = [];
+  let clean = 0;
+  let violations = 0;
+  let inspectionErrors = 0;
+  for (const task of tasks) {
+    const record = task.workspaceBoundary;
+    if (!record) continue;
+    if (record.status === "clean") clean += 1;
+    else if (record.status === "violation") violations += 1;
+    else inspectionErrors += 1;
+
+    const changedPaths = record.changes.map((change) =>
+      change.rootIndex === 0
+        ? change.path
+        : `root${change.rootIndex}:${change.path}`,
+    );
+    evidence.push({
+      taskId: task.taskId,
+      status: record.status,
+      capturedAt: record.capturedAt,
+      comparedAt: record.comparedAt,
+      changeCount: changedPaths.length,
+      changedPaths: changedPaths.slice(0, BOUNDARY_STATUS_PATHS_PREVIEW),
+      ...(record.error !== undefined ? { error: record.error } : {}),
+    });
+  }
+  evidence.sort((left, right) => left.taskId.localeCompare(right.taskId));
+  return {
+    tasks: evidence.length,
+    clean,
+    violations,
+    inspectionErrors,
+    evidence,
   };
 }
 
@@ -625,6 +700,28 @@ function printStatus(
       }
     }
     log(parts.join(" "));
+  }
+  if (status.workspaceBoundary.tasks > 0) {
+    const boundary = status.workspaceBoundary;
+    log(
+      `workspace boundary: clean ${boundary.clean} / violation ` +
+        `${boundary.violations} / inspection-error ` +
+        `${boundary.inspectionErrors} (detection only)`,
+    );
+    for (const entry of boundary.evidence) {
+      const parts = [
+        `task ${entry.taskId}: boundary=${entry.status}`,
+        `compared=${entry.comparedAt}`,
+        `changes=${entry.changeCount}`,
+      ];
+      if (entry.changedPaths.length > 0) {
+        const truncated =
+          entry.changeCount > entry.changedPaths.length ? " …" : "";
+        parts.push(`paths=[${entry.changedPaths.join(", ")}${truncated}]`);
+      }
+      if (entry.error) parts.push(`error=${entry.error}`);
+      log(`  ${parts.join(" ")}`);
+    }
   }
   if (status.workerProgress.length === 0) {
     log("worker progress: none");
