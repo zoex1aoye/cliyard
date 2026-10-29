@@ -1427,6 +1427,21 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
       compareProcessIdentity(group.leader, leader) !== "match" ||
       leader.pid !== leader.pgid
     ) {
+      // The leader PID may have been reused after the original group exited.
+      // In that case the persisted pgid is already empty and no signal is
+      // needed. Only fail closed when the original group still has members.
+      try {
+        const members = await this.manager.listMembers(pgid);
+        if (members.length === 0) return { gone: true, signalled: false };
+      } catch (error) {
+        return {
+          gone: false,
+          signalled: false,
+          failure:
+            `external group ${pgid} leader identity changed and the old ` +
+            `group could not be inspected: ${errorText(error)}`,
+        };
+      }
       return {
         gone: false,
         signalled: false,

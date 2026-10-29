@@ -971,6 +971,79 @@ posixTest(
   },
 );
 
+posixTest(
+  "treats a reused leader pid as clean when the persisted group is gone",
+  async () => {
+    // A normal (non-detached) child reuses the old leader PID but belongs to
+    // the test runner's group. The forged snapshot proves that pid as the old
+    // group leader; fresh capture exposes the reuse while listing the old
+    // pgid proves it has no members. Cleanup must not signal either process.
+    const unrelated = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      { stdio: "ignore", windowsHide: true },
+    );
+    await once(unrelated, "spawn");
+    const unrelatedPid = unrelated.pid;
+    assert.ok(unrelatedPid);
+
+    let managedPid: number | undefined;
+    const reusedInspector: WorkerProcessTreeInspector = {
+      get host() {
+        return inspector.host;
+      },
+      get supported() {
+        return inspector.supported;
+      },
+      isAlive: (pid) => inspector.isAlive(pid),
+      capture: (pid) => inspector.capture(pid),
+      listGroupMembers: (pgid) => {
+        if (pgid === unrelatedPid) return Promise.resolve([]);
+        return inspector.listGroupMembers(pgid);
+      },
+      async snapshotProcessTable(options) {
+        const table = await inspector.snapshotProcessTable(options);
+        if (managedPid === undefined) return table;
+        const withoutUnrelated = table.filter(
+          (entry) => entry.pid !== unrelatedPid,
+        );
+        withoutUnrelated.push({
+          pid: unrelatedPid,
+          ppid: managedPid,
+          pgid: unrelatedPid,
+          startedAt: "Mon Jan  1 00:00:00 2001",
+        });
+        withoutUnrelated.sort((first, second) => first.pid - second.pid);
+        return withoutUnrelated;
+      },
+    };
+
+    const tree = manager({ inspector: reusedInspector });
+    const pidFile = nextPidFile("reused-gone");
+    const managed = spawnLeader(tree, pidFile, { children: 0 });
+    managedPid = managed.pid;
+    try {
+      const outcome = await managed.cleanup("timeout");
+      const record = outcome.record;
+      assert.equal(outcome.treeOk, true);
+      assert.equal(record.cleanupState, "terminated");
+      assert.equal(record.cleanupCompleteness, "complete");
+      assert.equal(record.nestedCleanup?.state, "clean");
+      assert.ok((record.nestedCleanup?.observedGroups ?? 0) >= 1);
+      assert.equal(record.nestedCleanup?.signalledGroups, 0);
+      assert.equal(record.nestedCleanup?.residualGroups, 0);
+      assert.equal(record.residualCount, 0);
+      assert.equal(inspector.isAlive(unrelatedPid), true);
+    } finally {
+      try {
+        unrelated.kill("SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+  },
+);
+
 posixTest("process-table snapshots fail closed on malformed rows, duplicates and bounds", async () => {
   const valid =
     // Linux kernel threads legitimately report pgid 0.
