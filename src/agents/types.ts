@@ -1,6 +1,9 @@
 import type { TaskContract } from "../contracts/schema.js";
 import type { CostTruth, FailureRecord } from "../failures.js";
-import type { TaskExtensionRecord } from "./continuation.js";
+import type {
+  TaskBudgetContinuationState,
+  TaskExtensionRecord,
+} from "./continuation.js";
 import type { WorkerProcessRecord } from "./process-tree.js";
 import type { WorkerLeaseAttacher } from "./worker-lease.js";
 
@@ -103,6 +106,14 @@ export interface AgentStartInput {
   contract: TaskContract;
   /** 0-based attempt; repair bumps this */
   attempt: number;
+  /**
+   * Task-level guard ledger from the preceding attempt, when a budget policy
+   * is configured. The next invocation is bounded by what remains of
+   * `maxCumulativeGuardUsd`; the ledger is local allocation accounting, never
+   * provider balance or invoice truth. Adapters that do not consume it ignore
+   * it.
+   */
+  taskBudget?: TaskBudgetContinuationState;
   briefing?: string;
   /** Independent verifier output from the immediately preceding attempt. */
   priorFailure?: {
@@ -163,6 +174,12 @@ export interface AgentResult {
    * non-authoritative; unavailable cost is never coerced to zero.
    */
   cost?: CostTruth;
+  /**
+   * Task-level guard ledger after this attempt. Present only when a budget
+   * policy is configured; runClosedLoop threads it into the next attempt so a
+   * repair cannot reset the cumulative guard.
+   */
+  taskBudget?: TaskBudgetContinuationState;
   /** Deadline grants persisted during this worker attempt. */
   extensions?: TaskExtensionRecord[];
   /**

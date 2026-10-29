@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -742,6 +743,102 @@ test("Claude failures retain bounded text but never secrets or raw payloads", as
     assert.equal(result.cost?.amount, 0.5);
     assert.ok(result.cost?.missing.includes("cost.usage"));
   } finally {
+    f.cleanup();
+  }
+});
+
+test("Claude records the task guard separately from usage-only cost", async () => {
+  const f = fixture(
+    claudeResult({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "ok",
+      usage: {
+        input_tokens: 11,
+        output_tokens: 7,
+        cache_creation_input_tokens: 3,
+        cache_read_input_tokens: 2,
+      },
+    }),
+  );
+  try {
+    const result = await runClaude(f, {
+      budgetPolicy: {
+        version: 1,
+        baseGuardUsd: 2,
+        continuationGuardUsd: 1,
+        maxContinuations: 0,
+        maxCumulativeGuardUsd: 2,
+        autoContinue: false,
+        overshootReserveUsd: 0,
+      },
+    });
+    assert.equal(result.exitCode, 0);
+    // Usage remains usage-only; the guard is a local cap, not a cost amount.
+    assert.equal(result.cost?.state, "usage-only");
+    assert.equal(result.cost?.amount, null);
+    assert.equal(result.cost?.guardBudgetUsd, 2);
+    assert.equal(result.taskBudget?.taskId, f.contract.taskId);
+    assert.equal(result.taskBudget?.cumulativeGuardUsd, 2);
+    assert.equal(result.taskBudget?.maxCumulativeGuardUsd, 2);
+    assert.equal(result.taskBudget?.continuationCount, 0);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("Claude stops before invocation when the task guard envelope is exhausted", async () => {
+  const marker = join(
+    tmpdir(),
+    `cliyard-budget-invoked-${process.pid}-${Date.now()}`,
+  );
+  const f = fixture(`#!/bin/sh
+touch ${JSON.stringify(marker)}
+exit 0
+`);
+  try {
+    const worker = createClaudeAdapter({
+      binary: f.binary,
+      cwd: f.repo,
+      model: "fixture-model",
+      budgetPolicy: {
+        version: 1,
+        baseGuardUsd: 2,
+        continuationGuardUsd: 1,
+        maxContinuations: 0,
+        maxCumulativeGuardUsd: 2,
+        autoContinue: false,
+        overshootReserveUsd: 0,
+      },
+    });
+    const { sessionId } = await worker.start({
+      contract: f.contract,
+      attempt: 1,
+      taskBudget: {
+        version: 1,
+        taskId: f.contract.taskId,
+        cumulativeGuardUsd: 2,
+        continuationCount: 0,
+        maxCumulativeGuardUsd: 2,
+      },
+    });
+    const result = await worker.collect(sessionId);
+
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.failure?.category, "budget_exhausted");
+    assert.equal(result.failure?.stage, "policy");
+    assert.equal(result.failure?.code, "task_budget_exhausted");
+    assert.equal(result.failure?.retryableHint, false);
+    assert.equal(existsSync(marker), false);
+    assert.equal(result.cost?.state, "unavailable");
+    assert.equal(result.cost?.amount, null);
+    // The local guard cap stays separate from the unavailable CLI cost.
+    assert.equal(result.cost?.guardBudgetUsd, 2);
+    assert.equal(result.taskBudget?.cumulativeGuardUsd, 2);
+    assert.equal(result.taskBudget?.maxCumulativeGuardUsd, 2);
+  } finally {
+    rmSync(marker, { force: true });
     f.cleanup();
   }
 });
