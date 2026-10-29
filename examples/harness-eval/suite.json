@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "id": "cliyard-harness-v0",
+  "label": "cliyard harness eval v0",
+  "scenarios": [
+    {
+      "id": "normal-work",
+      "category": "lifecycle",
+      "purpose": "A normal foreground Supervisor batch accepts its tasks, persists a completed RunManifest and exposes a clean status checkpoint.",
+      "commands": [
+        [
+          "node",
+          "--import",
+          "tsx",
+          "--test",
+          "--test-name-pattern",
+          "runClosedLoop happy path",
+          "tests/loop.test.ts"
+        ]
+      ],
+      "timeoutMsPerCommand": 300000,
+      "expectedExit": "zero"
+    },
+    {
+      "id": "high-fanout-process-tree",
+      "category": "process",
+      "purpose": "A wide nested worker process group is captured, cleaned and persisted with exact POSIX identities and bounded residual evidence.",
+      "commands": [
+        [
+          "node",
+          "--import",
+          "tsx",
+          "--test",
+          "--test-name-pattern",
+          "cleans more than 16 external groups with a 512-member group",
+          "tests/worker-process-tree.test.ts"
+        ]
+      ],
+      "timeoutMsPerCommand": 600000,
+      "expectedExit": "zero"
+    },
+    {
+      "id": "verifier-timeout-and-extension",
+      "category": "continuation",
+      "purpose": "Deadline extension, timeout and late-result evidence stay correct under mapped activity. This deliberately includes the observed in-flight checkpoint flake so repetition outcomes stay visible.",
+      "commands": [
+        [
+          "node",
+          "--import",
+          "tsx",
+          "--test",
+          "--test-name-pattern",
+          "(the same child timer|collect waits for an in-flight grant checkpoint)",
+          "tests/deadline-extension.test.ts"
+        ]
+      ],
+      "timeoutMsPerCommand": 600000,
+      "expectedExit": "zero"
+    },
+    {
+      "id": "controller-sigkill-recovery",
+      "category": "recovery",
+      "purpose": "A SIGKILLed controller's persisted top-level and nested worker groups recover through exact identities, never through process-name matching.",
+      "commands": [
+        [
+          "node",
+          "--import",
+          "tsx",
+          "--test",
+          "--test-name-pattern",
+          "recovers a controller-death fixture's 512-member nested group",
+          "tests/worker-lease.test.ts"
+        ]
+      ],
+      "timeoutMsPerCommand": 600000,
+      "expectedExit": "zero"
+    },
+    {
+      "id": "path-escape",
+      "category": "boundary",
+      "purpose": "WorkspaceBoundary detects out-of-write-path changes after a wave and rejects the affected task while preserving bounded evidence instead of deleting it. This is guard-only detection, not write prevention.",
+      "commands": [
+        [
+          "node",
+          "--import",
+          "tsx",
+          "--test",
+          "--test-name-pattern",
+          "dirty wave rejects every task",
+          "tests/workspace-boundary-integration.test.ts"
+        ]
+      ],
+      "timeoutMsPerCommand": 300000,
+      "expectedExit": "zero"
+    },
+    {
+      "id": "context-reload-handoff",
+      "category": "context",
+      "purpose": "A fresh process reads only a terminal RunManifest/EvidenceBundle fixture and reconstructs the next legal action. This simulates context loss and does not claim provider-level compaction equivalence.",
+      "commands": [
+        [
+          "node",
+          "--import",
+          "tsx",
+          "--test",
+          "--test-name-pattern",
+          "(a fresh process reconstructs|blocked retryable state resumes|an EvidenceBundle fixture is re-decided)",
+          "tests/harness-eval-handoff.test.ts"
+        ]
+      ],
+      "timeoutMsPerCommand": 300000,
+      "expectedExit": "zero"
+    }
+  ]
+}
