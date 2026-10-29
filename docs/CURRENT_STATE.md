@@ -43,10 +43,17 @@ self-host controller loaded the new code.
   history. Both root drafts completed full 473/473 locally, but the outer
   manager reused a vanished nested-group leader PID and rejected cleanup with
   `residualCount=0`.
-- The reviewed continuation base `1294869` contains draft `a026345`
+- The reviewed continuation base `1294869` contained draft `a026345`
   (EvidenceBundle), draft `91369d4` (Eval core), and a focused pid-reuse cleanup
-  fix. That base passes focused 29/29, build and full 483/483; it is not yet an
-  accepted integration.
+  fix. It passed focused 29/29, build and full 483/483.
+- Continuation run `cd40095a-8b11-4f11-8856-76d1d9f01d2f` is blocked overall.
+  Its EvidenceBundle integration and Harness Eval CLI tasks are accepted at
+  `b1fb9ac` and `f546a54`; the integration head is `3abbc79`. Its evidence task
+  is rejected, with a retained draft worktree.
+- The accepted Harness Eval CLI exposed an npm wrapper bug: injected snapshot
+  and strict scenario-failure exits prevented `run -> compare` evidence
+  collection. The closeout Plan addresses only that wrapper and records the
+  observed deadline flake rather than rerunning until green.
 - Post-merge build passed. The first complete-suite run was **463/464** because
   the deadline-extension in-flight checkpoint timed out once; that file then
   passed **13/13**, and a second complete run passed **464/464**. This is an
@@ -110,6 +117,14 @@ evidence-model gap: final evidence must be synthesized by the controller after
 Worker exit rather than requiring the Worker to predict its own post-exit
 record.
 
+### Controller EvidenceBundle and Harness Eval CLI
+
+The accepted integration head `3abbc79` contains the controller-owned terminal
+EvidenceBundle, `eval run/compare/handoff`, six local scenarios and their
+focused tests. Both component tasks are accepted, but the overall continuation
+run remains blocked and the evidence task remains rejected. This base is not
+merged into the mainline.
+
 ## Blocked history
 
 The earlier controller-death attempts exposed a design error, not merely a test
@@ -134,10 +149,12 @@ neither earlier RunManifest is retroactively accepted.
 
 The order is a dependency order, not a promise of parallel delivery.
 
-1. **Controller EvidenceBundle + Harness Eval v0**
-   The next Plan adds a controller-owned final evidence bundle and a repeated,
-   deterministic local Harness eval. It includes the observed deadline flake as
-   a scenario and does not hide missing provider metrics.
+1. **Harness Eval evidence closeout**
+   Fix npm wrapper option composition and collection exit semantics, then
+   reproduce baseline/candidate experiments through the wrapper. Preserve the
+   observed deadline flake and unavailable provider metrics in the evidence
+   document. This closes the EvidenceBundle/Harness Eval gate before background
+   verification work starts.
 
 2. **Background VerificationTask**
    Decouple long verification from Worker lifecycle. Persist owner, artifact
