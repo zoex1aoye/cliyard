@@ -1,0 +1,52 @@
+{
+  "planId": "nested-registry-live-cleanup-v1.2-cutover",
+  "contracts": [
+    {
+      "taskId": "nested-registry-live-cleanup-v1.2-cutover-evidence",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Document and measure the v1.2 live-cleanup/durable-recovery cutover from reviewed implementation base fac4606 per design/nested-registry-live-cleanup-v1.2-cutover.md. Make a documentation-only change by adding docs/evidence/NESTED_REGISTRY_LIVE_CLEANUP_V1_2.md. Run the focused worker-process-tree and worker-lease tests, build and complete suite from this exact worktree, and record the exact commands, pass counts, durations and observed cleanup evidence. Distinguish the rejected implementation run d058568e from the independent review of its four-path draft and from this cutover run loaded from fac4606. Record that this cutover is the first outer Worker lifecycle managed by the reviewed v1.2 code, that live cleanup completeness and durable recovery completeness are separate, and that truncated durable recovery remains needs_human with no signal. Preserve exact limitations: bounded durable registry, bounded process-table inspection, no Windows or cross-host recovery, no recovery of never-observed groups, no OS write sandbox, no automatic acceptance/merge, and no 24-hour soak claim. Do not modify source, tests, contracts or Plan files."
+      ],
+      "nonGoals": [
+        "Do not modify source, tests, contracts or Plan files.",
+        "Do not claim that the earlier rejected run succeeded or was accepted.",
+        "Do not merge or push the reviewed draft.",
+        "Do not claim Windows, cross-host, unobserved nested-group recovery or OS sandbox support.",
+        "Do not claim a long-duration soak from one cutover."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/nested-registry-live-cleanup-v1.2.md",
+        "docs/KNOWN_GAPS_2026-10-28.md",
+        "docs/evidence/WORKER_PROCESS_TREE.md",
+        "docs/evidence/WORKER_LEASE.md",
+        "src/agents/process-tree.ts",
+        "src/agents/worker-lease.ts",
+        "tests/worker-process-tree.test.ts",
+        "tests/worker-lease.test.ts"
+      ],
+      "writePaths": [
+        "docs/evidence/NESTED_REGISTRY_LIVE_CLEANUP_V1_2.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "fac4606107141f6eb243e9308d7fc044f4255b9e",
+      "verifyCommands": [
+        "npx tsx --test tests/worker-process-tree.test.ts tests/worker-lease.test.ts",
+        "npm run build",
+        "npm test"
+      ],
+      "deliverables": [
+        "A measured evidence document that separates the rejected implementation run, independent draft review and successful v1.2 cutover.",
+        "Exact focused, build, full-suite, path, boundary, cleanup and cost evidence."
+      ],
+      "forbidden": [
+        "Do not modify implementation or test files.",
+        "Do not rewrite or adopt the earlier blocked RunManifest.",
+        "Do not report a dry-run or Worker summary as verifier acceptance.",
+        "Do not use broad process matching as evidence of ownership."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
