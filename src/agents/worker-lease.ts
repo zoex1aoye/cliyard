@@ -41,9 +41,11 @@ import {
   MAX_NESTED_SIGNAL_TARGETS,
   MAX_PERSISTED_EXTERNAL_DESCENDANTS,
   type ManagedWorkerProcess,
+  type WorkerCleanupCompleteness,
   type WorkerCleanupReason,
   type WorkerCaptureSource,
   type WorkerCleanupState,
+  type WorkerDurableRecoveryCompleteness,
   type WorkerNestedGroup,
   type WorkerNestedProcesses,
   type WorkerProcessCleanupOutcome,
@@ -110,6 +112,13 @@ export interface WorkerLeaseCleanupEvidence {
   captureSource: WorkerCaptureSource;
   residualCount: number;
   signalCount: number;
+  /**
+   * Live cleanup completeness. Present on v1.2-era records; independent of the
+   * durable registry truncation below.
+   */
+  cleanupCompleteness?: WorkerCleanupCompleteness;
+  /** Durable nested-registry completeness for controller-death recovery. */
+  durableRecoveryCompleteness?: WorkerDurableRecoveryCompleteness;
   detail?: string;
 }
 
@@ -201,6 +210,10 @@ const CAPTURE_SOURCES: ReadonlySet<string> = new Set<WorkerCaptureSource>([
   "none",
   "unsupported",
 ]);
+const CLEANUP_COMPLETENESS_STATES: ReadonlySet<string> =
+  new Set<WorkerCleanupCompleteness>(["complete", "incomplete", "unsupported"]);
+const DURABLE_RECOVERY_COMPLETENESS_STATES: ReadonlySet<string> =
+  new Set<WorkerDurableRecoveryCompleteness>(["complete", "truncated"]);
 const RECOVERY_ACTIONS: ReadonlySet<string> = new Set<
   WorkerLeaseRecoveryEvidence["action"]
 >([
@@ -507,6 +520,32 @@ function parseCleanupEvidence(
   ) {
     return undefined;
   }
+  let cleanupCompleteness: WorkerCleanupCompleteness | undefined;
+  if (value.cleanupCompleteness !== undefined) {
+    if (
+      typeof value.cleanupCompleteness !== "string" ||
+      !CLEANUP_COMPLETENESS_STATES.has(value.cleanupCompleteness)
+    ) {
+      return undefined;
+    }
+    cleanupCompleteness =
+      value.cleanupCompleteness as WorkerCleanupCompleteness;
+  }
+  let durableRecoveryCompleteness:
+    | WorkerDurableRecoveryCompleteness
+    | undefined;
+  if (value.durableRecoveryCompleteness !== undefined) {
+    if (
+      typeof value.durableRecoveryCompleteness !== "string" ||
+      !DURABLE_RECOVERY_COMPLETENESS_STATES.has(
+        value.durableRecoveryCompleteness,
+      )
+    ) {
+      return undefined;
+    }
+    durableRecoveryCompleteness =
+      value.durableRecoveryCompleteness as WorkerDurableRecoveryCompleteness;
+  }
   let detail: string | undefined;
   if (value.detail !== undefined) {
     if (!isBoundedText(value.detail, MAX_WORKER_LEASE_DETAIL)) return undefined;
@@ -517,6 +556,10 @@ function parseCleanupEvidence(
     captureSource: value.captureSource as WorkerCaptureSource,
     residualCount: value.residualCount,
     signalCount: value.signalCount,
+    ...(cleanupCompleteness !== undefined ? { cleanupCompleteness } : {}),
+    ...(durableRecoveryCompleteness !== undefined
+      ? { durableRecoveryCompleteness }
+      : {}),
     ...(detail !== undefined ? { detail } : {}),
   };
 }
@@ -1184,6 +1227,15 @@ function applyCleanupOutcome(
       captureSource: record.captureSource,
       residualCount: record.residualCount,
       signalCount: record.signals.length,
+      ...(record.cleanupCompleteness
+        ? { cleanupCompleteness: record.cleanupCompleteness }
+        : {}),
+      ...(record.durableRecoveryCompleteness
+        ? {
+            durableRecoveryCompleteness:
+              record.durableRecoveryCompleteness,
+          }
+        : {}),
       ...(record.detail ? { detail: boundText(record.detail) } : {}),
     },
   };

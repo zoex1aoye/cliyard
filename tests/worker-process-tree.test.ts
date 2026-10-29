@@ -84,12 +84,12 @@ const largeGroup = process.argv[9] === "large-group";
 
 if (ignoreTerm) process.on("SIGTERM", () => {});
 const pids = [];
-const spawnChild = () => {
+const spawnChild = (index) => {
   const child = spawn(
     process.execPath,
     [
       ${JSON.stringify(helperFixture)},
-      largeGroup ? "large-group" : childIgnoreTerm ? "ignore" : "term",
+      largeGroup && index === 0 ? "large-group" : childIgnoreTerm ? "ignore" : "term",
     ],
     { stdio: "ignore", detached: detachHelper },
   );
@@ -97,12 +97,12 @@ const spawnChild = () => {
   writeFileSync(pidFile, JSON.stringify(pids));
 };
 if (staggerMs > 0 && childCount > 1) {
-  spawnChild();
+  spawnChild(0);
   for (let index = 1; index < childCount; index += 1) {
-    setTimeout(spawnChild, staggerMs * index);
+    setTimeout(() => spawnChild(index), staggerMs * index);
   }
 } else {
-  for (let index = 0; index < childCount; index += 1) spawnChild();
+  for (let index = 0; index < childCount; index += 1) spawnChild(index);
 }
 setTimeout(() => process.exit(0), holdMs);
 `,
@@ -673,6 +673,110 @@ posixTest(
 );
 
 posixTest(
+  "cleans more than 16 external groups with a 512-member group and only truncates durable recovery",
+  async () => {
+    const tree = manager({
+      termGraceMs: 1_000,
+      killGraceMs: 2_000,
+      descendantPollMs: 250,
+    });
+    const pidFile = nextPidFile("nested-groups-many");
+    // 20 detached group leaders; the first owns 512 + 1 members. The live
+    // group view must see all 20 even though the durable registry persists 16.
+    const managed = spawnLeader(tree, pidFile, {
+      children: 20,
+      detachHelper: true,
+      largeGroup: true,
+    });
+    await readHelperPids(pidFile);
+    await waitFor(() => {
+      try {
+        return (JSON.parse(readFileSync(pidFile, "utf8")) as number[]).length === 20;
+      } catch {
+        return false;
+      }
+    }, "all 20 detached group leaders", 20_000);
+    const groupPids = JSON.parse(readFileSync(pidFile, "utf8")) as number[];
+    assert.equal(groupPids.length, 20);
+    for (const pid of groupPids) trackFixture(await inspector.capture(pid));
+    const snapshots: WorkerNestedProcesses[] = [];
+    const unsubscribe = managed.observeExternalDescendants!((snapshot) => {
+      snapshots.push(snapshot);
+    });
+    try {
+      for (const pid of groupPids) {
+        const captured = await inspector.capture(pid);
+        assert.ok(captured);
+        assert.equal(captured.pgid, pid, "every helper leads its own group");
+      }
+      await waitFor(
+        () =>
+          snapshots.some(
+            (snapshot) =>
+              snapshot.truncated && (snapshot.groups?.length ?? 0) === 16,
+          ),
+        "truncated 20-group registry observation",
+        20_000,
+      );
+      const largePid = groupPids[0]!;
+      const largeMembers = await inspector.listGroupMembers(largePid);
+      assert.ok(largeMembers.length >= 513);
+      for (const member of largeMembers) trackFixture(member);
+
+      const outcome = await managed.cleanup("timeout");
+      const record = outcome.record;
+      // The live cleanup is complete even though the durable registry is
+      // explicitly truncated for controller-death recovery.
+      assert.equal(outcome.treeOk, true);
+      assert.equal(record.cleanupState, "terminated");
+      assert.equal(record.cleanupCompleteness, "complete");
+      assert.equal(record.durableRecoveryCompleteness, "truncated");
+      assert.equal(record.nestedCleanup?.state, "terminated");
+      assert.ok((record.nestedCleanup?.observedGroups ?? 0) >= 20);
+      assert.ok((record.nestedCleanup?.signalledGroups ?? 0) >= 20);
+      assert.equal(record.nestedCleanup?.residualGroups, 0);
+      assert.equal(record.nestedCleanup?.residualDescendants, 0);
+      assert.equal(record.nestedCleanup?.cleanupCompleteness, "complete");
+      assert.equal(
+        record.nestedCleanup?.durableRecoveryCompleteness,
+        "truncated",
+      );
+      // Only the persisted registry is bounded.
+      assert.equal(record.observedExternalGroups?.length, 16);
+      assert.deepEqual(parseWorkerProcessRecord(record), record);
+      assert.ok(
+        record.signals.some(
+          (signal) =>
+            signal.scope === "nested-process-group" &&
+            signal.pgid === largePid,
+        ),
+      );
+      for (const groupPid of groupPids) {
+        await waitFor(
+          async () =>
+            (await inspector.listGroupMembers(groupPid)).length === 0,
+          `external group ${groupPid} death`,
+          20_000,
+        );
+        assert.equal(inspector.isAlive(groupPid), false);
+      }
+      for (const member of largeMembers) liveFixtures.delete(member.pid);
+    } finally {
+      unsubscribe();
+      for (const groupPid of groupPids) {
+        if (inspector.isAlive(groupPid)) {
+          try {
+            process.kill(-groupPid, "SIGKILL");
+          } catch {
+            // Already gone.
+          }
+        }
+      }
+    }
+  },
+);
+
+posixTest(
   "cleans a nested group and an ungrouped fallback with distinct signal scopes",
   async () => {
     const foreign = spawn(
@@ -974,6 +1078,75 @@ posixTest(
       if (inspector.isAlive(helperPid)) {
         try {
           process.kill(helperPid, "SIGKILL");
+        } catch {
+          // Already gone.
+        }
+      }
+    }
+  },
+);
+
+posixTest(
+  "incomplete current process-table inspection still fails closed",
+  async () => {
+    let failSnapshots = false;
+    const flakySnapshotInspector: WorkerProcessTreeInspector = {
+      get host() {
+        return inspector.host;
+      },
+      get supported() {
+        return inspector.supported;
+      },
+      isAlive: (pid) => inspector.isAlive(pid),
+      capture: (pid) => inspector.capture(pid),
+      listGroupMembers: (pgid) => inspector.listGroupMembers(pgid),
+      async snapshotProcessTable(options) {
+        if (failSnapshots) {
+          throw new Error("ps became unavailable during cleanup");
+        }
+        return inspector.snapshotProcessTable(options);
+      },
+    };
+    const tree = manager({
+      inspector: flakySnapshotInspector,
+      descendantPollMs: 250,
+    });
+    const pidFile = nextPidFile("live-incomplete");
+    const managed = spawnLeader(tree, pidFile, {
+      children: 1,
+      detachHelper: true,
+    });
+    const [helperPid] = await readHelperPids(pidFile);
+    const snapshots: WorkerNestedProcesses[] = [];
+    const unsubscribe = managed.observeExternalDescendants!((snapshot) => {
+      snapshots.push(snapshot);
+    });
+    try {
+      await waitFor(
+        () => snapshots.some((snapshot) => (snapshot.groups?.length ?? 0) >= 1),
+        "nested group observation before cleanup",
+      );
+      failSnapshots = true;
+      const outcome = await managed.cleanup("timeout");
+      const record = outcome.record;
+      // The live registry is known, but a current inspection failure still
+      // fails the cleanup closed instead of claiming completeness.
+      assert.equal(outcome.treeOk, false);
+      assert.equal(record.cleanupState, "failed");
+      assert.equal(record.cleanupCompleteness, "incomplete");
+      assert.equal(record.nestedCleanup?.state, "failed");
+      assert.equal(record.nestedCleanup?.cleanupCompleteness, "incomplete");
+      assert.match(record.detail ?? "", /snapshot the worker process tree/);
+      assert.equal(
+        record.signals.some((signal) => signal.scope === "descendant-pid"),
+        false,
+      );
+      assert.deepEqual(parseWorkerProcessRecord(record), record);
+    } finally {
+      unsubscribe();
+      if (inspector.isAlive(helperPid)) {
+        try {
+          process.kill(-helperPid, "SIGKILL");
         } catch {
           // Already gone.
         }

@@ -75,6 +75,13 @@ export const MAX_PERSISTED_EXTERNAL_DESCENDANTS = 32;
 export const MAX_PERSISTED_EXTERNAL_GROUPS = 16;
 /** Maximum owned nested process groups represented in one registry. */
 export const MAX_NESTED_GROUPS = MAX_PERSISTED_EXTERNAL_GROUPS;
+/**
+ * Maximum external groups one live cleanup can enumerate. This is independent
+ * of the durable registry bound: a live process table is already capped at
+ * {@link MAX_PROCESS_TABLE_ROWS}, and cleanup must see every group the current
+ * snapshot can prove rather than only the first {@link MAX_NESTED_GROUPS}.
+ */
+export const MAX_LIVE_NESTED_GROUPS = MAX_PROCESS_TABLE_ROWS;
 /** Upper bound for an observed nested group's member count (evidence only). */
 export const MAX_NESTED_GROUP_MEMBERS = 100_000;
 /** Maximum ungrouped external descendant pids observed per worker. */
@@ -159,6 +166,23 @@ export interface WorkerProcessSignalRecord {
 export type WorkerNestedCleanupState = "none" | "clean" | "terminated" | "failed";
 
 /**
+ * Completeness of the *live* cleanup against the current process table.
+ * - `complete`: every currently reachable external group was proven gone (or
+ *   no external group was reachable).
+ * - `incomplete`: current inspection was ambiguous, a live group could not be
+ *   proven gone, or the live target set exceeded its signal bound.
+ * - `unsupported`: this platform has no managed POSIX group.
+ */
+export type WorkerCleanupCompleteness = "complete" | "incomplete" | "unsupported";
+
+/**
+ * Completeness of the *durable* bounded registry for controller-death
+ * recovery. `truncated` means the persisted lease cannot prove complete nested
+ * ownership; it says nothing about whether the live cleanup succeeded.
+ */
+export type WorkerDurableRecoveryCompleteness = "complete" | "truncated";
+
+/**
  * One external process group whose leader row was observed outside the managed
  * worker group. `leader.pid === leader.pgid` by construction; the entry is not
  * signal authority until cleanup re-proves that exact identity plus fresh
@@ -211,6 +235,10 @@ export interface WorkerNestedCleanupEvidence {
   signalledGroups?: number;
   /** External groups that could not be proven gone. */
   residualGroups?: number;
+  /** Live cleanup completeness, independent of the durable registry bound. */
+  cleanupCompleteness?: WorkerCleanupCompleteness;
+  /** Whether the bounded durable registry covers every observation. */
+  durableRecoveryCompleteness?: WorkerDurableRecoveryCompleteness;
   detail?: string;
 }
 
@@ -233,6 +261,14 @@ export interface WorkerProcessRecord {
   captureSupport: WorkerCaptureSupport;
   cleanupReason: WorkerCleanupReason;
   cleanupState: WorkerCleanupState;
+  /**
+   * Live cleanup completeness. A `cleanupState: "terminated"` record may carry
+   * `cleanupCompleteness: "complete"` while the durable registry below is
+   * truncated; the two meanings are deliberately independent.
+   */
+  cleanupCompleteness?: WorkerCleanupCompleteness;
+  /** Completeness of the bounded persisted nested registry for recovery. */
+  durableRecoveryCompleteness?: WorkerDurableRecoveryCompleteness;
   signals: WorkerProcessSignalRecord[];
   /** Bounded residual group members observed while cleaning. */
   residualMembers: RuntimeProcessIdentity[];
@@ -381,6 +417,10 @@ const NESTED_STATES: ReadonlySet<string> = new Set<WorkerNestedCleanupState>([
   "terminated",
   "failed",
 ]);
+const CLEANUP_COMPLETENESS_STATES: ReadonlySet<string> =
+  new Set<WorkerCleanupCompleteness>(["complete", "incomplete", "unsupported"]);
+const DURABLE_RECOVERY_COMPLETENESS_STATES: ReadonlySet<string> =
+  new Set<WorkerDurableRecoveryCompleteness>(["complete", "truncated"]);
 const CAPTURE_SOURCES: ReadonlySet<string> = new Set<WorkerCaptureSource>([
   "ps-exact",
   "pgid-reservation",
@@ -537,8 +577,14 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
   private nestedSnapshot: WorkerNestedProcesses | undefined;
   private nestedSnapshotKey: string | undefined;
   private nestedObservedAt: string | undefined;
-  /** A relationship walk hit a bound; the snapshot is evidence only. */
-  private nestedIncomplete = false;
+  /**
+   * A *durable registry* bound was exceeded. This marks the persisted snapshot
+   * truncated (controller-death recovery is incomplete) but never fails a live
+   * cleanup that can still prove the current tree gone.
+   */
+  private durableTruncated = false;
+  /** The live group view itself exceeded the process-table bound. */
+  private liveIncomplete = false;
   private nestedCleanup: WorkerNestedCleanupEvidence | undefined;
   private samplerLeader: RuntimeProcessIdentity | undefined;
   private samplerTimer: NodeJS.Timeout | undefined;
@@ -712,7 +758,7 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     }
     if (result === "incomplete") {
       this.noteSamplerError(
-        "descendant snapshot exceeded a bounded nested registry limit",
+        "live external group view exceeded the process-table bound",
       );
     }
   }
@@ -749,6 +795,7 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     expected: RuntimeProcessIdentity | undefined,
   ): "ok" | "invalid-root" | "incomplete" {
     if (!expected) return "invalid-root";
+    const wasLiveIncomplete = this.liveIncomplete;
     const children = new Map<number, ProcessTableEntry[]>();
     let root: ProcessTableEntry | undefined;
     for (const entry of table) {
@@ -789,26 +836,33 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
       }
     }
 
-    const wasIncomplete = this.nestedIncomplete;
     const observedAt = new Date().toISOString();
 
     // First pass: exact group leaders. A leader is authoritative only when the
     // observed row itself proves `pid === pgid`; a reused group id keeps the
-    // first exact leader and marks the registry truncated instead of silently
-    // promoting a new process to ownership.
+    // first exact leader and marks the *durable* registry truncated instead of
+    // silently promoting a new process to ownership.
+    //
+    // The live group view is bounded only by the process-table snapshot, not
+    // by the lease persistence bound: cleanup must be able to prove every
+    // currently reachable group gone even when only 16 can be persisted.
     for (const leader of external) {
       if (leader.pid !== leader.pgid || !isProcessIdentity(leader)) continue;
       const existing = this.observedGroups.get(leader.pgid);
       if (existing) {
         if (compareProcessIdentity(existing.leader, leader) !== "match") {
-          this.nestedIncomplete = true;
+          this.durableTruncated = true;
         } else {
           existing.lastObservedAt = observedAt;
         }
         continue;
       }
-      if (this.observedGroups.size >= MAX_NESTED_GROUPS) {
-        this.nestedIncomplete = true;
+      if (this.observedGroups.size >= MAX_LIVE_NESTED_GROUPS) {
+        // More distinct groups than a full process table: the live view can no
+        // longer be complete, so this is the one group bound that fails live
+        // cleanup.
+        this.liveIncomplete = true;
+        this.durableTruncated = true;
         continue;
       }
       this.observedGroups.set(leader.pgid, {
@@ -819,12 +873,13 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
       });
     }
 
-    // Bounded observed-group ids, including groups whose leader row was not
-    // observed. Exceeding the group bound fails closed.
+    // Observed-group ids, including groups whose leader row was not observed.
+    // These are persisted as bounded evidence only; exceeding the persistence
+    // bound truncates durable recovery and never fails the live cleanup.
     for (const entry of external) {
       if (this.observedExternalGroupIds.has(entry.pgid)) continue;
-      if (this.observedExternalGroupIds.size >= MAX_PERSISTED_EXTERNAL_GROUPS) {
-        this.nestedIncomplete = true;
+      if (this.observedExternalGroupIds.size >= MAX_LIVE_NESTED_GROUPS) {
+        this.durableTruncated = true;
         continue;
       }
       this.observedExternalGroupIds.add(entry.pgid);
@@ -860,7 +915,7 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
       this.noteUngroupedDescendant(entry);
     }
     this.publishNestedSnapshot();
-    return this.nestedIncomplete && !wasIncomplete ? "incomplete" : "ok";
+    return this.liveIncomplete && !wasLiveIncomplete ? "incomplete" : "ok";
   }
 
   /**
@@ -878,7 +933,11 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     }
     if (!this.observedExternalPids.has(entry.pid)) {
       if (this.observedExternalPids.size >= MAX_SAMPLED_DESCENDANTS) {
-        this.nestedIncomplete = true;
+        // The ungrouped evidence registry is truncated for durable recovery.
+        // Live cleanup still fails closed later if more than
+        // MAX_NESTED_SIGNAL_TARGETS of the tracked set are alive, which is the
+        // only ungrouped-fallback bound that governs live signals.
+        this.durableTruncated = true;
         return;
       }
       this.observedExternalPids.add(entry.pid);
@@ -901,6 +960,20 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
   }
 
   /**
+   * Whether the bounded durable registry omits observations the live cleanup
+   * can still see. This is recovery completeness only; it never fails a live
+   * cleanup by itself.
+   */
+  private durableRegistryTruncated(): boolean {
+    return (
+      this.durableTruncated ||
+      this.observedGroups.size > MAX_NESTED_GROUPS ||
+      this.observedExternalGroupIds.size > MAX_PERSISTED_EXTERNAL_GROUPS ||
+      this.observedExternalPids.size > MAX_PERSISTED_EXTERNAL_DESCENDANTS
+    );
+  }
+
+  /**
    * Build the bounded snapshot from tracked external observations. Returns
    * `undefined` until something external was observed or a bound was exceeded
    * (an empty snapshot is not evidence).
@@ -911,20 +984,15 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
       .sort((first, second) => first.pgid - second.pgid)
       .slice(0, MAX_NESTED_GROUPS)
       .map(copyNestedGroup);
-    if (
-      observedCount === 0 &&
-      groups.length === 0 &&
-      !this.nestedIncomplete
-    ) {
+    const truncated = this.durableRegistryTruncated();
+    if (observedCount === 0 && groups.length === 0 && !truncated) {
       return undefined;
     }
     return {
       version: 1,
       host: this.manager.inspector.host,
       observedCount,
-      truncated:
-        this.nestedIncomplete ||
-        observedCount > MAX_PERSISTED_EXTERNAL_DESCENDANTS,
+      truncated,
       lastObservedAt: this.nestedObservedAt ?? this.startedAt,
       groups,
       identities: [...this.observedExternal.values()]
@@ -1026,10 +1094,12 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
       );
       if (result === "ok") return { refreshed: true };
       if (result === "incomplete") {
+        // Only the live group view exceeding the process-table bound lands
+        // here; a truncated durable registry does not fail live cleanup.
         return {
           refreshed: true,
           failure:
-            "descendant snapshot exceeded a bounded nested registry limit; " +
+            "live external group view exceeded the process-table bound; " +
             "refusing an incomplete nested cleanup",
         };
       }
@@ -2000,6 +2070,11 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
         ...(observedGroups > 0
           ? { observedGroups, signalledGroups, residualGroups }
           : {}),
+        cleanupCompleteness:
+          failure !== undefined ? "incomplete" : "complete",
+        durableRecoveryCompleteness: this.durableRegistryTruncated()
+          ? "truncated"
+          : "complete",
         ...(failure !== undefined ? { detail: boundDetail(failure) } : {}),
       },
       ...(failure !== undefined ? { failure } : {}),
@@ -2354,6 +2429,17 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
       captureSupport: this.captureSupportValue,
       cleanupReason: reason,
       cleanupState: state,
+      // The live outcome and the durable registry bound are separate facts:
+      // a complete live cleanup may leave a truncated recovery registry.
+      cleanupCompleteness:
+        state === "unsupported"
+          ? "unsupported"
+          : state === "failed"
+            ? "incomplete"
+            : "complete",
+      durableRecoveryCompleteness: this.durableRegistryTruncated()
+        ? "truncated"
+        : "complete",
       signals: this.signals.map((signal) => ({ ...signal })),
       residualMembers: this.residualMembers.map((member) => ({ ...member })),
       residualCount: this.residualCount,
@@ -2510,6 +2596,32 @@ export function parseWorkerProcessRecord(
   ) {
     return undefined;
   }
+  let cleanupCompleteness: WorkerCleanupCompleteness | undefined;
+  if (value.cleanupCompleteness !== undefined) {
+    if (
+      typeof value.cleanupCompleteness !== "string" ||
+      !CLEANUP_COMPLETENESS_STATES.has(value.cleanupCompleteness)
+    ) {
+      return undefined;
+    }
+    cleanupCompleteness =
+      value.cleanupCompleteness as WorkerCleanupCompleteness;
+  }
+  let durableRecoveryCompleteness:
+    | WorkerDurableRecoveryCompleteness
+    | undefined;
+  if (value.durableRecoveryCompleteness !== undefined) {
+    if (
+      typeof value.durableRecoveryCompleteness !== "string" ||
+      !DURABLE_RECOVERY_COMPLETENESS_STATES.has(
+        value.durableRecoveryCompleteness,
+      )
+    ) {
+      return undefined;
+    }
+    durableRecoveryCompleteness =
+      value.durableRecoveryCompleteness as WorkerDurableRecoveryCompleteness;
+  }
 
   const signals = parseSignals(value.signals);
   if (!signals) return undefined;
@@ -2573,6 +2685,10 @@ export function parseWorkerProcessRecord(
     captureSupport: value.captureSupport as WorkerCaptureSupport,
     cleanupReason: value.cleanupReason as WorkerCleanupReason,
     cleanupState: value.cleanupState as WorkerCleanupState,
+    ...(cleanupCompleteness !== undefined ? { cleanupCompleteness } : {}),
+    ...(durableRecoveryCompleteness !== undefined
+      ? { durableRecoveryCompleteness }
+      : {}),
     signals,
     residualMembers: residual,
     residualCount: value.residualCount,
@@ -2777,7 +2893,9 @@ function parseNestedCleanup(
     if (
       !Number.isInteger(observedGroups) ||
       observedGroups < 1 ||
-      observedGroups > MAX_NESTED_GROUPS ||
+      // Live cleanup counters are bounded by the process-table snapshot, not
+      // by the smaller durable-registry persistence bound.
+      observedGroups > MAX_LIVE_NESTED_GROUPS ||
       !Number.isInteger(signalledGroups) ||
       signalledGroups < 0 ||
       signalledGroups > observedGroups ||
@@ -2802,6 +2920,32 @@ function parseNestedCleanup(
   ) {
     return null;
   }
+  let cleanupCompleteness: WorkerCleanupCompleteness | undefined;
+  if (raw.cleanupCompleteness !== undefined) {
+    if (
+      typeof raw.cleanupCompleteness !== "string" ||
+      !CLEANUP_COMPLETENESS_STATES.has(raw.cleanupCompleteness)
+    ) {
+      return null;
+    }
+    cleanupCompleteness =
+      raw.cleanupCompleteness as WorkerCleanupCompleteness;
+  }
+  let durableRecoveryCompleteness:
+    | WorkerDurableRecoveryCompleteness
+    | undefined;
+  if (raw.durableRecoveryCompleteness !== undefined) {
+    if (
+      typeof raw.durableRecoveryCompleteness !== "string" ||
+      !DURABLE_RECOVERY_COMPLETENESS_STATES.has(
+        raw.durableRecoveryCompleteness,
+      )
+    ) {
+      return null;
+    }
+    durableRecoveryCompleteness =
+      raw.durableRecoveryCompleteness as WorkerDurableRecoveryCompleteness;
+  }
   let detail: string | undefined;
   if (raw.detail !== undefined) {
     if (!isBoundedText(raw.detail, MAX_PROCESS_TREE_DETAIL)) return null;
@@ -2818,6 +2962,10 @@ function parseNestedCleanup(
           signalledGroups: signalledGroups as number,
           residualGroups: residualGroups as number,
         }
+      : {}),
+    ...(cleanupCompleteness !== undefined ? { cleanupCompleteness } : {}),
+    ...(durableRecoveryCompleteness !== undefined
+      ? { durableRecoveryCompleteness }
       : {}),
     ...(detail !== undefined ? { detail } : {}),
   };

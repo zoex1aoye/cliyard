@@ -9,6 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import {
   chmodSync,
   existsSync,
@@ -31,11 +32,12 @@ import {
 import type { RuntimeProcessIdentity } from "../src/runtime/types.js";
 import { createClaudeAdapter } from "../src/agents/claude.js";
 import { createCodexAdapter } from "../src/agents/codex.js";
-import type {
-  ManagedWorkerProcess,
-  WorkerNestedProcesses,
-  WorkerProcessCleanupOutcome,
-  WorkerProcessTreeInspector,
+import {
+  WorkerProcessTreeManager,
+  type ManagedWorkerProcess,
+  type WorkerNestedProcesses,
+  type WorkerProcessCleanupOutcome,
+  type WorkerProcessTreeInspector,
 } from "../src/agents/process-tree.js";
 import {
   buildWorkerLeaseStatus,
@@ -1911,6 +1913,207 @@ test("status exposes bounded nested registry presence and exact liveness", async
     3,
   );
 });
+
+posixTest(
+  "a live >16-group worker releases a complete cleanup with a truncated durable lease",
+  async () => {
+    const repo = initRepo();
+    try {
+      const helperPath = join(repo, "large-nested-helper.mjs");
+      writeFileSync(
+        helperPath,
+        `import { spawn } from "node:child_process";
+const count = Number(process.argv[2] ?? "512");
+for (let index = 0; index < count; index += 1) {
+  spawn("/bin/sleep", ["600"], { stdio: "ignore" });
+}
+setInterval(() => {}, 1000);
+`,
+        "utf8",
+      );
+      const fixturePath = join(repo, "many-nested-groups.mjs");
+      writeFileSync(
+        fixturePath,
+        `import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const pidFile = process.argv[2];
+const groups = Number(process.argv[3] ?? "20");
+const helper = process.argv[4];
+const pids = [];
+for (let index = 0; index < groups; index += 1) {
+  const child =
+    index === 0
+      ? spawn(process.execPath, [helper, "512"], {
+          detached: true,
+          stdio: "ignore",
+        })
+      : spawn("/bin/sleep", ["600"], { detached: true, stdio: "ignore" });
+  pids.push(child.pid);
+  writeFileSync(pidFile, JSON.stringify(pids));
+}
+setInterval(() => {}, 1000);
+`,
+        "utf8",
+      );
+      const pidFile = join(repo, "nested-group-pids.json");
+      const tree = new WorkerProcessTreeManager({
+        inspector: realInspector,
+        termGraceMs: 1_500,
+        killGraceMs: 2_000,
+        pollMs: 25,
+        descendantPollMs: 250,
+      });
+      const managed = tree.spawn(
+        process.execPath,
+        [fixturePath, pidFile, "20", helperPath],
+        { stdio: ["ignore", "ignore", "ignore"] },
+      );
+      // A deterministic dead controller identity: recovery must classify the
+      // lease as orphaned rather than a live owner.
+      const dead = spawn(process.execPath, ["-e", "process.exit(0)"], {
+        stdio: "ignore",
+      });
+      await once(dead, "exit");
+      const controllerPid = dead.pid;
+      assert.ok(controllerPid);
+      const attacher = createWorkerLeaseAttacher({
+        repoRoot: repo,
+        runId: "run-live-groups",
+        controller: {
+          pid: controllerPid,
+          host: realInspector.host,
+          identity: {
+            pid: controllerPid,
+            pgid: controllerPid,
+            startedAt: "Mon Jan  1 00:00:00 2024",
+          },
+        },
+      });
+      const handle = await attacher(attachInput(managed, "many-groups"));
+      const groupPids: number[] = [];
+      try {
+        await waitFor(() => {
+          try {
+            const parsed = JSON.parse(readFileSync(pidFile, "utf8")) as number[];
+            groupPids.splice(0, groupPids.length, ...parsed);
+            return groupPids.length === 20;
+          } catch {
+            return false;
+          }
+        }, "20 detached group leaders", 20_000);
+        for (const pgid of groupPids) liveFixturePids.add(pgid);
+        await waitFor(
+          () => readLeaseFile(handle.path)?.nestedProcesses?.truncated === true,
+          "truncated durable nested registry",
+          20_000,
+        );
+
+        const outcome = await managed.cleanup("timeout");
+        await handle.update(outcome);
+        assert.equal(outcome.treeOk, true);
+        assert.equal(outcome.record.cleanupState, "terminated");
+        assert.equal(outcome.record.cleanupCompleteness, "complete");
+        assert.equal(outcome.record.durableRecoveryCompleteness, "truncated");
+        assert.equal(outcome.record.nestedCleanup?.state, "terminated");
+        assert.ok((outcome.record.nestedCleanup?.observedGroups ?? 0) >= 20);
+        assert.ok((outcome.record.nestedCleanup?.signalledGroups ?? 0) >= 20);
+        assert.equal(outcome.record.nestedCleanup?.residualGroups, 0);
+        assert.equal(outcome.record.nestedCleanup?.residualDescendants, 0);
+
+        const lease = readLeaseFile(handle.path)!;
+        assert.equal(lease.state, "released");
+        assert.equal(lease.cleanup?.processTreeState, "terminated");
+        assert.equal(lease.cleanup?.cleanupCompleteness, "complete");
+        assert.equal(
+          lease.cleanup?.durableRecoveryCompleteness,
+          "truncated",
+        );
+        assert.equal(lease.nestedProcesses?.truncated, true);
+        assert.equal(lease.nestedProcesses?.groups?.length, 16);
+
+        // Status projects both facts separately: live cleanup complete while
+        // durable recovery evidence is truncated.
+        const status = await buildWorkerLeaseStatus(
+          repo,
+          "run-live-groups",
+          [{ taskId: "task-a" }],
+          { inspector: realInspector },
+        );
+        const latest = status.tasks.find((task) => task.taskId === "task-a")
+          ?.latest;
+        assert.equal(latest?.cleanup?.cleanupCompleteness, "complete");
+        assert.equal(
+          latest?.cleanup?.durableRecoveryCompleteness,
+          "truncated",
+        );
+        assert.equal(latest?.nestedProcesses.truncated, true);
+
+        // The live cleanup proved every current group gone: no residual.
+        for (const pgid of groupPids) {
+          await waitFor(
+            () => realInspector.isAlive(pgid) === false,
+            `nested group ${pgid} death`,
+            20_000,
+          );
+          assert.deepEqual(await realInspector.listGroupMembers(pgid), []);
+          liveFixturePids.delete(pgid);
+        }
+
+        // Controller-death recovery from the same truncated registry must not
+        // infer ownership from group ids and must send no signal.
+        const active: WorkerLease = {
+          ...lease,
+          state: "active",
+          updatedAt: new Date().toISOString(),
+        };
+        delete active.cleanup;
+        delete active.cleanupReason;
+        delete active.cleanedAt;
+        delete active.recovery;
+        writeLease(repo, active);
+        const calls: Array<{ pgid: number; signal: NodeJS.Signals }> = [];
+        const pidCalls: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+        const report = await recoverWorkerLeases({
+          repoRoot: repo,
+          runId: "run-live-groups",
+          inspector: realInspector,
+          termGraceMs: 50,
+          killGraceMs: 50,
+          pollMs: 5,
+          killGroup: (pgid, signal) => {
+            calls.push({ pgid, signal });
+          },
+          killPid: (pid, signal) => {
+            pidCalls.push({ pid, signal });
+          },
+        });
+        assert.equal(report.needsHuman, 1);
+        assert.equal(report.recovered, 0);
+        assert.equal(calls.length, 0);
+        assert.equal(pidCalls.length, 0);
+        assert.equal(report.entries[0]?.action, "preserved");
+        assert.equal(report.entries[0]?.nested?.truncated, true);
+        assert.match(report.entries[0]?.reason ?? "", /truncated/);
+        const afterRecovery = readLeaseFile(handle.path)!;
+        assert.equal(afterRecovery.state, "active");
+        assert.equal(afterRecovery.recovery?.[0]?.outcome, "needs_human");
+      } finally {
+        await managed.cleanup("cancel");
+        for (const pgid of groupPids) {
+          if (realInspector.isAlive(pgid)) {
+            try {
+              process.kill(-pgid, "SIGKILL");
+            } catch {
+              // Already gone.
+            }
+          }
+        }
+      }
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  },
+);
 
 // ---------------------------------------------------------------------------
 // Nested controller-death recovery
