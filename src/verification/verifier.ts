@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
-import type { TaskContract } from "../contracts/schema.js";
+import {
+  DEFAULT_VERIFY_TIMEOUT_MS,
+  type TaskContract,
+} from "../contracts/schema.js";
 import type { AgentResult } from "../agents/types.js";
 import {
   RuntimeManager,
@@ -31,7 +34,12 @@ export interface Verifier {
 export interface ShellVerifierOptions {
   /** Working directory for verifyCommands (default: process.cwd()). */
   cwd?: string;
-  /** Per-command timeout in ms (default 30_000). */
+  /**
+   * Per-command timeout in ms used when the contract does not set
+   * `verifyTimeoutMs` (default 30_000). A contract-level `verifyTimeoutMs`
+   * always wins. Runtime readiness has its own
+   * `runtime.services[].readiness.timeoutMs` and is not affected.
+   */
   timeoutMs?: number;
   /**
    * Control repository that receives the runtime manifest, service logs and
@@ -139,7 +147,10 @@ export function createMockVerifier(): Verifier {
  */
 export function createShellVerifier(opts: ShellVerifierOptions = {}): Verifier {
   const cwd = opts.cwd;
-  const timeoutMs = opts.timeoutMs ?? 30_000;
+  const defaultTimeoutMs = opts.timeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS;
+  /** Frozen Contract v1 field; absent preserves the legacy verifier default. */
+  const commandTimeoutMs = (contract: TaskContract): number =>
+    contract.verifyTimeoutMs ?? defaultTimeoutMs;
   const env = opts.env ?? process.env;
   const repoRoot = opts.repoRoot ?? process.cwd();
   const worktree = opts.worktree ?? cwd ?? process.cwd();
@@ -215,7 +226,7 @@ export function createShellVerifier(opts: ShellVerifierOptions = {}): Verifier {
       commandResults.push(
         ...(await runVerifyCommands(contract, {
           cwd,
-          timeoutMs,
+          timeoutMs: commandTimeoutMs(contract),
           env: runtimeEnv,
         })),
       );
@@ -310,7 +321,7 @@ export function createShellVerifier(opts: ShellVerifierOptions = {}): Verifier {
 
       const commandResults = await runVerifyCommands(contract, {
         cwd,
-        timeoutMs,
+        timeoutMs: commandTimeoutMs(contract),
         env,
       });
       const failed = commandResults.find((r) => r.exitCode !== 0);

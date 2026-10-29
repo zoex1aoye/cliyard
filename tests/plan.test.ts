@@ -13,10 +13,15 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import {
   compilePlan,
+  makeContractDocument,
   parsePlanJson,
   PlanValidationError,
 } from "../src/planner/plan.js";
 import { runPlanBridge } from "../src/planner/bridge.js";
+import {
+  MAX_VERIFY_TIMEOUT_MS,
+  validateContract,
+} from "../src/contracts/schema.js";
 
 const base = "a".repeat(40);
 const cliyardRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -65,6 +70,123 @@ test("compilePlan: two independent module plans become frozen contracts", () => 
     "AGENTS.md",
     "src/components/GlassEmpty.vue",
   ]);
+});
+
+test("compilePlan: verifyTimeoutMs is generated per task and from Plan defaults", () => {
+  const compiled = compilePlan(
+    {
+      planId: "timeout-generation",
+      tasks: [
+        {
+          taskId: "explicit-timeout",
+          goal: "Use an explicit command timeout",
+          writePaths: ["src/a.ts"],
+          verifyCommands: ["true"],
+          verifyTimeoutMs: 45_000,
+        },
+        {
+          taskId: "default-timeout",
+          goal: "Use the Plan compile default",
+          writePaths: ["src/b.ts"],
+          verifyCommands: ["true"],
+        },
+      ],
+    },
+    { baseCommit: base, verifyTimeoutMs: 90_000 },
+  );
+
+  assert.equal(compiled.contracts[0]!.verifyTimeoutMs, 45_000);
+  assert.equal(compiled.contracts[1]!.verifyTimeoutMs, 90_000);
+
+  const roundTripped = JSON.parse(
+    JSON.stringify(makeContractDocument(compiled)),
+  ) as { contracts: unknown[] };
+  for (const [index, expected] of [45_000, 90_000].entries()) {
+    const revalidated = validateContract(roundTripped.contracts[index]);
+    assert.equal(revalidated.ok, true);
+    if (!revalidated.ok) continue;
+    assert.equal(revalidated.contract.verifyTimeoutMs, expected);
+  }
+});
+
+test("compilePlan: absent verifyTimeoutMs keeps the legacy contract shape", () => {
+  const compiled = compilePlan(
+    {
+      planId: "legacy-timeout",
+      tasks: [
+        {
+          taskId: "legacy",
+          goal: "Keep the verifier default",
+          writePaths: ["src/a.ts"],
+          verifyCommands: ["true"],
+        },
+      ],
+    },
+    { baseCommit: base },
+  );
+
+  const contract = compiled.contracts[0]!;
+  assert.equal(Object.hasOwn(contract, "verifyTimeoutMs"), false);
+  assert.equal(
+    JSON.stringify(makeContractDocument(compiled)).includes("verifyTimeoutMs"),
+    false,
+  );
+});
+
+test("compilePlan: invalid verifyTimeoutMs values fail with the task path", () => {
+  for (const value of [
+    0,
+    -1,
+    1.5,
+    MAX_VERIFY_TIMEOUT_MS + 1,
+    "5000",
+  ]) {
+    assert.throws(
+      () =>
+        compilePlan(
+          {
+            planId: "bad-timeout",
+            tasks: [
+              {
+                taskId: "bad",
+                goal: "Bad timeout",
+                writePaths: ["src/a.ts"],
+                verifyCommands: ["true"],
+                verifyTimeoutMs: value,
+              },
+            ],
+          },
+          { baseCommit: base },
+        ),
+      (error: unknown) => {
+        assert.ok(error instanceof PlanValidationError);
+        assert.match(
+          error.message,
+          /tasks\[0\]\.verifyTimeoutMs: must be a positive safe integer/,
+        );
+        return true;
+      },
+    );
+  }
+
+  assert.throws(
+    () =>
+      compilePlan(
+        {
+          planId: "bad-timeout-default",
+          tasks: [
+            {
+              taskId: "bad-default",
+              goal: "Bad compile default",
+              writePaths: ["src/a.ts"],
+              verifyCommands: ["true"],
+            },
+          ],
+        },
+        { baseCommit: base, verifyTimeoutMs: 0 },
+      ),
+    /tasks\[0\]\.verifyTimeoutMs: must be a positive safe integer/,
+  );
 });
 
 test("compilePlan: overlapping parallel writePaths are rejected", () => {

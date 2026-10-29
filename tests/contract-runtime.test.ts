@@ -6,11 +6,30 @@ import {
   PlanValidationError,
 } from "../src/planner/plan.js";
 import {
+  DEFAULT_VERIFY_TIMEOUT_MS,
   loadContractJson,
+  MAX_VERIFY_TIMEOUT_MS,
   validateContract,
 } from "../src/contracts/schema.js";
+import { taskFileToContracts } from "../src/contracts/fromTaskfile.js";
 
 const base = "b".repeat(40);
+
+function baseContractRaw(): Record<string, unknown> {
+  return {
+    taskId: "timeout-contract",
+    version: 1,
+    frozen: true,
+    goals: ["Bound verifier commands"],
+    dependsOn: [],
+    readPaths: ["."],
+    writePaths: ["src/server.ts"],
+    sharedResources: [],
+    baseCommit: base,
+    verifyCommands: ["test -f src/server.ts"],
+    maxRepairs: 0,
+  };
+}
 
 const validRuntime = {
   services: [
@@ -276,5 +295,99 @@ test("validateContract/loadContractJson: runtime validation is not plan-only", (
         }),
       ),
     /invalid TaskContract: runtime\.services\[0\]\.command/,
+  );
+});
+
+test("validateContract: legacy contracts keep the 30-second timeout default", () => {
+  assert.equal(DEFAULT_VERIFY_TIMEOUT_MS, 30_000);
+
+  const result = validateContract(baseContractRaw());
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.contract.verifyTimeoutMs, undefined);
+  assert.equal(Object.hasOwn(result.contract, "verifyTimeoutMs"), false);
+  assert.equal(
+    JSON.stringify(result.contract).includes('"verifyTimeoutMs"'),
+    false,
+  );
+});
+
+test("validateContract: verifyTimeoutMs accepts the documented bounds", () => {
+  for (const value of [1, DEFAULT_VERIFY_TIMEOUT_MS, MAX_VERIFY_TIMEOUT_MS]) {
+    const result = validateContract({
+      ...baseContractRaw(),
+      verifyTimeoutMs: value,
+    });
+    assert.equal(result.ok, true, `expected ${value} to validate`);
+    if (!result.ok) continue;
+    assert.equal(result.contract.verifyTimeoutMs, value);
+  }
+});
+
+test("validateContract: invalid verifyTimeoutMs values fail validation", () => {
+  for (const value of [
+    0,
+    -1,
+    1.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.MAX_SAFE_INTEGER,
+    MAX_VERIFY_TIMEOUT_MS + 1,
+    "5000",
+  ]) {
+    const result = validateContract({
+      ...baseContractRaw(),
+      verifyTimeoutMs: value,
+    });
+    assert.equal(result.ok, false, `expected ${String(value)} to fail`);
+    if (result.ok) continue;
+    assert.ok(
+      result.issues.some(
+        (issue) =>
+          issue.path === "verifyTimeoutMs" &&
+          /positive safe integer/.test(issue.message),
+      ),
+      `unexpected issues: ${JSON.stringify(result.issues)}`,
+    );
+  }
+});
+
+test("loadContractJson: verifyTimeoutMs and runtime survive a round-trip", () => {
+  const validated = validateContract({
+    ...baseContractRaw(),
+    verifyTimeoutMs: 120_000,
+    runtime: validRuntime,
+  });
+  assert.equal(validated.ok, true);
+  if (!validated.ok) return;
+
+  const loaded = loadContractJson(JSON.stringify(validated.contract));
+  assert.equal(loaded.verifyTimeoutMs, 120_000);
+  assert.deepEqual(loaded.runtime, validRuntime);
+});
+
+test("taskFileToContracts: verifyTimeoutMs default is opt-in", () => {
+  const taskFile = {
+    repo: "target",
+    tasks: [
+      {
+        id: "imported",
+        prompt: "Implement the imported task",
+        paths: ["src/a.ts"],
+      },
+    ],
+  };
+
+  const [legacy] = taskFileToContracts(taskFile);
+  assert.equal(Object.hasOwn(legacy!, "verifyTimeoutMs"), false);
+
+  const [bounded] = taskFileToContracts(taskFile, {
+    verifyTimeoutMs: 120_000,
+  });
+  assert.equal(bounded!.verifyTimeoutMs, 120_000);
+
+  assert.throws(
+    () => taskFileToContracts(taskFile, { verifyTimeoutMs: 0 }),
+    /verifyTimeoutMs: must be a positive safe integer/,
   );
 });
