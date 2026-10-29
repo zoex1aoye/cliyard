@@ -19,6 +19,7 @@
         "src/planner/plan.ts",
         "src/verification/verifier.ts",
         "tests/contract-runtime.test.ts",
+        "tests/fromTaskfile.test.ts",
         "tests/plan.test.ts",
         "tests/verifier-shell.test.ts"
       ],
@@ -243,7 +244,8 @@
         "examples/harness-eval/suite.json",
         "src/supervisor/evidence-bundle.ts",
         "tests/harness-eval-cli.test.ts",
-        "tests/harness-eval-handoff.test.ts"
+        "tests/harness-eval-handoff.test.ts",
+        "package.json"
       ],
       "writePaths": [
         "docs/evidence/HARNESS_EVAL_V0.md"
