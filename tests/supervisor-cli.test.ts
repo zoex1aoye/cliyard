@@ -305,6 +305,27 @@ test("supervisor start runs a foreground batch and persists a completed run", as
     }
     assert.equal(getActiveRunId(repo), manifest.runId);
     assert.equal(inspectSupervisorLock(repo).state, "free");
+
+    // The controller-owned final bundle is written after the settled batch.
+    const evidencePath = join(
+      repo,
+      ".cliyard",
+      "evidence",
+      `${manifest.runId}.json`,
+    );
+    assert.equal(summary.evidence.state, "present");
+    assert.equal(summary.evidence.degraded, false);
+    assert.equal(summary.evidence.path, evidencePath);
+    assert.equal(existsSync(evidencePath), true);
+    const evidence = JSON.parse(readFileSync(evidencePath, "utf8")) as {
+      run: { runId: string; status: string };
+      tasks: unknown[];
+      nextAction: string;
+    };
+    assert.equal(evidence.run.runId, manifest.runId);
+    assert.equal(evidence.run.status, "completed");
+    assert.equal(evidence.tasks.length, 4);
+    assert.equal(evidence.nextAction, "human-review");
     assert.equal(
       runGit(repo, [
         "rev-parse",
@@ -348,6 +369,13 @@ test("supervisor status reports run, counts, integration, lock owner and checkpo
     assert.equal(status.ownerAlive, true);
     assert.equal(status.lastCheckpoint, manifest.updatedAt);
     assert.ok(status.lastAccepted);
+    assert.equal(status.evidence.state, "present");
+    assert.equal(status.evidence.degraded, false);
+    assert.equal(
+      status.evidence.path,
+      join(repo, ".cliyard", "evidence", `${manifest.runId}.json`),
+    );
+    assert.equal(status.evidence.taskCount, 4);
 
     // Human output must expose the same fields operators rely on.
     const humanOut: string[] = [];
@@ -363,6 +391,7 @@ test("supervisor status reports run, counts, integration, lock owner and checkpo
       "integration:",
       "lock: free",
       "last checkpoint:",
+      "evidence: present",
     ]) {
       assert.ok(text.includes(label), `status output missing "${label}"`);
     }
@@ -450,6 +479,69 @@ test("supervisor resume dispatches only unfinished tasks", async () => {
       "accepted work must not be regenerated on resume",
     );
     assert.equal(inspectSupervisorLock(repo).state, "free");
+  });
+});
+
+test("completed resume repairs missing evidence without rewriting the manifest", async () => {
+  await withRepo(async (repo) => {
+    const base = runGit(repo, ["rev-parse", "HEAD"]);
+    const contractsPath = writeContracts(repo, base);
+    const startOut: string[] = [];
+    const startCode = await runSupervisorCli(
+      ["start", contractsPath, "--repo", repo, "--dry-run"],
+      { log: (line) => startOut.push(line), signalHandling: false },
+    );
+    assert.equal(startCode, 0);
+    const started = parseJson(startOut);
+    const manifest = loadRunManifest(repo, started.runId as string);
+    assert.equal(manifest.status, "completed");
+
+    const manifestPath = join(
+      supervisorPaths(repo).runsDir,
+      `${manifest.runId}.json`,
+    );
+    const manifestBefore = readFileSync(manifestPath);
+    const evidencePath = join(
+      repo,
+      ".cliyard",
+      "evidence",
+      `${manifest.runId}.json`,
+    );
+    rmSync(evidencePath);
+    assert.equal(existsSync(evidencePath), false);
+
+    const out: string[] = [];
+    const code = await runSupervisorCli(["resume", "--repo", repo], {
+      log: (line) => out.push(line),
+      signalHandling: false,
+    });
+    assert.equal(code, 0);
+    const text = out.join("\n");
+    assert.match(text, /already completed; nothing to resume/);
+    assert.match(text, /evidence: present/);
+    assert.equal(existsSync(evidencePath), true);
+
+    // Repair is evidence-only: the completed-manifest bytes and timestamps
+    // must be byte-identical, and no lock is left behind.
+    assert.equal(readFileSync(manifestPath).equals(manifestBefore), true);
+    assert.equal(loadRunManifest(repo, manifest.runId).updatedAt, manifest.updatedAt);
+    assert.equal(loadRunManifest(repo, manifest.runId).status, "completed");
+    assert.equal(inspectSupervisorLock(repo).state, "free");
+
+    // A damaged bundle is repaired the same way.
+    writeFileSync(evidencePath, "corrupt\n", "utf8");
+    const repairOut: string[] = [];
+    const repairCode = await runSupervisorCli(["resume", "--repo", repo], {
+      log: (line) => repairOut.push(line),
+      signalHandling: false,
+    });
+    assert.equal(repairCode, 0);
+    assert.match(repairOut.join("\n"), /evidence: present/);
+    const repaired = JSON.parse(readFileSync(evidencePath, "utf8")) as {
+      run: { status: string };
+    };
+    assert.equal(repaired.run.status, "completed");
+    assert.equal(readFileSync(manifestPath).equals(manifestBefore), true);
   });
 });
 
