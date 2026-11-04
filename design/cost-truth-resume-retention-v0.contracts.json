@@ -1,0 +1,55 @@
+{
+  "planId": "cost-truth-resume-retention-v0",
+  "contracts": [
+    {
+      "taskId": "resume-cost-retention",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Fix supervisor resume so it no longer discards the abandoned attempt's cost. In src/supervisor/cli.ts resume reconciliation, stop deleting task.cost for unfinished tasks; instead retain the abandoned attempt's cost as prior-attempt provenance on RunTaskState (add a bounded priorAttemptCost field in src/supervisor/types.ts and round-trip it through src/supervisor/store.ts). When a task completes, aggregate the retained prior-attempt cost with the current attempt's cost via aggregateCostTruth so the run-level EvidenceBundle includes every real session and any unavailable abandoned session appears in missing. Keep the new attempt's observations attributed only to its own session id. Add tests proving: an interrupted attempt's observation survives resume and is merged rather than overwritten; the new attempt's observation stays separate; an unavailable abandoned session is recorded in missing. Do not change repair-loop aggregation, cost authority semantics or Node version."
+      ],
+      "nonGoals": [
+        "Do not invent provider balance or invoice truth.",
+        "Do not attribute abandoned observations to the new attempt's session.",
+        "Do not change aggregateCostTruth or repair-loop aggregation behavior."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/CURRENT_STATE.md",
+        "design/cost-truth-resume-retention-v0.md",
+        "src/supervisor/cli.ts",
+        "src/supervisor/types.ts",
+        "src/supervisor/store.ts",
+        "src/failures.ts",
+        "src/repair/loop.ts",
+        "tests/supervisor-resume.test.ts",
+        "tests/supervisor-failure-cost.test.ts"
+      ],
+      "writePaths": [
+        "src/supervisor/cli.ts",
+        "src/supervisor/types.ts",
+        "src/supervisor/store.ts",
+        "tests/supervisor-resume.test.ts",
+        "tests/supervisor-failure-cost.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "7d5afae20c2466bab3b4cfcafb2618a80b561387",
+      "verifyCommands": [
+        "npx tsx --test tests/supervisor-resume.test.ts tests/supervisor-failure-cost.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "Resume cost retention in the supervisor.",
+        "A bounded prior-attempt cost field with RunManifest round-trip.",
+        "Regression tests for retention, separation and missing semantics."
+      ],
+      "forbidden": [
+        "Do not delete or zero an abandoned attempt's cost.",
+        "Do not merge observations from different attempts into one session id.",
+        "Do not touch src/repair/loop.ts aggregation."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
