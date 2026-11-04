@@ -18,6 +18,7 @@ import { runSupervisorCli } from "./supervisor/cli.js";
 import { runQueueCli } from "./orchestration/cli.js";
 import { runEvaluationCli } from "./evaluation/cli.js";
 import { runStateStoreCli } from "./statestore/read.js";
+import { runDaemonCli } from "./daemon/cli.js";
 import type { PermissionIntent, WorkerId } from "./types.js";
 
 function usage(): never {
@@ -70,6 +71,9 @@ Usage:
   cliyard eval handoff <run-manifest-or-evidence-bundle.json> [--json]
   cliyard statestore status --repo <path> [--json] [--journal-limit n]
   cliyard statestore events --repo <path> [--json] [--journal-limit n]
+  cliyard daemon start --repo <path> [--port <n>]
+  cliyard daemon status --repo <path> [--json]
+  cliyard daemon stop --repo <path> [--timeout <ms>] [--json]
 
 Master (DeepSeek Harness plugin / local demo):
   npm run master-monitor
@@ -98,6 +102,12 @@ async function main(): Promise<void> {
   if (cmd === "eval") {
     // Let Node exit naturally so stdout is flushed before the process ends.
     process.exitCode = await runEvaluationCli(argv.slice(1));
+    return;
+  }
+
+  if (cmd === "daemon") {
+    // Long-running in the start subcommand; status/stop are finite reads.
+    process.exitCode = await runDaemonCli(argv.slice(1));
     return;
   }
 
