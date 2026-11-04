@@ -1,0 +1,224 @@
+{
+  "planId": "statestore-write-migration-v0",
+  "contracts": [
+    {
+      "taskId": "statestore-write-api",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Add a write API and one-shot migration to the StateStore. Extend the store with typed fact append for run, queue, ledger and audit-event domains, a migration path that imports the existing JSON truth once and verifies its hash, and a read-only JSON export for tooling compatibility. Fail closed on legacy/JSON drift after import. Add tests for append, import, export round-trip and drift detection. Do not change supervisor, queue or ledger write paths yet and do not add a daemon."
+      ],
+      "nonGoals": [
+        "Do not cut over any consumer write path in this task.",
+        "Do not delete or rewrite legacy JSON files.",
+        "Do not require Node above 20."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/ROADMAP.md",
+        "design/statestore-write-migration-v0.md",
+        "design/statestore-v0.md",
+        "src/statestore/store.ts",
+        "src/statestore/projection.ts",
+        "src/statestore/schema.ts"
+      ],
+      "writePaths": [
+        "src/statestore/write.ts",
+        "src/statestore/migrate.ts",
+        "tests/statestore-write.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "4f7672c94e3d9042a649a7bd4d7af160bd726404",
+      "verifyCommands": [
+        "npx tsx --test tests/statestore.test.ts tests/statestore-write.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "Typed StateStore write API and one-shot JSON migration.",
+        "Read-only JSON export.",
+        "Drift and round-trip tests."
+      ],
+      "forbidden": [
+        "Do not make JSON and SQLite both writable authorities.",
+        "Do not silently prefer one source on drift."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "supervisor-write-cutover",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Cut the supervisor RunManifest and active-run writes over to the StateStore write API as the single authority. On first use, migrate the existing runs directory once and verify the import hash; afterwards every checkpoint writes through SQLite with a file-level JSON export kept read-only. Preserve exact resume, lock, cost and evidence semantics. Add tests proving a fresh process rebuilds the same run state, a resumed run writes through the store, and legacy JSON drift fails closed. Do not change queue or ledger writes and do not add a daemon."
+      ],
+      "nonGoals": [
+        "Do not alter RunManifest or evidence schema.",
+        "Do not cut over queue, ledger or events in this task.",
+        "Do not claim durable multi-process safety beyond SQLite transactions."
+      ],
+      "dependsOn": [
+        "statestore-write-api"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/ROADMAP.md",
+        "design/statestore-write-migration-v0.md",
+        "src/supervisor/store.ts",
+        "src/supervisor/cli.ts",
+        "src/statestore/write.ts",
+        "src/statestore/migrate.ts"
+      ],
+      "writePaths": [
+        "src/supervisor/store.ts",
+        "tests/supervisor-store.test.ts",
+        "tests/supervisor-resume.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "4f7672c94e3d9042a649a7bd4d7af160bd726404",
+      "verifyCommands": [
+        "npx tsx --test tests/supervisor-store.test.ts tests/supervisor-resume.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "Supervisor single-writer cutover to SQLite.",
+        "One-shot run-directory migration with hash verification.",
+        "Resume and drift regression tests."
+      ],
+      "forbidden": [
+        "Do not write run state to both SQLite and JSON as authorities.",
+        "Do not drop the resume or evidence semantics."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "queue-write-cutover",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Cut queue.json writes over to the StateStore write API. Migrate the existing queue once and verify its hash, then route add/status/retry/cancel mutations through SQLite with the file-level lock replaced by SQLite transactions and sequence conflict detection. Preserve queue adoption, run-id binding and dependency semantics. Add tests for migration, mutation through the store and legacy drift fail-closed. Do not change ledger or event writes and do not add a daemon."
+      ],
+      "nonGoals": [
+        "Do not change queue item semantics or schema.",
+        "Do not cut over ledger or events in this task."
+      ],
+      "dependsOn": [
+        "statestore-write-api"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/ROADMAP.md",
+        "design/statestore-write-migration-v0.md",
+        "src/orchestration/queue-store.ts",
+        "src/statestore/write.ts",
+        "src/statestore/migrate.ts"
+      ],
+      "writePaths": [
+        "src/orchestration/queue-store.ts",
+        "tests/orchestration-queue.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "4f7672c94e3d9042a649a7bd4d7af160bd726404",
+      "verifyCommands": [
+        "npx tsx --test tests/orchestration-queue.test.ts tests/queue-adoption.test.ts tests/queue-run-binding.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "Queue single-writer cutover to SQLite.",
+        "Queue migration and mutation regression tests."
+      ],
+      "forbidden": [
+        "Do not write queue state to both SQLite and JSON as authorities.",
+        "Do not change adoption or run-id binding semantics."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "ledger-event-cutover",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Cut ledger.json and queue-events/events.jsonl writes over to the StateStore write API. Migrate the existing ledger and event journal once and verify their hashes, then append both through SQLite facts. Preserve append-only audit semantics, bounded limits and observational (non-authoritative) status. Add tests for migration, append and drift fail-closed. Do not change supervisor or queue writes and do not add a daemon."
+      ],
+      "nonGoals": [
+        "Do not grant acceptance or mutate RunManifest via events.",
+        "Do not change ledger or event semantics."
+      ],
+      "dependsOn": [
+        "statestore-write-api"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/ROADMAP.md",
+        "design/statestore-write-migration-v0.md",
+        "src/persistence/ledger.ts",
+        "src/orchestration/event-journal.ts",
+        "src/statestore/write.ts",
+        "src/statestore/migrate.ts"
+      ],
+      "writePaths": [
+        "src/persistence/ledger.ts",
+        "src/orchestration/event-journal.ts",
+        "tests/ledger-lock.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "4f7672c94e3d9042a649a7bd4d7af160bd726404",
+      "verifyCommands": [
+        "npx tsx --test tests/ledger-lock.test.ts tests/supervisor-failure-cost.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "Ledger and event-journal single-writer cutover to SQLite.",
+        "Append-only audit preservation and migration tests."
+      ],
+      "forbidden": [
+        "Do not make events authoritative over RunManifest.",
+        "Do not write ledger state to both SQLite and JSON."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "cutover-parity-evidence",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "After the write cutovers are accepted, run one complete self-host iteration on the new SQLite write path and write docs/evidence/STATESTORE_WRITE_CUTOVER.md with observed facts only. Record the migration import hashes, the accepted task commits and integration head, path audits, process cleanup, the read-projection parity result, resume-after-restart behavior and any JSON drift handling. State explicitly that SQLite is now the write authority and JSON is read-only legacy, and list remaining gaps (daemon, sandbox, background verifier, clean reviewer). Do not edit source or tests and do not claim more than the measured evidence."
+      ],
+      "nonGoals": [
+        "Do not edit source, tests, Plan or contracts.",
+        "Do not claim daemon, sandbox or 24-hour operation."
+      ],
+      "dependsOn": [
+        "supervisor-write-cutover",
+        "queue-write-cutover",
+        "ledger-event-cutover"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/ROADMAP.md",
+        "docs/CURRENT_STATE.md",
+        "design/statestore-write-migration-v0.md",
+        "docs/evidence/PILOT_FOUNDATION_RELIABILITY.md"
+      ],
+      "writePaths": [
+        "docs/evidence/STATESTORE_WRITE_CUTOVER.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "4f7672c94e3d9042a649a7bd4d7af160bd726404",
+      "verifyCommands": [
+        "npx tsx --test tests/statestore.test.ts tests/statestore-write.test.ts tests/statestore-read.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "A measured StateStore write-cutover evidence document.",
+        "Read-projection parity and resume-after-restart evidence.",
+        "Explicit remaining-gap list."
+      ],
+      "forbidden": [
+        "Do not claim parity from only focused suites.",
+        "Do not claim the JSON stores are deleted."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
