@@ -90,6 +90,13 @@ export const MAX_NESTED_GROUPS = MAX_PERSISTED_EXTERNAL_GROUPS;
 export const MAX_LIVE_NESTED_GROUPS = MAX_PROCESS_TABLE_ROWS;
 /** Upper bound for an observed nested group's member count (evidence only). */
 export const MAX_NESTED_GROUP_MEMBERS = 100_000;
+/**
+ * Maximum exact member identities retained for proven external groups. This is
+ * evidence for the reuse guard only: a group whose sampled members exceed the
+ * bound is never classified as vanished, because an unrecorded member could
+ * still be present in the remaining rows.
+ */
+export const MAX_SAMPLED_GROUP_MEMBERS = MAX_PROCESS_TABLE_ROWS;
 /** Maximum ungrouped external descendant pids observed per worker. */
 export const MAX_SAMPLED_DESCENDANTS = 256;
 /** Maximum descendant identities tracked in memory per worker. */
@@ -241,6 +248,12 @@ export interface WorkerNestedCleanupEvidence {
   signalledGroups?: number;
   /** External groups that could not be proven gone. */
   residualGroups?: number;
+  /**
+   * External groups whose exact leader identity no longer matched at cleanup
+   * and whose remaining rows carried no sampled worker descendant. They are
+   * evidence only: no signal was sent to them and they are not residual.
+   */
+  vanishedGroups?: number;
   /** Live cleanup completeness, independent of the durable registry bound. */
   cleanupCompleteness?: WorkerCleanupCompleteness;
   /** Whether the bounded durable registry covers every observation. */
@@ -402,6 +415,8 @@ interface NestedGroupCleanupOutcome {
   observed: number;
   signalled: number;
   residual: number;
+  /** Groups whose leader identity was reused and that were never signalled. */
+  vanished: number;
   failure?: string;
 }
 
@@ -413,6 +428,8 @@ interface NestedGroupCleanupOutcome {
 interface TableGroupOutcome {
   gone: boolean;
   signalled: boolean;
+  /** Leader identity was reused and no sampled worker descendant remained. */
+  vanished?: boolean;
   failure?: string;
 }
 
@@ -584,6 +601,19 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
   private readonly observedExternalPids = new Set<number>();
   private readonly observedExternal = new Map<number, RuntimeProcessIdentity>();
   private readonly observedGroups = new Map<number, WorkerNestedGroup>();
+  /**
+   * Exact identities of sampled members of proven external groups. Signals are
+   * authorized by group, so member identities are compacted out of the normal
+   * registries; this bounded evidence still lets cleanup prove whether a
+   * reused group id remains occupied by a known worker descendant.
+   */
+  private readonly sampledGroupMembers = new Map<
+    number,
+    Map<number, RuntimeProcessIdentity>
+  >();
+  /** Groups whose sampled member identities exceeded the evidence bound. */
+  private readonly incompleteGroupMemberSamples = new Set<number>();
+  private sampledGroupMemberCount = 0;
   private readonly observedExternalGroupIds = new Set<number>();
   private readonly signalledDescendantPids = new Set<number>();
   private readonly signalledGroupIds = new Set<number>();
@@ -908,6 +938,9 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     for (const entry of external) {
       if (!this.observedGroups.has(entry.pgid)) continue;
       counts.set(entry.pgid, (counts.get(entry.pgid) ?? 0) + 1);
+      // The leader identity already lives on the group; retain member
+      // identities as bounded evidence for the reuse guard.
+      if (entry.pid !== entry.pgid) this.noteGroupMemberIdentity(entry);
     }
     for (const [pgid, count] of counts) {
       const group = this.observedGroups.get(pgid);
@@ -974,6 +1007,76 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     ) {
       this.trackedDescendants.set(entry.pid, copyIdentity(entry));
     }
+  }
+
+  /**
+   * Retain one exact sampled member identity of a proven external group.
+   *
+   * This is evidence only and never authorizes a signal. A pid can only be one
+   * live process at a time, so the latest identity for a pid replaces the
+   * previous one. Once the evidence bound is exceeded the group becomes
+   * ineligible for vanished classification: an unrecorded member could still
+   * match a remaining row.
+   */
+  private noteGroupMemberIdentity(entry: ProcessTableEntry): void {
+    if (!isProcessIdentity(entry)) return;
+    let members = this.sampledGroupMembers.get(entry.pgid);
+    if (members === undefined) {
+      if (this.sampledGroupMemberCount >= MAX_SAMPLED_GROUP_MEMBERS) {
+        this.incompleteGroupMemberSamples.add(entry.pgid);
+        return;
+      }
+      members = new Map<number, RuntimeProcessIdentity>();
+      this.sampledGroupMembers.set(entry.pgid, members);
+    }
+    if (!members.has(entry.pid)) {
+      if (this.sampledGroupMemberCount >= MAX_SAMPLED_GROUP_MEMBERS) {
+        this.incompleteGroupMemberSamples.add(entry.pgid);
+        return;
+      }
+      this.sampledGroupMemberCount += 1;
+    }
+    members.set(entry.pid, copyIdentity(entry));
+  }
+
+  /**
+   * Whether any remaining row of a group whose leader identity changed still
+   * matches a sampled worker-descendant identity.
+   *
+   * Truncated member evidence is treated as a match: classifying the group as
+   * vanished without complete evidence would auto-accept a possible survivor.
+   */
+  private remainingRowsMatchSampledDescendant(
+    group: WorkerNestedGroup,
+    rows: readonly RuntimeProcessIdentity[],
+  ): boolean {
+    if (this.incompleteGroupMemberSamples.has(group.pgid)) return true;
+    const members = this.sampledGroupMembers.get(group.pgid);
+    for (const row of rows) {
+      if (compareProcessIdentity(group.leader, row) === "match") return true;
+      const sampledMember = members?.get(row.pid);
+      if (
+        sampledMember !== undefined &&
+        compareProcessIdentity(sampledMember, row) === "match"
+      ) {
+        return true;
+      }
+      const sampledExternal = this.observedExternal.get(row.pid);
+      if (
+        sampledExternal !== undefined &&
+        compareProcessIdentity(sampledExternal, row) === "match"
+      ) {
+        return true;
+      }
+      const sampledTracked = this.trackedDescendants.get(row.pid);
+      if (
+        sampledTracked !== undefined &&
+        compareProcessIdentity(sampledTracked, row) === "match"
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -1348,7 +1451,9 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
   /**
    * Clean every exact-led external group as one guarded unit. Groups run
    * concurrently so the bounded term/kill grace applies once, not once per
-   * group. Any group that cannot be proven gone stays residual.
+   * group. Any group that cannot be proven gone stays residual, except a group
+   * whose leader identity was reused and whose rows carry no sampled worker
+   * descendant: that is vanished evidence, never a signal target.
    *
    * With bounded process-table snapshots available, all observed pgids are
    * projected from one snapshot per cleanup phase. A high-fanout external group
@@ -1363,7 +1468,7 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
       (first, second) => first.pgid - second.pgid,
     );
     if (groups.length === 0) {
-      return { observed: 0, signalled: 0, residual: 0 };
+      return { observed: 0, signalled: 0, residual: 0, vanished: 0 };
     }
     if (skipReason !== undefined) {
       for (const group of groups) this.residualGroupIds.add(group.pgid);
@@ -1371,6 +1476,7 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
         observed: groups.length,
         signalled: 0,
         residual: groups.length,
+        vanished: 0,
         failure: skipReason,
       };
     }
@@ -1392,9 +1498,17 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     );
     let signalled = 0;
     let residual = 0;
+    let vanished = 0;
     let failure: string | undefined;
     results.forEach((result, index) => {
       if (result.signalled) signalled += 1;
+      if (result.vanished) {
+        // Never signalled and not residual: the persisted group is gone and
+        // the reused id carries no sampled worker descendant.
+        vanished += 1;
+        failure ??= result.failure;
+        return;
+      }
       if (!result.gone) {
         residual += 1;
         const group = groups[index];
@@ -1406,6 +1520,7 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
       observed: groups.length,
       signalled,
       residual,
+      vanished,
       ...(failure !== undefined ? { failure } : {}),
     };
   }
@@ -1417,8 +1532,10 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
    * plus membership for every observed pgid: initial inspection, the TERM
    * wait, escalation revalidation and the KILL wait. No per-group listing or
    * per-group leader capture runs on this path. A snapshot failure, a missing
-   * leader with members remaining, a changed/reused identity and an unclean
-   * group all stay residual and fail the cleanup closed.
+   * leader with members remaining and an unclean group stay residual and fail
+   * the cleanup closed. A reused identity is never signalled: it becomes
+   * vanished evidence unless a remaining row still matches a sampled worker
+   * descendant, in which case it stays needs_human.
    */
   private async cleanNestedGroupsFromTable(
     groups: readonly WorkerNestedGroup[],
@@ -1466,6 +1583,14 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
       }
       if (inspection.gone) {
         outcomes.set(group.pgid, { gone: true, signalled: false });
+        continue;
+      }
+      if (inspection.vanished) {
+        outcomes.set(group.pgid, {
+          gone: false,
+          signalled: false,
+          vanished: true,
+        });
         continue;
       }
       const term = this.signalNestedGroup(group.pgid, "SIGTERM");
@@ -1670,7 +1795,10 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     managedPgid: number,
     ownGroupId: number | undefined,
     phase: "inspect" | "escalate",
-  ): Promise<{ ok: true; gone: boolean } | { ok: false; reason: string }> {
+  ): Promise<
+    | { ok: true; gone: boolean; vanished?: boolean }
+    | { ok: false; reason: string }
+  > {
     const pgid = group.pgid;
     if (rows.length === 0) return { ok: true, gone: true };
     const leaderRow = rows.find((row) => row.pid === pgid);
@@ -1690,16 +1818,37 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
       pgid: leaderRow.pgid,
       startedAt: leaderRow.startedAt,
     };
-    if (compareProcessIdentity(group.leader, observed) !== "match") {
-      return {
-        ok: false,
-        reason:
-          phase === "escalate"
-            ? `external group ${pgid} leader identity is no longer exact ` +
-              "after SIGTERM; refusing SIGKILL"
-            : `external group ${pgid} leader identity changed or was reused; ` +
-              "refusing a group signal",
-      };
+    const comparison = compareProcessIdentity(group.leader, observed);
+    if (comparison !== "match") {
+      if (phase === "escalate") {
+        return {
+          ok: false,
+          reason:
+            `external group ${pgid} leader identity is no longer exact ` +
+            "after SIGTERM; refusing SIGKILL",
+        };
+      }
+      if (comparison !== "mismatch") {
+        // No complete evidence that the persisted identity was replaced.
+        return {
+          ok: false,
+          reason:
+            `external group ${pgid} leader identity could not be compared; ` +
+            "refusing a group signal",
+        };
+      }
+      if (this.remainingRowsMatchSampledDescendant(group, rows)) {
+        return {
+          ok: false,
+          reason:
+            `external group ${pgid} leader identity changed or was reused ` +
+            "and a sampled worker descendant remains; refusing a group signal",
+        };
+      }
+      // The persisted exact group is gone; the pid/pgid now belongs to an
+      // unrelated process. No signal is authorized. This is vanished evidence,
+      // not a residual leak.
+      return { ok: true, gone: false, vanished: true };
     }
     // The projection guarantees `row.pgid === pgid`; the guard re-checks the
     // exact leader row, cliyard's own group/id and membership consistency.
@@ -1721,6 +1870,7 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
   ): NestedGroupCleanupOutcome {
     let signalled = 0;
     let residual = 0;
+    let vanished = 0;
     let failure: string | undefined;
     for (const group of groups) {
       const outcome = outcomes.get(group.pgid);
@@ -1733,6 +1883,12 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
         continue;
       }
       if (outcome.signalled) signalled += 1;
+      if (outcome.vanished) {
+        // Leader identity was reused and no sampled worker descendant remains.
+        // The unverified group was never signalled and is not residual.
+        vanished += 1;
+        continue;
+      }
       if (outcome.gone) continue;
       residual += 1;
       this.residualGroupIds.add(group.pgid);
@@ -1743,6 +1899,7 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
       observed: groups.length,
       signalled,
       residual,
+      vanished,
       ...(failure !== undefined ? { failure } : {}),
     };
   }
@@ -1802,7 +1959,12 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     group: WorkerNestedGroup,
     managedPgid: number,
     ownGroupId: number | undefined,
-  ): Promise<{ gone: boolean; signalled: boolean; failure?: string }> {
+  ): Promise<{
+    gone: boolean;
+    signalled: boolean;
+    vanished?: boolean;
+    failure?: string;
+  }> {
     const pgid = group.pgid;
     let leader: RuntimeProcessIdentity | undefined;
     try {
@@ -1838,16 +2000,29 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
         };
       }
     }
-    if (
-      compareProcessIdentity(group.leader, leader) !== "match" ||
-      leader.pid !== leader.pgid
-    ) {
+    const comparison = compareProcessIdentity(group.leader, leader);
+    if (comparison !== "match" || leader.pid !== leader.pgid) {
       // The leader PID may have been reused after the original group exited.
       // In that case the persisted pgid is already empty and no signal is
       // needed. Only fail closed when the original group still has members.
       try {
         const members = await this.manager.listMembers(pgid);
         if (members.length === 0) return { gone: true, signalled: false };
+        if (comparison === "mismatch") {
+          if (this.remainingRowsMatchSampledDescendant(group, members)) {
+            return {
+              gone: false,
+              signalled: false,
+              failure:
+                `external group ${pgid} leader identity changed or was reused ` +
+                "and a sampled worker descendant remains; refusing a group signal",
+            };
+          }
+          // The persisted group is gone and no sampled worker descendant
+          // remains under the reused id. Never signal the unverified group;
+          // record it as vanished evidence instead of a residual leak.
+          return { gone: false, signalled: false, vanished: true };
+        }
       } catch (error) {
         return {
           gone: false,
@@ -2483,6 +2658,7 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
     const observedGroups = this.observedGroups.size;
     const signalledGroups = this.signalledGroupIds.size;
     const residualGroups = this.residualGroupIds.size;
+    const vanishedGroups = options.nestedGroups.vanished;
     const state: WorkerNestedCleanupState =
       failure !== undefined
         ? "failed"
@@ -2498,7 +2674,12 @@ class ManagedWorkerProcessImpl implements ManagedWorkerProcess {
         signalledDescendants,
         residualDescendants: residual.size,
         ...(observedGroups > 0
-          ? { observedGroups, signalledGroups, residualGroups }
+          ? {
+              observedGroups,
+              signalledGroups,
+              residualGroups,
+              ...(vanishedGroups > 0 ? { vanishedGroups } : {}),
+            }
           : {}),
         cleanupCompleteness:
           failure !== undefined ? "incomplete" : "complete",
@@ -3311,10 +3492,12 @@ function parseNestedCleanup(
   const hasGroupCounters =
     raw.observedGroups !== undefined ||
     raw.signalledGroups !== undefined ||
-    raw.residualGroups !== undefined;
+    raw.residualGroups !== undefined ||
+    raw.vanishedGroups !== undefined;
   let observedGroups: number | undefined;
   let signalledGroups: number | undefined;
   let residualGroups: number | undefined;
+  let vanishedGroups: number | undefined;
   if (hasGroupCounters) {
     if (!groupsPresent) return null;
     observedGroups = raw.observedGroups as number;
@@ -3334,6 +3517,16 @@ function parseNestedCleanup(
       residualGroups > observedGroups
     ) {
       return null;
+    }
+    if (raw.vanishedGroups !== undefined) {
+      vanishedGroups = raw.vanishedGroups as number;
+      if (
+        !Number.isInteger(vanishedGroups) ||
+        vanishedGroups < 0 ||
+        vanishedGroups > observedGroups
+      ) {
+        return null;
+      }
     }
   } else if (groupsOnly) {
     // A group-only record must carry its bounded group counters; legacy
@@ -3391,6 +3584,7 @@ function parseNestedCleanup(
           observedGroups,
           signalledGroups: signalledGroups as number,
           residualGroups: residualGroups as number,
+          ...(vanishedGroups !== undefined ? { vanishedGroups } : {}),
         }
       : {}),
     ...(cleanupCompleteness !== undefined ? { cleanupCompleteness } : {}),
