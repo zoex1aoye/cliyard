@@ -23,6 +23,30 @@ import {
   type FailureStage,
 } from "../failures.js";
 import type { ExecutionRuntimeId } from "../execution/profile.js";
+import type { StateStore } from "../statestore/store.js";
+import {
+  StateStoreDomainWriter,
+  StateStoreWriteValidationError,
+  projectStateStoreDomainRecords,
+  readStateStoreDomainRecords,
+  type LegacySourceDomain,
+  type StateStoreDomainEvidenceStore,
+} from "../statestore/write.js";
+import type { LegacyMigrationResult } from "../statestore/migrate.js";
+
+/**
+ * `write.ts` imports `isQueueControlEvent` from this module, so a static
+ * import of `migrate.ts` (which reads `write.ts` constants at evaluation time)
+ * would form a TDZ cycle. The migration is only needed when a cutover is
+ * installed, long after module evaluation, so it is loaded lazily.
+ */
+let migrateModule:
+  | Promise<typeof import("../statestore/migrate.js")>
+  | undefined;
+function loadMigrateModule(): Promise<typeof import("../statestore/migrate.js")> {
+  migrateModule ??= import("../statestore/migrate.js");
+  return migrateModule;
+}
 
 export const QUEUE_EVENT_VERSION = 1 as const;
 /** Matches the failure record code bound in src/failures.ts. */
@@ -219,6 +243,181 @@ export function queueEventJournalPath(repoRoot: string): string {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Single-writer cutover to the StateStore write API
+// ---------------------------------------------------------------------------
+
+/** Import scope owned by this module (design/statestore-write-migration-v0.md). */
+const AUDIT_EVENT_SOURCE_DOMAINS: readonly LegacySourceDomain[] = [
+  "audit-event",
+];
+
+/**
+ * Explicit cutover binding for one repository. Installing one makes the
+ * StateStore fact log the only journal write authority: the legacy JSONL is
+ * imported once, hash-verified and then never appended to again.
+ *
+ * Events stay observational. Writing them through SQLite changes only their
+ * storage location, never acceptance, retry, queue state or `RunManifest`.
+ */
+export interface QueueEventStateStoreBindingOptions {
+  repoRoot: string;
+  store: StateStore;
+  evidence: StateStoreDomainEvidenceStore;
+  /** Fact/evidence timestamp boundary; defaults to the host clock. */
+  clock?: () => string;
+  /** Fact event-id boundary; defaults to the StateStore provider. */
+  newEventId?: () => string;
+  /** Import marker timestamp; defaults to the host clock. */
+  importedAt?: string;
+}
+
+export interface QueueEventStateStoreBinding {
+  repoRoot: string;
+  store: StateStore;
+  evidence: StateStoreDomainEvidenceStore;
+  writer: StateStoreDomainWriter;
+  /**
+   * `null` when a covering import marker already existed and the one-shot
+   * migration was therefore skipped.
+   */
+  migration: LegacyMigrationResult | null;
+  /** Whether the legacy journal existed at import time (for `exists`). */
+  journalExists: boolean;
+  /** Malformed JSONL lines counted by the import (never valid events). */
+  malformedLines: number;
+}
+
+const queueEventStateStores = new Map<string, QueueEventStateStoreBinding>();
+
+function queueEventBinding(
+  repoRoot: string,
+): QueueEventStateStoreBinding | undefined {
+  return queueEventStateStores.get(resolve(repoRoot));
+}
+
+/**
+ * Cut the journal write path over to SQLite.
+ *
+ * - the current `events.jsonl` is imported once, in file order, with its
+ *   source/content/import hashes verified by `migrateLegacyJson`;
+ * - a covering marker makes a later process skip the one-shot import without
+ *   re-verifying stale snapshot content against newer appended events;
+ * - a fail-closed drift guard is installed before the binding is registered.
+ */
+export async function attachQueueEventStateStore(
+  options: QueueEventStateStoreBindingOptions,
+): Promise<QueueEventStateStoreBinding> {
+  if (
+    typeof options !== "object" ||
+    options === null ||
+    options.store === undefined ||
+    options.evidence === undefined
+  ) {
+    throw new StateStoreWriteValidationError(
+      "event-journal cutover requires a store and an evidence store",
+      "options",
+    );
+  }
+  if (typeof options.repoRoot !== "string" || options.repoRoot.length === 0) {
+    throw new StateStoreWriteValidationError(
+      "event-journal cutover requires repoRoot",
+      "options.repoRoot",
+    );
+  }
+  const repoRoot = resolve(options.repoRoot);
+  if (queueEventStateStores.has(repoRoot)) {
+    throw new StateStoreWriteValidationError(
+      `event journal for ${repoRoot} is already attached to a StateStore; ` +
+        "detach it before installing another binding",
+      "repoRoot",
+    );
+  }
+
+  const clock = options.clock ?? (() => new Date().toISOString());
+  const {
+    createLegacyJsonGuard,
+    findCoveringMarker,
+    migrateLegacyJson,
+  } = await loadMigrateModule();
+  const writer = new StateStoreDomainWriter({
+    store: options.store,
+    evidence: options.evidence,
+    clock,
+    newEventId: options.newEventId,
+  });
+
+  const before = readStateStoreDomainRecords({
+    store: options.store,
+    evidence: options.evidence,
+  });
+  const migration =
+    findCoveringMarker(before, AUDIT_EVENT_SOURCE_DOMAINS) === undefined
+      ? migrateLegacyJson({
+          repoRoot,
+          writer,
+          domains: AUDIT_EVENT_SOURCE_DOMAINS,
+          at: options.importedAt ?? clock(),
+        })
+      : null;
+
+  const guard = createLegacyJsonGuard({
+    repoRoot,
+    writer,
+    domains: AUDIT_EVENT_SOURCE_DOMAINS,
+  });
+  // Fail closed before accepting any append: missing marker or drifted bytes.
+  guard.assertUnchanged();
+  writer.setLegacyGuard(guard);
+
+  const records = readStateStoreDomainRecords({
+    store: options.store,
+    evidence: options.evidence,
+  });
+  const marker = findCoveringMarker(records, AUDIT_EVENT_SOURCE_DOMAINS);
+  if (marker === undefined) {
+    throw new Error(
+      "the event journal import marker disappeared during the cutover " +
+        "(fail closed)",
+    );
+  }
+  const source = marker.payload.sources.find(
+    (entry) => entry.domain === "audit-event" && entry.id === "journal",
+  );
+  const binding: QueueEventStateStoreBinding = {
+    repoRoot,
+    store: options.store,
+    evidence: options.evidence,
+    writer,
+    migration,
+    journalExists: source?.exists ?? false,
+    malformedLines: marker.payload.counts.malformedAuditLines,
+  };
+  queueEventStateStores.set(repoRoot, binding);
+  return binding;
+}
+
+/** Remove the cutover binding (tests and explicit rollback to the JSONL path). */
+export function detachQueueEventStateStore(
+  repoRoot: string = process.cwd(),
+): void {
+  queueEventStateStores.delete(resolve(repoRoot));
+}
+
+/** Bounded event list reconstructed from the append-only facts log. */
+function readStoreAuditEvents(
+  binding: QueueEventStateStoreBinding,
+): QueueControlEvent[] {
+  // The journal is read by observers in other processes; replay first so a
+  // read never reports a pre-append view once the fact is durable.
+  binding.store.rebuild();
+  const records = readStateStoreDomainRecords({
+    store: binding.store,
+    evidence: binding.evidence,
+  });
+  return projectStateStoreDomainRecords(records).auditEvents;
+}
+
 /**
  * Append one bounded event. Callers should normally use
  * `tryAppendQueueEvent`; this throwing form is useful for diagnostics/tests.
@@ -228,6 +427,12 @@ export function appendQueueEvent(
   input: AppendQueueEventInput,
 ): QueueControlEvent {
   const event = normalizeQueueEvent(input);
+  const binding = queueEventBinding(repoRoot);
+  if (binding !== undefined) {
+    // Append-only: a new fact per event. No update, no delete, no JSON write.
+    binding.writer.appendAuditEvent(event, { at: event.at });
+    return event;
+  }
   const path = queueEventJournalPath(repoRoot);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   appendFileSync(path, `${JSON.stringify(event)}\n`, "utf8");
@@ -255,6 +460,21 @@ export function readQueueEventJournal(
   repoRoot: string,
   limit = DEFAULT_QUEUE_EVENT_LIMIT,
 ): QueueEventJournalSummary {
+  const binding = queueEventBinding(repoRoot);
+  if (binding !== undefined) {
+    const valid = readStoreAuditEvents(binding);
+    const normalizedLimit = normalizeEventLimit(limit);
+    return {
+      version: 1,
+      path: queueEventJournalPath(repoRoot),
+      exists: binding.journalExists || valid.length > 0,
+      totalEvents: valid.length,
+      malformedLines: binding.malformedLines,
+      events: valid.slice(-normalizedLimit),
+      lastEventAt: valid.length > 0 ? valid[valid.length - 1]!.at : null,
+      readError: null,
+    };
+  }
   const scan = scanQueueEventJournal(repoRoot);
   const normalizedLimit = normalizeEventLimit(limit);
   const events = scan.valid.slice(-normalizedLimit);
@@ -292,6 +512,23 @@ export function readQueueAdoptionEvents(
   repoRoot: string,
   limit = DEFAULT_QUEUE_EVENT_LIMIT,
 ): QueueAdoptionEventSummary {
+  const binding = queueEventBinding(repoRoot);
+  if (binding !== undefined) {
+    const valid = readStoreAuditEvents(binding);
+    const normalizedLimit = normalizeEventLimit(limit);
+    const adoptions = valid.filter(isQueueAdoptionEvent);
+    return {
+      version: 1,
+      path: queueEventJournalPath(repoRoot),
+      exists: binding.journalExists || valid.length > 0,
+      totalEvents: adoptions.length,
+      malformedLines: binding.malformedLines,
+      events: adoptions.slice(-normalizedLimit),
+      lastEventAt:
+        adoptions.length > 0 ? adoptions[adoptions.length - 1]!.at : null,
+      readError: null,
+    };
+  }
   const scan = scanQueueEventJournal(repoRoot);
   const normalizedLimit = normalizeEventLimit(limit);
   const adoptions = scan.valid.filter(isQueueAdoptionEvent);
