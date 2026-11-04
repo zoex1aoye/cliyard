@@ -1,0 +1,50 @@
+{
+  "planId": "process-tree-identity-reuse-v0",
+  "contracts": [
+    {
+      "taskId": "process-tree-identity-reuse",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Fix the nested process-group cleanup false positive in src/agents/process-tree.ts. When a tracked external group's leader identity has changed or been reused at cleanup time (compareProcessIdentity is not match), classify the group as vanished/reused evidence instead of residualGroups=1, cleanupCompleteness=incomplete and task rejection. The exact-identity guard must still refuse to signal the unverified group (no signal, no broad or name-based kill). Before classifying as vanished, inspect the remaining rows: if any remaining row still matches a sampled worker-descendant identity, keep the outcome needs_human and never auto-accept. Preserve the existing 'leader absent while members remain' fail-closed branch unchanged. Add a pid-reuse fixture (leader startedAt changed, rows still present) proving no signal is sent, the outcome is vanished evidence rather than residual, and a real remaining-descendant match still yields needs_human. Do not touch src/agents/worker-lease.ts recovery path and do not weaken any exact-identity comparison."
+      ],
+      "nonGoals": [
+        "Do not signal an identity-reused group.",
+        "Do not change compareProcessIdentity or weaken the exact-identity guard.",
+        "Do not change the worker-lease recovery path.",
+        "Do not use broad or name-based kills."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/KNOWN_GAPS_2026-10-28.md",
+        "design/process-tree-identity-reuse-v0.md",
+        "src/agents/process-tree.ts",
+        "src/agents/worker-lease.ts",
+        "src/runtime/process.ts",
+        "tests/worker-process-tree.test.ts"
+      ],
+      "writePaths": [
+        "src/agents/process-tree.ts",
+        "tests/worker-process-tree.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "e8aeb480bec0786e52a0dcd17407d4a426560b13",
+      "verifyCommands": [
+        "npx tsx --test tests/worker-process-tree.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "Vanished/reused classification with evidence instead of residual failure.",
+        "A pid-reuse fixture and remaining-descendant needs_human test.",
+        "Preserved exact-identity and fail-closed safety."
+      ],
+      "forbidden": [
+        "Do not signal a group whose leader identity no longer matches.",
+        "Do not mark identity-reuse as clean without recording evidence.",
+        "Do not auto-accept when a remaining row still matches a sampled descendant."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
