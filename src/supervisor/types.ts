@@ -115,6 +115,14 @@ export interface RunTaskState {
    */
   cost?: CostTruth;
   /**
+   * Cost truth retained from an abandoned attempt when a run is resumed.
+   * Resume moves the unfinished task's `cost` here instead of discarding it;
+   * the eventual completion aggregates this provenance with the new attempt's
+   * cost. Observations keep the abandoned session ids and are never
+   * reattributed to the new attempt. Older manifests omit this field.
+   */
+  priorAttemptCost?: CostTruth;
+  /**
    * Cumulative bounded path evidence for every worker exit observed for this
    * task. Older manifests may omit this field.
    */

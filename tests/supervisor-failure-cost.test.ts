@@ -629,6 +629,52 @@ test("legacy ledger, manifest and queue records load while malformed structured 
   }
 });
 
+test("prior-attempt cost round-trips through the RunManifest and fails closed when malformed", () => {
+  const repo = initRepo();
+  try {
+    const base = runGit(repo, ["rev-parse", "HEAD"]);
+    const contractsPath = writeContracts(repo, [
+      contract("task", "task.txt", base, ["test -f task.txt"]),
+    ]);
+    const manifest = createRunManifest(repo, {
+      planId: "prior-attempt-cost",
+      contractsPath,
+      baseCommit: base,
+      integrationBranch: "cliyard/integration/prior-attempt-cost",
+      tasks: ["task"],
+    });
+    const prior = unavailableCostTruth({
+      sessionId: "abandoned-session",
+      note: "supervisor interrupted before completion",
+    });
+
+    updateRunManifest(repo, manifest.runId, (current) => {
+      current.tasks["task"]!.priorAttemptCost = prior;
+    });
+    assert.deepEqual(
+      loadRunManifest(repo, manifest.runId).tasks["task"]?.priorAttemptCost,
+      prior,
+    );
+
+    // A malformed retention record fails closed rather than being guessed at.
+    const raw = JSON.parse(
+      readFileSync(runManifestPath(repo, manifest.runId), "utf8"),
+    ) as Record<string, any>;
+    raw.tasks.task.priorAttemptCost = { version: 1 };
+    writeFileSync(
+      runManifestPath(repo, manifest.runId),
+      JSON.stringify(raw, null, 2) + "\n",
+      "utf8",
+    );
+    assert.throws(
+      () => loadRunManifest(repo, manifest.runId),
+      /task task\.priorAttemptCost is not a valid cost record/,
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Supervisor status surface
 // ---------------------------------------------------------------------------

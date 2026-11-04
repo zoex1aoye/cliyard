@@ -47,6 +47,7 @@ import {
 } from "../agents/continuation.js";
 import type { TaskContract } from "../contracts/schema.js";
 import {
+  aggregateCostTruth,
   COST_STATES,
   type CostTruth,
   type FailureRecord,
@@ -454,11 +455,19 @@ async function resumeCommand(
           // A previous owner may have died mid-task; rebuild it as ready.
           // Rejected attempts keep their status until the batch decides
           // whether to reuse or discard the recorded draft. Structured
-          // observations belong to the abandoned attempt, not the new one.
+          // observations belong to the abandoned attempt, not the new one:
+          // retain its cost as prior-attempt provenance instead of dropping
+          // it, then aggregate on completion.
           task.status = "ready";
           delete task.reason;
           delete task.failure;
-          delete task.cost;
+          if (task.cost !== undefined) {
+            task.priorAttemptCost = aggregateCostTruth([
+              task.priorAttemptCost,
+              task.cost,
+            ]);
+            delete task.cost;
+          }
           delete task.workspaceBoundary;
         }
       }
@@ -1876,6 +1885,11 @@ async function executeRun(input: ExecuteRunInput): Promise<number> {
     budgetPolicy,
     maxBudgetUsd,
   } = input;
+  // Resume reconciliation moved any abandoned attempt's cost to
+  // prior-attempt provenance. The batch replaces task records when a task
+  // completes, so capture the retained costs before dispatch and re-aggregate
+  // them into the checkpointed result.
+  const priorAttemptCosts = collectPriorAttemptCosts(manifest);
   const removeSignals = installSignalHandlers(
     repoRoot,
     manifest.runId,
@@ -1901,8 +1915,11 @@ async function executeRun(input: ExecuteRunInput): Promise<number> {
       ...(maxBudgetUsd !== undefined ? { maxBudgetUsd } : {}),
       workerFactory: options.workerFactory,
     });
-    const finalManifest =
-      result.manifest ?? loadRunManifest(repoRoot, manifest.runId);
+    const finalManifest = mergePriorAttemptCosts(
+      repoRoot,
+      result.manifest ?? loadRunManifest(repoRoot, manifest.runId),
+      priorAttemptCosts,
+    );
     // Worker exit, path audit, process cleanup, WorkspaceBoundary comparison
     // and cost checkpoints have all settled by the time the batch returns.
     // The controller-owned bundle is finalized here, after those facts exist.
@@ -1916,12 +1933,63 @@ async function executeRun(input: ExecuteRunInput): Promise<number> {
     );
     return finalManifest.status === "completed" ? 0 : 1;
   } catch (error) {
+    // A failed invocation must not discard the abandoned attempt's cost.
+    // Best effort: the retained record is already durable on disk.
+    try {
+      mergePriorAttemptCosts(
+        repoRoot,
+        loadRunManifest(repoRoot, manifest.runId),
+        priorAttemptCosts,
+      );
+    } catch {
+      /* best-effort retention; the original error stays authoritative */
+    }
     markInterrupted(repoRoot, manifest.runId);
     throw error;
   } finally {
     removeSignals();
     lock.release();
   }
+}
+
+function collectPriorAttemptCosts(
+  manifest: RunManifest,
+): Map<string, CostTruth> {
+  const prior = new Map<string, CostTruth>();
+  for (const task of Object.values(manifest.tasks)) {
+    if (task.priorAttemptCost !== undefined) {
+      prior.set(task.taskId, task.priorAttemptCost);
+    }
+  }
+  return prior;
+}
+
+/**
+ * Aggregate each retained prior-attempt cost with the cost the invocation
+ * recorded for that task, then clear the retention field. Every observation
+ * keeps its own session id, so an abandoned session is never reattributed to
+ * the new attempt and an unavailable session stays visible in `missing`.
+ */
+function mergePriorAttemptCosts(
+  repoRoot: string,
+  manifest: RunManifest,
+  priorAttemptCosts: ReadonlyMap<string, CostTruth>,
+): RunManifest {
+  if (priorAttemptCosts.size === 0) return manifest;
+  let changed = false;
+  const updated = updateRunManifest(repoRoot, manifest.runId, (current) => {
+    for (const [taskId, captured] of priorAttemptCosts) {
+      const task = current.tasks[taskId];
+      if (!task) continue;
+      // The batch drops the field when it replaces a task record, so fall
+      // back to the pre-dispatch capture when needed.
+      const prior = task.priorAttemptCost ?? captured;
+      task.cost = aggregateCostTruth([prior, task.cost]);
+      delete task.priorAttemptCost;
+      changed = true;
+    }
+  });
+  return changed ? updated : manifest;
 }
 
 function summarizeRun(

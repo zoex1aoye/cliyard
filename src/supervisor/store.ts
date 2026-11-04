@@ -829,6 +829,15 @@ function parseRunManifest(raw: unknown, source: string): RunManifest {
       }
       task.cost = cost;
     }
+    if (task.priorAttemptCost !== undefined) {
+      const priorAttemptCost = parseCostTruth(task.priorAttemptCost);
+      if (!priorAttemptCost) {
+        throw new RunManifestError(
+          `${source}: task ${key}.priorAttemptCost is not a valid cost record`,
+        );
+      }
+      task.priorAttemptCost = priorAttemptCost;
+    }
     if (task.pathAudits !== undefined) {
       task.pathAudits = parsePathAudits(
         task.pathAudits,
