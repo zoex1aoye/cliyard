@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -10,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { hostname, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { TaskContract } from "../src/contracts/schema.js";
 import { runQueueCli } from "../src/orchestration/cli.js";
@@ -30,9 +32,25 @@ import {
   loadQueue,
   queuePaths,
   retryQueueItem,
+  saveQueue,
   withQueueLock,
+  type QueueDocument,
   type QueueItem,
 } from "../src/orchestration/queue-store.js";
+import {
+  MemoryStateStoreDriver,
+  SequenceConflictError,
+  StateStore,
+} from "../src/statestore/store.js";
+import { findCoveringMarker } from "../src/statestore/migrate.js";
+import {
+  MemoryDomainEvidenceStore,
+  canonicalStateStoreJson,
+  projectStateStoreDomainRecords,
+  readStateStoreDomainRecords,
+  StateStoreLegacyDriftError,
+  type StateStoreDomainEvidenceStore,
+} from "../src/statestore/write.js";
 import {
   createRunManifest,
   runManifestPath,
@@ -215,12 +233,13 @@ function markRunning(
   item.nextAction = "resume";
   if (!item.runIds.includes(runId)) item.runIds.push(runId);
   document.updatedAt = new Date().toISOString();
-  writeRawQueueDocument(repo, document);
+  saveQueue(repo, document);
 }
 
 /**
- * Write the queue directly, bypassing `saveQueue` validation. Only the cycle
- * fixture needs this; all production writes validate first.
+ * Write the queue export directly, bypassing the StateStore authority. Only
+ * the drift fixtures need this: every production write goes through
+ * `saveQueue`/the mutation API and must never treat JSON as truth.
  */
 function writeRawQueueDocument(
   repo: string,
@@ -1142,6 +1161,346 @@ test("queue run JSON/human summaries and top-level cliyard queue wiring", async 
         ["second", "completed"],
         ["third", "cancelled"],
       ],
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// StateStore write cutover
+// ---------------------------------------------------------------------------
+
+interface MemoryQueueAuthority {
+  store: StateStore;
+  evidence: StateStoreDomainEvidenceStore;
+  options: { store: StateStore; evidence: StateStoreDomainEvidenceStore };
+}
+
+function memoryQueueAuthority(): MemoryQueueAuthority {
+  const store = StateStore.open(new MemoryStateStoreDriver());
+  const evidence = new MemoryDomainEvidenceStore();
+  return { store, evidence, options: { store, evidence } };
+}
+
+function domainRecords(
+  authority: MemoryQueueAuthority,
+): ReturnType<typeof readStateStoreDomainRecords> {
+  return readStateStoreDomainRecords({
+    store: authority.store,
+    evidence: authority.evidence,
+  });
+}
+
+function queueDocumentRecords(
+  authority: MemoryQueueAuthority,
+): ReturnType<typeof readStateStoreDomainRecords> {
+  return domainRecords(authority).filter(
+    (record) => record.kind === "queue.document",
+  );
+}
+
+function projectedQueue(authority: MemoryQueueAuthority): QueueDocument | null {
+  return projectStateStoreDomainRecords(domainRecords(authority)).queue;
+}
+
+function sha256Text(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+/** One contract-backed queue item in the pre-cutover JSON shape. */
+function legacyQueueDocument(
+  repo: string,
+  contracts: string,
+): QueueDocument {
+  const at = "2026-01-01T00:00:00.000Z";
+  return {
+    version: 1,
+    updatedAt: at,
+    items: [
+      {
+        id: "legacy",
+        contractsPath: contracts,
+        contractsHash: hashFileSha256(contracts),
+        worker: "claude",
+        dependsOn: [],
+        status: "pending",
+        attempts: 0,
+        maxAttempts: 3,
+        runIds: [],
+        nextAction: "start",
+        createdAt: at,
+        updatedAt: at,
+      },
+    ],
+  };
+}
+
+test("the first store write imports legacy queue.json once with its verified source hash", async () => {
+  await withRepo(async (repo) => {
+    const contracts = writeContracts(repo);
+    const legacy = legacyQueueDocument(repo, contracts);
+    const legacyBytes = JSON.stringify(legacy, null, 2) + "\n";
+    const legacyPath = queuePaths(repo).queuePath;
+    mkdirSync(dirname(legacyPath), { recursive: true });
+    writeFileSync(legacyPath, legacyBytes, "utf8");
+    const legacyHash = sha256Text(legacyBytes);
+    const expectedSourceHash = sha256Text(
+      canonicalStateStoreJson({
+        version: 1,
+        sources: [
+          {
+            path: ".cliyard/queue.json",
+            domain: "queue",
+            id: "queue",
+            exists: true,
+            contentHash: legacyHash,
+            byteLength: Buffer.byteLength(legacyBytes),
+          },
+        ],
+      }),
+    );
+    const authority = memoryQueueAuthority();
+
+    addQueueItem(
+      repo,
+      { id: "fresh", contractsPath: contracts },
+      authority.options,
+    );
+
+    const records = domainRecords(authority);
+    const marker = findCoveringMarker(records, ["queue"]);
+    assert.ok(marker, "the import marker must exist");
+    assert.deepEqual(marker.payload.domains, ["queue"]);
+    assert.equal(marker.payload.sourceHash, expectedSourceHash);
+    assert.equal(marker.payload.counts.queueItems, 1);
+    assert.equal(marker.payload.sources.length, 1);
+    assert.equal(marker.payload.sources[0]?.exists, true);
+    assert.equal(marker.payload.sources[0]?.contentHash, legacyHash);
+
+    const projected = projectedQueue(authority);
+    assert.ok(projected);
+    assert.deepEqual(
+      projected.items.map((item) => item.id),
+      ["legacy", "fresh"],
+    );
+    assert.deepEqual(loadQueue(repo), projected);
+
+    // The marker is the import boundary: later writes never re-import.
+    addQueueItem(
+      repo,
+      { id: "second", contractsPath: contracts },
+      authority.options,
+    );
+    assert.equal(
+      domainRecords(authority).filter(
+        (record) => record.kind === "migration.imported",
+      ).length,
+      1,
+    );
+  });
+});
+
+test("add/status/retry mutations append through the StateStore and derive the export", async () => {
+  await withRepo(async (repo) => {
+    const contracts = writeContracts(repo);
+    const authority = memoryQueueAuthority();
+
+    addQueueItem(
+      repo,
+      { id: "alpha", contractsPath: contracts },
+      authority.options,
+    );
+    addQueueItem(
+      repo,
+      { id: "beta", contractsPath: contracts, dependsOn: ["alpha"] },
+      authority.options,
+    );
+    assert.deepEqual(
+      projectedQueue(authority)?.items.map((item) => item.id),
+      ["alpha", "beta"],
+    );
+    assert.deepEqual(loadQueue(repo), projectedQueue(authority));
+
+    const cancelled = cancelQueueItem(repo, "beta", authority.options);
+    assert.equal(cancelled.status, "cancelled");
+    assert.equal(
+      projectedQueue(authority)?.items.find((item) => item.id === "beta")
+        ?.status,
+      "cancelled",
+    );
+    assert.equal(
+      loadQueue(repo).items.find((item) => item.id === "beta")?.status,
+      "cancelled",
+    );
+
+    // A full-document save also goes through the store, not the JSON file.
+    const document = loadQueue(repo);
+    const alpha = document.items.find((item) => item.id === "alpha")!;
+    alpha.status = "blocked";
+    alpha.reason = "verification failed";
+    alpha.updatedAt = new Date().toISOString();
+    document.updatedAt = alpha.updatedAt;
+    saveQueue(repo, document, authority.options);
+    assert.equal(
+      projectedQueue(authority)?.items.find((item) => item.id === "alpha")
+        ?.status,
+      "blocked",
+    );
+
+    const retried = retryQueueItem(repo, "alpha", authority.options);
+    assert.equal(retried.status, "pending");
+    assert.equal(retried.nextAction, "start");
+    assert.equal(
+      projectedQueue(authority)?.items.find((item) => item.id === "alpha")
+        ?.status,
+      "pending",
+    );
+    assert.deepEqual(loadQueue(repo), projectedQueue(authority));
+
+    // Every mutation produced a durable queue.document record: the initial
+    // import, alpha, beta, cancel beta, the blocked save and the retry.
+    assert.equal(queueDocumentRecords(authority).length, 6);
+  });
+});
+
+test("a hand-edited queue export fails closed as legacy drift without appending", async () => {
+  await withRepo(async (repo) => {
+    const contracts = writeContracts(repo);
+    const authority = memoryQueueAuthority();
+    addQueueItem(
+      repo,
+      { id: "alpha", contractsPath: contracts },
+      authority.options,
+    );
+
+    const queuePath = queuePaths(repo).queuePath;
+    const tampered = JSON.parse(readFileSync(queuePath, "utf8")) as {
+      updatedAt: string;
+      items: Array<{ status: string; updatedAt: string }>;
+    };
+    tampered.items[0]!.status = "completed";
+    tampered.items[0]!.updatedAt = new Date().toISOString();
+    tampered.updatedAt = tampered.items[0]!.updatedAt;
+    const tamperedBytes = JSON.stringify(tampered, null, 2) + "\n";
+    writeFileSync(queuePath, tamperedBytes, "utf8");
+    const seqBefore = authority.store.lastSeq;
+    const recordsBefore = queueDocumentRecords(authority).length;
+
+    assert.throws(
+      () =>
+        addQueueItem(
+          repo,
+          { id: "beta", contractsPath: contracts },
+          authority.options,
+        ),
+      (error: unknown) => {
+        assert.ok(error instanceof StateStoreLegacyDriftError);
+        assert.equal(error.needsHuman, true);
+        assert.deepEqual(error.domains, ["queue"]);
+        assert.equal(error.actualSourceHash, sha256Text(tamperedBytes));
+        assert.notEqual(
+          error.expectedSourceHash,
+          error.actualSourceHash,
+        );
+        return true;
+      },
+    );
+
+    // Fail closed: no fact, no export rewrite, still only alpha.
+    assert.equal(authority.store.lastSeq, seqBefore);
+    assert.equal(queueDocumentRecords(authority).length, recordsBefore);
+    assert.equal(readFileSync(queuePath, "utf8"), tamperedBytes);
+    assert.deepEqual(
+      projectedQueue(authority)?.items.map((item) => item.id),
+      ["alpha"],
+    );
+  });
+});
+
+test("a crash-interrupted stale export is repaired from the StateStore authority", async () => {
+  await withRepo(async (repo) => {
+    const contracts = writeContracts(repo);
+    const authority = memoryQueueAuthority();
+    addQueueItem(
+      repo,
+      { id: "alpha", contractsPath: contracts },
+      authority.options,
+    );
+    const queuePath = queuePaths(repo).queuePath;
+    const exportAfterAlpha = readFileSync(queuePath, "utf8");
+
+    cancelQueueItem(repo, "alpha", authority.options);
+    // A writer that died between the durable append and the export write
+    // leaves exactly a historical StateStore document on disk.
+    writeFileSync(queuePath, exportAfterAlpha, "utf8");
+
+    addQueueItem(
+      repo,
+      { id: "beta", contractsPath: contracts },
+      authority.options,
+    );
+    const projected = projectedQueue(authority);
+    assert.deepEqual(
+      projected?.items.map((item) => [item.id, item.status]),
+      [
+        ["alpha", "cancelled"],
+        ["beta", "pending"],
+      ],
+    );
+    assert.deepEqual(loadQueue(repo), projected);
+  });
+});
+
+test("saveQueue rejects a stale document instead of clobbering a newer store write", async () => {
+  await withRepo(async (repo) => {
+    const contracts = writeContracts(repo);
+    const authority = memoryQueueAuthority();
+    addQueueItem(
+      repo,
+      { id: "alpha", contractsPath: contracts },
+      authority.options,
+    );
+    const stale = loadQueue(repo);
+
+    addQueueItem(
+      repo,
+      { id: "beta", contractsPath: contracts },
+      authority.options,
+    );
+    const latestSeq = queueDocumentRecords(authority).at(-1)!.seq;
+
+    assert.throws(
+      () => saveQueue(repo, stale, authority.options),
+      (error: unknown) => {
+        assert.ok(error instanceof SequenceConflictError);
+        assert.equal(error.actualSeq, latestSeq);
+        assert.ok(error.expectedSeq < error.actualSeq);
+        return true;
+      },
+    );
+    assert.deepEqual(
+      loadQueue(repo).items.map((item) => item.id),
+      ["alpha", "beta"],
+    );
+  });
+});
+
+test("queue mutations no longer require the foreground run lock", async () => {
+  await withRepo(async (repo) => {
+    const contracts = writeContracts(repo);
+    addQueueItem(repo, { id: "alpha", contractsPath: contracts });
+
+    const lock = acquireQueueLock(repo);
+    try {
+      // The SQLite/StateStore sequence CAS replaces the file-level mutation
+      // lock; only `queue run` ownership still takes this lock.
+      const beta = addQueueItem(repo, { id: "beta", contractsPath: contracts });
+      assert.equal(beta.status, "pending");
+    } finally {
+      lock.release();
+    }
+    assert.deepEqual(
+      loadQueue(repo).items.map((item) => item.id),
+      ["alpha", "beta"],
     );
   });
 });
