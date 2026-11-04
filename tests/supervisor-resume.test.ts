@@ -16,11 +16,20 @@ import type {
   AgentStartInput,
 } from "../src/agents/types.js";
 import type { TaskContract } from "../src/contracts/schema.js";
+import {
+  createCostObservation,
+  createCostTruth,
+  unavailableCostTruth,
+  type CostTruth,
+  type TokenUsage,
+} from "../src/failures.js";
 import { runCodexBatch } from "../src/scheduler/codex-batch.js";
+import { runSupervisorCli } from "../src/supervisor/cli.js";
 import {
   ContractsHashMismatchError,
   createRunManifest,
   loadRunManifest,
+  updateRunManifest,
 } from "../src/supervisor/store.js";
 
 // ---------------------------------------------------------------------------
@@ -149,6 +158,131 @@ function createFixtureWorker(
     },
     async cancel() {},
   };
+}
+
+const FULL_USAGE: TokenUsage = {
+  inputTokens: 10,
+  outputTokens: 5,
+  cacheCreationInputTokens: 2,
+  cacheReadInputTokens: 1,
+};
+
+function writeSingleTaskContracts(repo: string, baseCommit: string): string {
+  const path = join(repo, "contracts.json");
+  writeFileSync(
+    path,
+    JSON.stringify(
+      {
+        contracts: [
+          contract("task", [], "task.ts", baseCommit, ["test -f task.ts"]),
+        ],
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+  return path;
+}
+
+/** Worker that writes the task file and reports one CLI-estimated cost. */
+function createCostFixtureWorker(
+  cwd: string,
+  sessionId: string,
+  amount: number,
+): AgentAdapter {
+  let contract: TaskContract | undefined;
+  return {
+    id: "claude",
+    async discover() {
+      return {
+        id: "claude",
+        ok: true,
+        supportsModelFlag: true,
+        notes: ["resume cost fixture"],
+      };
+    },
+    async start(input: AgentStartInput) {
+      contract = input.contract;
+      return { sessionId };
+    },
+    async collect(collectSessionId: string): Promise<AgentResult> {
+      if (!contract) throw new Error("worker did not start");
+      const file = `${contract.taskId}.ts`;
+      writeFileSync(
+        join(cwd, file),
+        `export const name = '${contract.taskId}';\n`,
+      );
+      return {
+        sessionId: collectSessionId,
+        exitCode: 0,
+        touchedPaths: [file],
+        logTail: `[fixture] wrote ${file}`,
+        cost: createCostTruth({
+          observations: [
+            createCostObservation({
+              sessionId: collectSessionId,
+              amount,
+              currency: "USD",
+              usage: FULL_USAGE,
+            }),
+          ],
+        }),
+      };
+    },
+    async cancel() {},
+  };
+}
+
+/**
+ * Seed a run whose previous supervisor died mid-task after checkpointing the
+ * abandoned attempt's cost. The integration checkpoint branch must already
+ * exist for resume preconditions.
+ */
+function seedInterruptedRun(
+  repo: string,
+  abandonedCost: CostTruth,
+): {
+  runId: string;
+  integrationBranch: string;
+} {
+  const base = runGit(repo, ["rev-parse", "HEAD"]);
+  const contractsPath = writeSingleTaskContracts(repo, base);
+  const manifest = createRunManifest(repo, {
+    planId: "resume-cost-retention",
+    contractsPath,
+    baseCommit: base,
+    integrationBranch: `cliyard/integration/resume-cost-${base.slice(0, 8)}`,
+    tasks: ["task"],
+  });
+  runGit(repo, ["branch", manifest.integrationBranch, base]);
+  updateRunManifest(repo, manifest.runId, (current) => {
+    const task = current.tasks["task"]!;
+    task.status = "running";
+    task.cost = abandonedCost;
+  });
+  return {
+    runId: manifest.runId,
+    integrationBranch: manifest.integrationBranch,
+  };
+}
+
+async function resumeWithCost(
+  repo: string,
+  runId: string,
+  newSessionId: string,
+  newAmount: number,
+): Promise<number> {
+  const lines: string[] = [];
+  return runSupervisorCli(
+    ["resume", "--repo", repo, "--run", runId],
+    {
+      log: (line) => lines.push(line),
+      signalHandling: false,
+      workerFactory: (_worker, cwd) =>
+        createCostFixtureWorker(cwd, newSessionId, newAmount),
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +443,84 @@ test("resume rejects changed contracts and changed base data before dispatch", a
     );
     assert.equal(dispatched, 0);
     assert.equal(loadRunManifest(repo, manifest.runId).status, "running");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("resume merges an abandoned attempt's cost with the new attempt without overwriting it", async () => {
+  const repo = initRepo();
+  try {
+    const abandonedCost = createCostTruth({
+      observations: [
+        createCostObservation({
+          sessionId: "abandoned-session",
+          amount: 0.04,
+          currency: "USD",
+          usage: FULL_USAGE,
+        }),
+      ],
+    });
+    const { runId } = seedInterruptedRun(repo, abandonedCost);
+
+    assert.equal(await resumeWithCost(repo, runId, "new-session", 0.02), 0);
+
+    const completed = loadRunManifest(repo, runId);
+    assert.equal(completed.status, "completed");
+    const task = completed.tasks["task"]!;
+    assert.equal(task.accepted, true);
+    assert.equal(task.priorAttemptCost, undefined, "retention field is cleared");
+    assert.ok(task.cost);
+    assert.equal(task.cost.amount, 0.06);
+    assert.equal(task.cost.authoritative, false);
+    assert.equal(task.cost.observations.length, 2);
+
+    const abandoned = task.cost.observations.filter(
+      (observation) => observation.sessionId === "abandoned-session",
+    );
+    assert.equal(abandoned.length, 1);
+    assert.equal(abandoned[0]?.amount, 0.04);
+
+    const resumed = task.cost.observations.filter(
+      (observation) => observation.sessionId === "new-session",
+    );
+    assert.equal(resumed.length, 1, "new attempt observations stay separate");
+    assert.equal(resumed[0]?.amount, 0.02);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("resume records an unavailable abandoned session in missing", async () => {
+  const repo = initRepo();
+  try {
+    const abandonedCost = unavailableCostTruth({
+      sessionId: "abandoned-unavailable",
+      note: "provider emitted no usage",
+    });
+    const { runId } = seedInterruptedRun(repo, abandonedCost);
+
+    assert.equal(await resumeWithCost(repo, runId, "new-session", 0.02), 0);
+
+    const task = loadRunManifest(repo, runId).tasks["task"]!;
+    assert.equal(task.accepted, true);
+    assert.ok(task.cost);
+    // Only the real new session contributes a known amount.
+    assert.equal(task.cost.amount, 0.02);
+    assert.equal(task.cost.state, "cli-estimated");
+    assert.equal(task.cost.observations.length, 2);
+
+    const abandoned = task.cost.observations.find(
+      (observation) => observation.sessionId === "abandoned-unavailable",
+    );
+    assert.ok(abandoned, "abandoned session stays in provenance");
+    assert.equal(abandoned.state, "unavailable");
+    assert.equal(abandoned.amount, null);
+
+    // The unavailable observation is not silently dropped: its absent fields
+    // remain missing in the merged truth.
+    assert.ok(task.cost.missing.includes("cost.amount"));
+    assert.ok(task.cost.missing.includes("cost.usage"));
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
