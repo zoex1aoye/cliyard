@@ -2,7 +2,9 @@
 
 > 2026-10-29：近期项目对比与路线结论已补到文末；当前优先级只以
 > [CURRENT_STATE.md](./CURRENT_STATE.md) 为准，完整设计见
-> [continuous-harness-v2.md](../design/continuous-harness-v2.md)。
+> [continuous-harness-v2.md](../design/continuous-harness-v2.md)；
+> 执行层、进程生命周期与沙箱的 2026-10-30 设计见
+> [delivery-control-plane-v2.md](../design/delivery-control-plane-v2.md)。
 >
 > 目的：不要假设 cliyard 必须自研完整编排器；先分层看清「已解决什么」，再定差异化。  
 > 与 [VISION.md](./VISION.md)、[MVP_IMPLEMENTATION_PLAN.md](./MVP_IMPLEMENTATION_PLAN.md) 配套。
@@ -103,6 +105,9 @@ not adoption commitments.
 | [pi-dynamic-workflows](https://github.com/QuintinShaw/pi-dynamic-workflows) | v3.15.0 on 2026-10-27; MIT | Code-mode subagents, journaled resume, worktree, model routing, cost | Reference journal/resume and routing UX; no wholesale adoption |
 | [planning-with-files](https://github.com/OthmanAdi/planning-with-files) | v3.26.0 on 2026-10-28; MIT | File-backed plans, crash recovery, completion gate, subagent isolation | Borrow recovery/completion-gate patterns |
 | [DeerFlow](https://github.com/bytedance/deer-flow) | Highly active 2026-10-29; MIT | Long-horizon harness, RunEvent isolation, model request admission, sandbox/context/subagents | Compare event isolation/admission; avoid large fork |
+| [nono](https://github.com/nolabs-ai/nono) | Pre-1.0, active; macOS Seatbelt, Linux Landlock; no Docker prerequisite | Native OS sandbox wrapper for arbitrary CLIs | First `SandboxAdapter` backend; version-pin and verify nested-process cleanup separately |
+| [MXC](https://github.com/microsoft/mxc) | Stable 1.0 SDK; Rust/.NET/Node.js; Windows ProcessContainer, Linux Bubblewrap, macOS Seatbelt | Cross-platform native sandbox policy abstraction | Future candidate, especially for native Windows; evaluate via JSON executor or a small helper |
+| [Agent Autoloop](https://github.com/KKKKhazix/agent-autoloop) | v1.0.0 2026-11-02; MIT; TS; Node >=24; zero runtime deps | Event-sourced loop kernel, zero-cost suspension, cross-process session resume, card approval channels, hop TTL, strict event-field validation | Borrow kernel disciplines for StateStore, session resume, prompt assembly and conformance testing; do not adopt the runtime (no sandbox, no contracts/evidence/review roles) |
 
 The market is rapidly covering worktrees, multi-Agent boards, daemons, sandbox
 providers and model routing. Those are no longer sufficient differentiators by

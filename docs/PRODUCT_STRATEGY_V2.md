@@ -69,6 +69,44 @@ designRevision
 
 Chat history and provider sessions are not project authority.
 
+Design authority is split into two layers so the always-on Master does not
+have to be the strongest model:
+
+```text
+intent ownership   (never delegated)
+  -> grasp user direction, taste and boundaries
+  -> review, reconcile and finalize every design draft
+  -> freeze the TaskContract; hold the approval gate
+
+design elaboration (routable, bounded work)
+  -> turn intent into requirements + prototype/design + Plan + boundaries
+  -> normally written by the Master model itself (a price/capability-balanced
+     model such as DS Pro)
+  -> dynamically routed to a stronger model when the router judges the design
+     task complex or high-risk enough to be worth it
+```
+
+The elaboration run is itself contract-controlled: it reads the intent and
+project profile, writes only the design draft, and its acceptance is
+Master/human review. A stronger model may write the draft, but it never owns
+the direction or the freeze decision. This keeps "让位" (handing the design
+work to a stronger model) from becoming "让权" (losing design authority).
+
+| Role | Filled by | Owns |
+|---|---|---|
+| Master (常驻权威) | price/capability-balanced model, e.g. DS Pro | intent, review/finalize, freeze, dispatch routing, after-dispatch supervision |
+| Design elaborator (可让位) | Master itself, or a dynamically routed stronger model | requirements + prototype/design + Plan + boundaries draft |
+| Worker | cheap or fit-for-task CLI + model | implementation inside a bounded contract |
+| Reviewer | strong model, clean context | accept / rework / needs_human verdict |
+| Verifier / Deploy / Test | deterministic runners | independent gates, not self-reported completion |
+
+Two routing decisions therefore exist and must stay separate:
+
+- Routing A, design attribution: who writes the design/Plan draft.
+- Routing B, execution attribution: which CLI + model executes each ready
+  task. Both are deterministic control-plane decisions with an audited
+  rationale, and an LLM may only recommend, never unilaterally persist.
+
 ### 3.2 Execution routing
 
 A queue item must not assume one fixed worker/model pair. Routing must support

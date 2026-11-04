@@ -161,7 +161,13 @@ neither earlier RunManifest is retroactively accepted.
 
 ## Current priority
 
-The order is a dependency order, not a promise of parallel delivery.
+The order is a dependency order, not a promise of parallel delivery. The
+full rationale and open decisions live in
+[delivery-control-plane-v2.md](../design/delivery-control-plane-v2.md); this
+list is its summary. Steps 2-8 each start only after a human-approved Plan.
+
+0. **Human review of Delivery Control Plane v2** — approve or amend the
+   native-first execution design before any Plan is compiled.
 
 1. **Pilot safety and reliability closeout**
    - Replace the per-external-group full `ps -A` cleanup scans with bounded
@@ -176,41 +182,55 @@ The order is a dependency order, not a promise of parallel delivery.
      repetitions. Infrastructure failures must remain visible.
    - Remove ledger-string HTML injection from the development monitor, add CSP,
      and add a tested DSH/Node compatibility lane with explicit `engines.dsh`.
+   - Repair the attempt cost-truth aggregate and mark the historical missing
+     attempt before any StateStore migration, so the wrong total is not
+     carried into SQLite.
 
-2. **Background VerificationTask**
+2. **StateStore SQLite boundary**
+   Move task/attempt/event state from JSON files to SQLite behind one store
+   interface, using the ExecutionHandle schema (runtime handle authority,
+   PID diagnostic only) from delivery-control-plane-v2. Keep design, plans
+   and contracts in Git and evidence in run/attempt directories.
+
+3. **Daemon boundary and Control API**
+   Split the foreground-only Supervisor into `cliyardd` (Node 20) plus an
+   independent ExecutionSupervisor (containerd shim model). Expose a
+   versioned Control API with snapshots and event replay. The controller
+   never owns process trees.
+
+4. **ExecutionSupervisor macOS backend + runtime conformance**
+   POSIX process group + launchd backend with explicit capability labels,
+   plus a conformance suite covering setsid escape, orphan grandchildren,
+   controller kill/re-attach and cleanup. Linux systemd-run and Windows Job
+   Object backends follow the same interface.
+
+5. **SandboxAdapter + nono (native-first)**
+   Wrap a fixed nono version behind `SandboxAdapter` with a capability gate:
+   refuse or require explicit approval when a task's requirements exceed the
+   backend; never silently downgrade. Sandbox reports enter EvidenceBundle.
+   MXC stays an evaluation candidate for native Windows.
+
+6. **Background VerificationTask**
    Decouple long verification from Worker lifecycle. Persist owner, artifact
    commit, output offset, delivered latch, timeout, liveness and startup
    recovery, with explicit `queued/running/stopping/succeeded/failed/canceled/
    lost` states.
 
-3. **SandboxProvider**
-   Add a provider-neutral OS isolation boundary. WorkspaceBoundary remains the
-   fallback detector. Candidate backends include SPACE, microsandbox and
-   platform-native wrappers; Node 22-only permission APIs are not assumed.
-
-4. **Clean-context Reviewer**
+7. **Clean-context Reviewer**
    Review only the exact diff, approved requirement and bounded test/runtime
    evidence. Persist structured `ReviewFinding` records and verify every finding
    against code before repair.
 
-5. **Secure Control API and replaceable cockpit**
-   Expose versioned snapshots, ordered events with replay cursors, lightweight
-   status and rebuildable projections. Authenticate future actions, and keep the
-   core on Node 20 while testing UI adapters on the host runtime required by
-   their versions.
-   Prefer DSH native sidebar registration when compatible; keep
-   `dsh-better-sidebar` optional.
-
-6. **Human intervention ledger**
+8. **Human intervention ledger**
    Record Retry, Judge, Approve, Carry, Trigger and Stand-in interventions so
    design work can reduce repeated manual steps without treating silence or
    abandonment as success.
 
-7. **SkillPack provenance**
+9. **SkillPack provenance**
    Version the rule/skill input by id, digest, entrypoint and capability. A run
    must be able to answer which instructions influenced its behavior.
 
-8. **ProfileCatalog, routing and hierarchical admission**
+10. **ProfileCatalog, routing and hierarchical admission**
    Route only among activated provider/account/model/CLI bindings. Unknown
    concurrency begins with one probe; CPU/RAM/runtime/port/provider limits apply
    globally to queue items and Plan waves.
