@@ -287,3 +287,14 @@ reasons, not promoted from the candidate worktree.
 
 DSH-specific source review and non-claims are recorded in
 [evidence/DSH_0_2_2_ALPHA_2_REVIEW.md](evidence/DSH_0_2_2_ALPHA_2_REVIEW.md).
+
+## 2026-11-04 test-process isolation observations
+
+After merging pilot closeout, cost-truth and StateStore v0, repeated full-suite
+runs exposed two process-ownership test defects. Neither is a P1b write-cutover
+regression; both belong to the process-tree/cleanup class already tracked here.
+
+| Priority | Gap | Evidence | Next action |
+|---|---|---|---|
+| P1 | `tests/worker-process-tree.test.ts` can busy-loop | One full-suite run hung with the test process pinned at ~99.9% CPU for minutes in the process-table snapshot area; an earlier run completed 567/570 in ~28 seconds, so this is intermittent | Bound the snapshot/inspection loop; add a watchdog-style test timeout and reproduce the spin under a seed |
+| P1 | `fake-claude` test fixtures leak on repeated runs | After several `npm test` runs, a dozen `fake-claude.cjs` fixture processes from supervisor/worker-process-tree tests remained alive | Add per-test cleanup asserts and a post-run fixture audit; track fixture PIDs so the suite fails if any survive |
