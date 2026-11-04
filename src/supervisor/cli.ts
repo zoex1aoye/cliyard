@@ -1,6 +1,6 @@
 /**
- * Supervisor v0 CLI: foreground `start` / `resume`, read-only `status`,
- * orphan-runtime `reap`, and a cooperative `stop`.
+ * Supervisor v0 CLI: foreground `start` / `resume`, read-only `status` and
+ * `evidence`, orphan-runtime `reap`, and a cooperative `stop`.
  *
  * Durability lives in the RunManifest store; the worker batch persists a
  * checkpoint after every accepted task. `resume` reloads that manifest, checks
@@ -13,7 +13,13 @@
  */
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFileSync, readdirSync, unlinkSync, type Dirent } from "node:fs";
+import {
+  readFileSync,
+  readdirSync,
+  statSync,
+  unlinkSync,
+  type Dirent,
+} from "node:fs";
 import { hostname } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import {
@@ -40,7 +46,11 @@ import {
   type DeadlineExtensionPolicy,
 } from "../agents/continuation.js";
 import type { TaskContract } from "../contracts/schema.js";
-import type { CostTruth, FailureRecord } from "../failures.js";
+import {
+  COST_STATES,
+  type CostTruth,
+  type FailureRecord,
+} from "../failures.js";
 import { RUNTIME_MANIFEST_FILE } from "../runtime/manager.js";
 import { portAllocatorPaths } from "../runtime/ports.js";
 import {
@@ -63,6 +73,7 @@ import {
   acquireSupervisorLock,
   assertContractsHash,
   clearStaleSupervisorLock,
+  computeContractsHash,
   createRunManifest,
   getActiveRunId,
   inspectRun,
@@ -77,6 +88,15 @@ import {
   type SupervisorLockHandle,
   type SupervisorLockInspection,
 } from "./store.js";
+import {
+  EVIDENCE_BUNDLE_VERSION,
+  evidenceBundlePath,
+  MAX_EVIDENCE_BUNDLE_BYTES,
+  runManifestHash,
+  writeEvidenceBundle,
+  type EvidenceNextAction,
+  type EvidenceRepositoryFacts,
+} from "./evidence-bundle.js";
 import type {
   ReusableAttempt,
   RunManifest,
@@ -146,6 +166,57 @@ export interface SupervisorWorkspaceBoundaryStatus {
   evidence: SupervisorBoundaryTaskEvidence[];
 }
 
+/**
+ * Bounded, read-only view of `.cliyard/evidence/<runId>.json`. The bundle file
+ * is the review artifact; the RunManifest remains task authority. `present`
+ * means the file parsed, is bound to the current manifest hash and carries the
+ * same run/task identity. Anything else for a terminal run is degraded.
+ */
+export type SupervisorEvidenceState =
+  | "not-terminal"
+  | "missing"
+  | "invalid"
+  | "present";
+
+export interface SupervisorEvidenceCostStatus {
+  state: CostTruth["state"];
+  amount: number | null;
+  currency: string | null;
+  authoritative: boolean;
+}
+
+export interface SupervisorEvidenceStatus {
+  state: SupervisorEvidenceState;
+  runId: string;
+  /** Absolute expected bundle path. */
+  path: string;
+  /** `true` when a terminal run has missing or invalid evidence. */
+  degraded: boolean;
+  /** Bounded explanation for a missing, invalid or unavailable bundle. */
+  reason: string | null;
+  generatedAt: string | null;
+  nextAction: EvidenceNextAction | null;
+  humanReviewRequired: boolean | null;
+  /** SHA-256 binding recorded in the bundle, when the file parsed. */
+  manifestHash: string | null;
+  taskCount: number | null;
+  /** Total missing-observation count in the bundle. */
+  missingCount: number;
+  /** Bounded display preview; the bundle file remains the authority. */
+  missing: string[];
+  cost: SupervisorEvidenceCostStatus | null;
+}
+
+/** JSON shape of `supervisor evidence`; never includes the full bundle. */
+export interface SupervisorEvidenceCommandResult {
+  regenerated: boolean;
+  /** `true` when regeneration changed the bundle bytes. */
+  written: boolean;
+  /** Bounded failure reason, never a raw stack or credential. */
+  error: string | null;
+  evidence: SupervisorEvidenceStatus;
+}
+
 export interface SupervisorStatus {
   runId: string;
   planId: string;
@@ -193,6 +264,12 @@ export interface SupervisorStatus {
    * guard outcomes and never grants acceptance or claims prevention.
    */
   workspaceBoundary: SupervisorWorkspaceBoundaryStatus;
+  /**
+   * Bounded controller EvidenceBundle projection. A terminal run with a
+   * missing or invalid bundle is explicitly degraded; this projection never
+   * writes, repairs or changes task acceptance.
+   */
+  evidence: SupervisorEvidenceStatus;
 }
 
 export async function runSupervisorCli(
@@ -215,6 +292,8 @@ export async function runSupervisorCli(
       return startCommand(rest, options, log);
     case "status":
       return statusCommand(rest, options, log);
+    case "evidence":
+      return evidenceCommand(rest, options, log);
     case "resume":
       return resumeCommand(rest, options, log);
     case "reap":
@@ -321,7 +400,19 @@ async function resumeCommand(
   const manifest = loadRunManifest(repoRoot, arg("--run", rest));
 
   if (manifest.status === "completed") {
+    // Completed work is never re-dispatched. The terminal evidence bundle is
+    // the one thing a completed resume repairs: a missing or damaged bundle
+    // is rebuilt from the RunManifest without rewriting it.
+    const evidence = repairCompletedRunEvidence(repoRoot, manifest);
     log(`run ${manifest.runId} is already completed; nothing to resume`);
+    log(`evidence: ${formatEvidenceStatus(evidence)}`);
+    if (evidence.state !== "present") {
+      log(
+        `evidence bundle is ${evidence.state}; inspect ${evidence.path} ` +
+          "or rerun `cliyard supervisor evidence --regenerate`",
+      );
+      return 1;
+    }
     return 0;
   }
 
@@ -538,6 +629,9 @@ export async function buildStatus(
     runtimeRecovery: readRuntimeRecoveryRecords(repoRoot),
     workerLeases,
     workspaceBoundary: buildWorkspaceBoundaryStatus(tasks),
+    // Strictly read-only: this projection reports the on-disk bundle state.
+    // Status never repairs, rewrites or creates evidence.
+    evidence: inspectEvidenceStatus(repoRoot, manifest),
   };
 }
 
@@ -623,6 +717,7 @@ function printStatus(
         : " (not running)";
   log(`owner: pid ${status.owner.pid} on ${status.owner.host}${alive}`);
   log(`last checkpoint: ${status.lastCheckpoint}`);
+  log(`evidence: ${formatEvidenceStatus(status.evidence)}`);
   if (status.runtimeRecovery.length === 0) {
     log("runtime recovery: none");
   } else {
@@ -888,6 +983,485 @@ function formatLock(
   }
   const alive = isProcessAlive(owner.pid) ? "" : " (not running)";
   return `held by run ${owner.runId} pid ${owner.pid} on ${owner.host}${alive}`;
+}
+
+// ---------------------------------------------------------------------------
+// Evidence bundle
+// ---------------------------------------------------------------------------
+
+/**
+ * Terminal for evidence purposes, matching the EvidenceBundle core. A running
+ * manifest can never produce a final bundle. `interrupted` is terminal too,
+ * but automatic generation only happens after a settled batch return.
+ */
+const EVIDENCE_TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
+  "completed",
+  "blocked",
+  "interrupted",
+]);
+const EVIDENCE_NEXT_ACTIONS: ReadonlySet<string> = new Set<EvidenceNextAction>([
+  "human-review",
+  "inspect-failure",
+  "resume",
+  "needs-human",
+]);
+const EVIDENCE_COST_STATES: ReadonlySet<string> = new Set(COST_STATES);
+/** Display bounds; the bundle file remains the authority. */
+const EVIDENCE_MISSING_PREVIEW = 16;
+const EVIDENCE_MISSING_ENTRY_LIMIT = 200;
+const EVIDENCE_REASON_LIMIT = 300;
+
+function evidenceStatusBase(
+  runId: string,
+  path: string,
+): SupervisorEvidenceStatus {
+  return {
+    state: "missing",
+    runId,
+    path,
+    degraded: false,
+    reason: null,
+    generatedAt: null,
+    nextAction: null,
+    humanReviewRequired: null,
+    manifestHash: null,
+    taskCount: null,
+    missingCount: 0,
+    missing: [],
+    cost: null,
+  };
+}
+
+/**
+ * Read-only projection of the on-disk bundle. It never writes, repairs or
+ * changes the RunManifest. A terminal run whose bundle is absent, unreadable,
+ * structurally invalid or bound to a different manifest is `missing`/`invalid`
+ * and degraded.
+ */
+function inspectEvidenceStatus(
+  repoRoot: string,
+  manifest: RunManifest,
+): SupervisorEvidenceStatus {
+  const path = evidenceBundlePath(repoRoot, manifest.runId);
+  const base = evidenceStatusBase(manifest.runId, path);
+  if (!EVIDENCE_TERMINAL_STATUSES.has(manifest.status)) {
+    return {
+      ...base,
+      state: "not-terminal",
+      reason: "run is running; final evidence is written after settlement",
+    };
+  }
+
+  let stats;
+  try {
+    stats = statSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return {
+        ...base,
+        state: "missing",
+        degraded: true,
+        reason: "evidence bundle is missing",
+      };
+    }
+    return {
+      ...base,
+      state: "invalid",
+      degraded: true,
+      reason: boundEvidenceText(
+        `cannot inspect evidence bundle: ${errorMessage(error)}`,
+        EVIDENCE_REASON_LIMIT,
+      ),
+    };
+  }
+  if (!stats.isFile()) {
+    return {
+      ...base,
+      state: "invalid",
+      degraded: true,
+      reason: "evidence path is not a regular file",
+    };
+  }
+  if (stats.size > MAX_EVIDENCE_BUNDLE_BYTES) {
+    return {
+      ...base,
+      state: "invalid",
+      degraded: true,
+      reason: "evidence bundle exceeds the size bound",
+    };
+  }
+
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    return {
+      ...base,
+      state: "invalid",
+      degraded: true,
+      reason: boundEvidenceText(
+        `cannot read evidence bundle: ${errorMessage(error)}`,
+        EVIDENCE_REASON_LIMIT,
+      ),
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    return {
+      ...base,
+      state: "invalid",
+      degraded: true,
+      reason: "evidence bundle is not valid JSON",
+    };
+  }
+
+  try {
+    return { ...base, state: "present", ...projectEvidenceBundle(parsed, manifest) };
+  } catch (error) {
+    return {
+      ...base,
+      state: "invalid",
+      degraded: true,
+      reason: boundEvidenceText(errorMessage(error), EVIDENCE_REASON_LIMIT),
+    };
+  }
+}
+
+interface ProjectedEvidenceFacts {
+  generatedAt: string;
+  nextAction: EvidenceNextAction;
+  humanReviewRequired: boolean;
+  manifestHash: string;
+  taskCount: number;
+  missingCount: number;
+  missing: string[];
+  cost: SupervisorEvidenceCostStatus;
+}
+
+/**
+ * Validate the bundle's bounded review facts and bind them to the current
+ * RunManifest. Only declared fields are read into the projection.
+ */
+function projectEvidenceBundle(
+  parsed: unknown,
+  manifest: RunManifest,
+): ProjectedEvidenceFacts {
+  if (!isRecord(parsed)) {
+    throw new Error("evidence bundle must be a JSON object");
+  }
+  if (parsed.version !== EVIDENCE_BUNDLE_VERSION) {
+    throw new Error("evidence bundle version is not supported");
+  }
+
+  const run = parsed.run;
+  if (!isRecord(run)) {
+    throw new Error("evidence bundle run record is missing");
+  }
+  if (
+    run.runId !== manifest.runId ||
+    run.planId !== manifest.planId
+  ) {
+    throw new Error("evidence bundle run identity does not match the RunManifest");
+  }
+  if (run.terminal !== true || run.status !== manifest.status) {
+    throw new Error("evidence bundle does not describe this terminal run");
+  }
+
+  const authority = parsed.authority;
+  if (!isRecord(authority)) {
+    throw new Error("evidence bundle authority record is missing");
+  }
+  if (
+    authority.taskAuthority !== "run-manifest" ||
+    authority.grantsAcceptance !== false ||
+    authority.authorizesMerge !== false ||
+    authority.replacesVerification !== false
+  ) {
+    throw new Error(
+      "evidence bundle authority does not defer to the RunManifest",
+    );
+  }
+  const manifestIdentity = authority.manifest;
+  const expectedHash = runManifestHash(manifest);
+  if (
+    !isRecord(manifestIdentity) ||
+    manifestIdentity.hash !== expectedHash
+  ) {
+    throw new Error(
+      "evidence bundle is not bound to the current RunManifest",
+    );
+  }
+
+  const tasks = parsed.tasks;
+  if (!Array.isArray(tasks)) {
+    throw new Error("evidence bundle task list is missing");
+  }
+  const expectedTasks = Object.values(manifest.tasks);
+  if (tasks.length !== expectedTasks.length) {
+    throw new Error(
+      "evidence bundle task count does not match the RunManifest",
+    );
+  }
+  const byId = new Map(expectedTasks.map((task) => [task.taskId, task]));
+  const seen = new Set<string>();
+  for (const task of tasks) {
+    if (!isRecord(task) || typeof task.taskId !== "string") {
+      throw new Error("evidence bundle contains an invalid task record");
+    }
+    const source = byId.get(task.taskId);
+    if (!source || seen.has(task.taskId)) {
+      throw new Error(
+        "evidence bundle task identity does not match the RunManifest",
+      );
+    }
+    if (task.status !== source.status || task.accepted !== source.accepted) {
+      throw new Error(
+        "evidence bundle task state does not match the RunManifest",
+      );
+    }
+    seen.add(task.taskId);
+  }
+
+  const generatedAt = parsed.generatedAt;
+  if (
+    typeof generatedAt !== "string" ||
+    generatedAt.length === 0 ||
+    Number.isNaN(Date.parse(generatedAt))
+  ) {
+    throw new Error("evidence bundle generation time is invalid");
+  }
+  if (
+    typeof parsed.nextAction !== "string" ||
+    !EVIDENCE_NEXT_ACTIONS.has(parsed.nextAction)
+  ) {
+    throw new Error("evidence bundle next action is invalid");
+  }
+  if (parsed.humanReviewRequired !== true) {
+    throw new Error("evidence bundle does not require human review");
+  }
+  if (
+    !Array.isArray(parsed.missing) ||
+    !parsed.missing.every((entry) => typeof entry === "string")
+  ) {
+    throw new Error("evidence bundle missing-observation list is invalid");
+  }
+  const rawMissing = parsed.missing as string[];
+  const missing = rawMissing
+    .slice(0, EVIDENCE_MISSING_PREVIEW)
+    .map((entry) => boundEvidenceText(entry, EVIDENCE_MISSING_ENTRY_LIMIT));
+
+  return {
+    generatedAt,
+    nextAction: parsed.nextAction as EvidenceNextAction,
+    humanReviewRequired: true,
+    manifestHash: expectedHash,
+    taskCount: tasks.length,
+    missingCount: rawMissing.length,
+    missing,
+    cost: projectEvidenceCost(parsed.cost),
+  };
+}
+
+function projectEvidenceCost(value: unknown): SupervisorEvidenceCostStatus {
+  if (!isRecord(value)) {
+    throw new Error("evidence bundle cost record is missing");
+  }
+  if (
+    typeof value.state !== "string" ||
+    !EVIDENCE_COST_STATES.has(value.state)
+  ) {
+    throw new Error("evidence bundle cost state is invalid");
+  }
+  const amount = value.amount;
+  if (
+    amount !== null &&
+    (typeof amount !== "number" || !Number.isFinite(amount))
+  ) {
+    throw new Error("evidence bundle cost amount is invalid");
+  }
+  const currency = value.currency;
+  if (currency !== null && typeof currency !== "string") {
+    throw new Error("evidence bundle cost currency is invalid");
+  }
+  if (typeof value.authoritative !== "boolean") {
+    throw new Error("evidence bundle cost authority flag is invalid");
+  }
+  return {
+    state: value.state as CostTruth["state"],
+    amount,
+    currency,
+    authoritative: value.authoritative,
+  };
+}
+
+/** Independently observed repository facts; absent facts stay unknown. */
+function evidenceRepositoryFacts(
+  repoRoot: string,
+  manifest: RunManifest,
+): EvidenceRepositoryFacts {
+  const facts: EvidenceRepositoryFacts = {};
+  try {
+    facts.contractsHash = computeContractsHash(manifest.contractsPath);
+  } catch {
+    /* unobserved contracts hash stays unknown */
+  }
+  const head = tryResolveCommit(
+    repoRoot,
+    `refs/heads/${manifest.integrationBranch}`,
+  );
+  if (head) facts.integrationHead = head;
+  return facts;
+}
+
+/**
+ * Write (idempotently) the final bundle for a terminal manifest. A write
+ * failure is swallowed here: the returned projection reports the durable
+ * missing/invalid state instead of turning a finished run into a crash.
+ */
+function generateRunEvidence(
+  repoRoot: string,
+  manifest: RunManifest,
+): SupervisorEvidenceStatus {
+  if (EVIDENCE_TERMINAL_STATUSES.has(manifest.status)) {
+    try {
+      writeEvidenceBundle(repoRoot, manifest, {
+        facts: evidenceRepositoryFacts(repoRoot, manifest),
+      });
+    } catch {
+      /* never changes run status, acceptance or the manifest */
+    }
+  }
+  return inspectEvidenceStatus(repoRoot, manifest);
+}
+
+/** Completed-run resume: rebuild a missing or damaged bundle, never the run. */
+function repairCompletedRunEvidence(
+  repoRoot: string,
+  manifest: RunManifest,
+): SupervisorEvidenceStatus {
+  const current = inspectEvidenceStatus(repoRoot, manifest);
+  if (current.state === "present") return current;
+  return generateRunEvidence(repoRoot, manifest);
+}
+
+async function evidenceCommand(
+  rest: string[],
+  _options: SupervisorCliOptions,
+  log: (line: string) => void,
+): Promise<number> {
+  const repoRoot = repoFrom(rest);
+  const manifest = loadRunManifest(repoRoot, arg("--run", rest));
+  const regenerate = has("--regenerate", rest);
+  const result: SupervisorEvidenceCommandResult = {
+    regenerated: regenerate,
+    written: false,
+    error: null,
+    evidence: inspectEvidenceStatus(repoRoot, manifest),
+  };
+
+  if (regenerate) {
+    if (!EVIDENCE_TERMINAL_STATUSES.has(manifest.status)) {
+      // A running manifest cannot produce final evidence; this is a rejection,
+      // not a read-only degraded report.
+      result.error = "a running RunManifest cannot produce final evidence";
+    } else {
+      try {
+        const write = writeEvidenceBundle(repoRoot, manifest, {
+          facts: evidenceRepositoryFacts(repoRoot, manifest),
+        });
+        result.written = write.written;
+        result.evidence = inspectEvidenceStatus(repoRoot, manifest);
+      } catch (error) {
+        result.error = boundEvidenceText(
+          `cannot regenerate evidence: ${errorMessage(error)}`,
+          EVIDENCE_REASON_LIMIT,
+        );
+        result.evidence = inspectEvidenceStatus(repoRoot, manifest);
+      }
+    }
+  }
+
+  if (has("--json", rest)) {
+    log(JSON.stringify(result, null, 2));
+  } else {
+    if (result.error) log(`supervisor evidence: ${result.error}`);
+    printEvidenceStatus(result.evidence, log);
+    if (regenerate) {
+      log(
+        result.written
+          ? "evidence bundle written"
+          : "evidence bundle already current",
+      );
+    }
+  }
+
+  return result.error === null && result.evidence.state === "present" ? 0 : 1;
+}
+
+function printEvidenceStatus(
+  status: SupervisorEvidenceStatus,
+  log: (line: string) => void,
+): void {
+  log(`runId: ${status.runId}`);
+  log(`evidence: ${status.state}`);
+  log(`path: ${status.path}`);
+  log(`degraded: ${status.degraded ? "yes" : "no"}`);
+  if (status.reason) log(`reason: ${status.reason}`);
+  if (status.state !== "present") return;
+  log(`generated: ${status.generatedAt}`);
+  log(`next action: ${status.nextAction}`);
+  log(
+    `human review required: ${status.humanReviewRequired ? "yes" : "no"}`,
+  );
+  log(`tasks: ${status.taskCount}`);
+  if (status.cost) {
+    const amount =
+      status.cost.amount !== null
+        ? ` ${status.cost.amount} ` +
+          `${status.cost.currency ?? "<currency unknown>"}`
+        : "";
+    log(
+      `cost: ${status.cost.state}${amount} ` +
+        `(authoritative: ${status.cost.authoritative ? "yes" : "no"})`,
+    );
+  }
+  if (status.missingCount === 0) {
+    log("missing: none");
+    return;
+  }
+  const truncated =
+    status.missingCount > status.missing.length
+      ? ` … (${status.missingCount} total)`
+      : "";
+  log(`missing: ${status.missing.join(", ")}${truncated}`);
+}
+
+function formatEvidenceStatus(status: SupervisorEvidenceStatus): string {
+  switch (status.state) {
+    case "present": {
+      const next = status.nextAction
+        ? `; next action ${status.nextAction}`
+        : "";
+      const missing =
+        status.missingCount > 0 ? `; missing ${status.missingCount}` : "";
+      return `present${next}${missing}`;
+    }
+    case "not-terminal":
+      return "not-terminal (final evidence is written after settlement)";
+    case "missing":
+      return `missing (degraded): ${status.reason ?? "not written"}`;
+    case "invalid":
+      return `invalid (degraded): ${status.reason ?? "validation failed"}`;
+  }
+}
+
+function boundEvidenceText(value: string, max: number): string {
+  const cleaned = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+  if (cleaned.length <= max) return cleaned;
+  return `${cleaned.slice(0, Math.max(0, max - 1))}…`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1266,6 +1840,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 // ---------------------------------------------------------------------------
 // Shared batch execution
 // ---------------------------------------------------------------------------
@@ -1325,7 +1903,17 @@ async function executeRun(input: ExecuteRunInput): Promise<number> {
     });
     const finalManifest =
       result.manifest ?? loadRunManifest(repoRoot, manifest.runId);
-    log(JSON.stringify(summarizeRun(finalManifest, result, resumed), null, 2));
+    // Worker exit, path audit, process cleanup, WorkspaceBoundary comparison
+    // and cost checkpoints have all settled by the time the batch returns.
+    // The controller-owned bundle is finalized here, after those facts exist.
+    const evidence = generateRunEvidence(repoRoot, finalManifest);
+    log(
+      JSON.stringify(
+        summarizeRun(finalManifest, result, resumed, evidence),
+        null,
+        2,
+      ),
+    );
     return finalManifest.status === "completed" ? 0 : 1;
   } catch (error) {
     markInterrupted(repoRoot, manifest.runId);
@@ -1340,6 +1928,7 @@ function summarizeRun(
   manifest: RunManifest,
   result: CodexBatchResult,
   resumed: boolean,
+  evidence: SupervisorEvidenceStatus,
 ): Record<string, unknown> {
   const counts = taskCounts(manifest);
   return {
@@ -1359,6 +1948,7 @@ function summarizeRun(
     integrationHead: manifest.integrationHead,
     tasks: Object.values(manifest.tasks).map((task) => ({ ...task })),
     ledgerPath: result.ledgerPath,
+    evidence,
   };
 }
 
@@ -1826,6 +2416,7 @@ Usage:
                                 [--max-cumulative-budget-guard-usd usd]
                                 [--budget-overshoot-reserve-usd usd]
   cliyard supervisor status --repo <path> [--run id] [--json]
+  cliyard supervisor evidence --repo <path> [--run id] [--json] [--regenerate]
   cliyard supervisor resume --repo <path> [--run id] [--worker claude|codex]
                             [--model id] [--dry-run] [--keep-worktrees]
                             [--retry-rejected] [--reuse-attempt | --fresh-attempt]
@@ -1852,7 +2443,10 @@ A rejected attempt keeps its dirty worktree. Resume reuses a valid recorded
 attempt by default; --fresh-attempt discards it for a clean worktree.
 Start/resume reap proven orphaned runtimes after acquiring the lock and fail
 closed when any runtime needs human review. Status only reads persisted
-recovery and worker-lease records; it never reconciles. recover-workers only
+recovery and worker-lease records; it never reconciles. A terminal run with a
+missing or invalid final evidence bundle is reported as degraded. The evidence
+command only reads; --regenerate rebuilds the bundle from the terminal
+RunManifest without changing task acceptance. recover-workers only
 signals an exactly verified worker group after proving its controller dead on
 this host; it never reattaches stdout or changes RunManifest acceptance.
 Automatic deadline extension is off by default and is available only with

@@ -7,7 +7,9 @@ import type {
 } from "../agents/types.js";
 import {
   appendTaskExtensionRecord,
+  parseTaskBudgetContinuationState,
   parseTaskExtensionRecord,
+  type TaskBudgetContinuationState,
   type TaskExtensionRecord,
 } from "../agents/continuation.js";
 import { auditPathScope } from "../agents/path-scope.js";
@@ -91,6 +93,12 @@ export interface LoopResult {
   pathAudits: PathAuditRecord[];
   /** Deadline and budget grants whose persistence callback completed. */
   extensions: TaskExtensionRecord[];
+  /**
+   * Task-level guard ledger after the last attempt when a budget policy is
+   * configured. Local allocation caps only; never provider balance or
+   * invoice truth, and never an observed spend.
+   */
+  taskBudget?: TaskBudgetContinuationState;
   /** Bounded process-tree evidence for every worker invocation observed. */
   processTrees: WorkerProcessRecord[];
   /**
@@ -150,6 +158,11 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
   const pathAudits: PathAuditRecord[] = [];
   const processTrees: WorkerProcessRecord[] = [];
   let extensions: TaskExtensionRecord[] = [];
+  /**
+   * Task-level guard ledger. It only advances when an adapter reports one, so
+   * adapters without a budget policy keep their existing behavior.
+   */
+  let taskBudget: TaskBudgetContinuationState | undefined;
 
   while (true) {
     await updateLedger(ledgerPath, (ledger) => {
@@ -174,6 +187,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
     const { sessionId } = await worker.start({
       contract,
       attempt,
+      ...(taskBudget !== undefined ? { taskBudget } : {}),
       priorFailure,
       ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
       ...(onExtension ? { onExtension } : {}),
@@ -184,6 +198,42 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
       const parsed = parseTaskExtensionRecord(extension);
       if (!parsed) continue;
       extensions = appendTaskExtensionRecord(extensions, parsed);
+    }
+    /**
+     * Thread the task-level guard ledger into the next attempt. A malformed
+     * ledger, a changed cap or a decrease would reset or widen the configured
+     * envelope, so it is a deterministic policy failure instead of an
+     * observation to trust. Adapters without a budget policy never return one.
+     */
+    let taskBudgetFailure: FailureRecord | undefined;
+    if (agentResult.taskBudget !== undefined) {
+      const reported = parseTaskBudgetContinuationState(
+        agentResult.taskBudget,
+      );
+      const reset =
+        reported !== undefined &&
+        taskBudget !== undefined &&
+        (reported.cumulativeGuardUsd < taskBudget.cumulativeGuardUsd ||
+          reported.continuationCount < taskBudget.continuationCount);
+      const capChanged =
+        reported !== undefined &&
+        taskBudget !== undefined &&
+        reported.maxCumulativeGuardUsd !== taskBudget.maxCumulativeGuardUsd;
+      if (
+        !reported ||
+        reported.taskId !== contract.taskId ||
+        reset ||
+        capChanged
+      ) {
+        taskBudgetFailure = createFailureRecord({
+          stage: "policy",
+          policyBlocked: true,
+          code: "task_budget_state_invalid",
+          messageDetail: "adapter returned an invalid task budget ledger",
+        });
+      } else {
+        taskBudget = reported;
+      }
     }
     // Fail closed on malformed adapter observations: an unusable record is
     // omitted (cost becomes missing), never guessed at.
@@ -247,9 +297,11 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
       });
     }
     // A worker that otherwise succeeded is not accepted while its tree is
-    // ambiguous. The original worker failure, when present, stays primary.
+    // ambiguous or its task guard ledger is unusable. The original worker
+    // failure, when present, stays primary.
+    const gateFailure = cleanupFailure ?? taskBudgetFailure;
     const effectiveExitCode =
-      agentResult.exitCode === 0 && cleanupFailure ? 1 : agentResult.exitCode;
+      agentResult.exitCode === 0 && gateFailure ? 1 : agentResult.exitCode;
 
     const pathAudit: PathAuditRecord = {
       attempt,
@@ -304,7 +356,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
               messageDetail: `implement failed: exitCode=${agentResult.exitCode}`,
             })
           : undefined);
-      const failure = workerFailure ?? cleanupFailure!;
+      const failure = workerFailure ?? gateFailure!;
       await updateLedger(ledgerPath, (ledger) => {
         record = ledger.tasks[contract.taskId]!;
         setStatus(record, "verifying", log);
@@ -314,10 +366,12 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         record.reason =
           workerFailure !== undefined
             ? `implement failed: exitCode=${agentResult.exitCode}`
-            : `process-tree cleanup failed: ${cleanupFailure!.code ?? cleanupFailure!.category}`;
+            : cleanupFailure !== undefined
+              ? `process-tree cleanup failed: ${cleanupFailure.code ?? cleanupFailure.category}`
+              : `task budget ledger rejected: ${taskBudgetFailure!.code ?? taskBudgetFailure!.category}`;
         record.lastVerifyLog = v.logTail;
         record.failure = failure;
-        record.cost = aggregateCostTruth(attemptCosts);
+        record.cost = aggregateAttemptCost(attemptCosts, taskBudget);
         appendEvent(record, "verdict", record.reason);
       });
       return finish(
@@ -327,6 +381,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         extensions,
         processTrees,
         cleanupFailure,
+        taskBudget,
       );
     }
 
@@ -348,7 +403,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         setStatus(record, "accepted", log);
         record.verdict = "accepted";
         record.reason = `verified after ${attempt} repair(s)`;
-        record.cost = aggregateCostTruth(attemptCosts);
+        record.cost = aggregateAttemptCost(attemptCosts, taskBudget);
         delete record.failure;
         appendEvent(record, "verdict", record.reason);
       });
@@ -359,6 +414,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         extensions,
         processTrees,
         cleanupFailure,
+        taskBudget,
       );
     }
 
@@ -378,7 +434,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
           stage: "verifier",
           messageDetail: `maxRepairs=${contract.maxRepairs} exhausted`,
         });
-        record.cost = aggregateCostTruth(attemptCosts);
+        record.cost = aggregateAttemptCost(attemptCosts, taskBudget);
         appendEvent(record, "verdict", record.reason);
         return true;
       }
@@ -401,6 +457,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         extensions,
         processTrees,
         cleanupFailure,
+        taskBudget,
       );
     }
     priorFailure = {
@@ -411,6 +468,23 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
   }
 }
 
+/**
+ * Aggregate attempt cost truth. The configured task cumulative guard is
+ * recorded as the local cap allocation; it is never added to the CLI-reported
+ * amount and never presented as provider balance or invoice truth.
+ */
+function aggregateAttemptCost(
+  attemptCosts: ReadonlyArray<CostTruth>,
+  taskBudget: TaskBudgetContinuationState | undefined,
+): CostTruth {
+  return aggregateCostTruth(
+    attemptCosts,
+    taskBudget
+      ? { guardBudgetUsd: taskBudget.cumulativeGuardUsd }
+      : {},
+  );
+}
+
 function finish(
   record: LedgerTaskRecord,
   ledgerPath: string,
@@ -418,6 +492,7 @@ function finish(
   extensions: TaskExtensionRecord[],
   processTrees: WorkerProcessRecord[],
   cleanupFailure: FailureRecord | undefined,
+  taskBudget: TaskBudgetContinuationState | undefined,
 ): LoopResult {
   return {
     taskId: record.taskId,
@@ -442,6 +517,7 @@ function finish(
       ...extension,
       healthyEvidence: [...extension.healthyEvidence],
     })),
+    ...(taskBudget !== undefined ? { taskBudget: { ...taskBudget } } : {}),
     processTrees: processTrees.map((tree) => ({
       ...tree,
       signals: tree.signals.map((signal) => ({ ...signal })),

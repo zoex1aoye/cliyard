@@ -50,9 +50,12 @@ import {
   parseBudgetContinuationPolicy,
   parseBudgetGuardUsd,
   parseDeadlineExtensionPolicy,
+  parseTaskBudgetContinuationState,
+  TASK_BUDGET_LEDGER_VERSION,
   TASK_EXTENSION_RECORD_VERSION,
   type BudgetContinuationPolicy,
   type DeadlineExtensionPolicy,
+  type TaskBudgetContinuationState,
   type TaskExtensionRecord,
 } from "./continuation.js";
 import type {
@@ -242,6 +245,43 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
       );
 
       const promise = (async (): Promise<AgentResult> => {
+        /**
+         * A supplied task ledger must be usable before any process starts.
+         * Without a configured policy the state is ignored entirely so the
+         * historical per-attempt maxBudgetUsd behavior is unchanged.
+         */
+        const parsedTaskBudget =
+          budgetPolicy !== undefined && input.taskBudget !== undefined
+            ? parseTaskBudgetContinuationState(input.taskBudget)
+            : undefined;
+        if (
+          budgetPolicy !== undefined &&
+          input.taskBudget !== undefined &&
+          !parsedTaskBudget
+        ) {
+          return taskBudgetStateFailure({
+            sessionId,
+            emit,
+            code: "task_budget_state_invalid",
+            detail: "task budget state is malformed",
+            guardBudgetUsd: maxBudgetUsd,
+          });
+        }
+        if (
+          parsedTaskBudget !== undefined &&
+          (parsedTaskBudget.taskId !== input.contract.taskId ||
+            parsedTaskBudget.maxCumulativeGuardUsd !==
+              budgetPolicy!.maxCumulativeGuardUsd)
+        ) {
+          return taskBudgetStateFailure({
+            sessionId,
+            emit,
+            code: "task_budget_state_mismatch",
+            detail: "task budget state contradicts the configured policy",
+            guardBudgetUsd: maxBudgetUsd,
+          });
+        }
+
         if (opts.dryRun) {
           emit({
             type: "session.start",
@@ -274,12 +314,82 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
               code: "cwd_missing",
               text: "worker cwd is missing",
             }),
+            ...(budgetPolicy && parsedTaskBudget
+              ? { taskBudget: { ...parsedTaskBudget } }
+              : {}),
             cost: unavailableCostTruth({
               sessionId,
-              guardBudgetUsd: maxBudgetUsd,
+              guardBudgetUsd:
+                parsedTaskBudget?.cumulativeGuardUsd ?? maxBudgetUsd,
               note: "worker cwd is missing",
             }),
           };
+        }
+
+        /**
+         * Allocate this attempt's invocation guard from the task envelope. A
+         * repair receives only what the overshoot reserve leaves available,
+         * so prior attempts and continuations are never silently reset.
+         */
+        const priorTaskGuardUsd =
+          budgetPolicy !== undefined && parsedTaskBudget !== undefined
+            ? parsedTaskBudget.cumulativeGuardUsd
+            : 0;
+        let continuationCount =
+          budgetPolicy !== undefined && parsedTaskBudget !== undefined
+            ? parsedTaskBudget.continuationCount
+            : 0;
+        /** CLI guard for this attempt's provider-session chain. */
+        let sessionGuardUsd = maxBudgetUsd;
+        /** Task-level allocation after this attempt's first invocation. */
+        let taskCumulativeGuardUsd = priorTaskGuardUsd;
+        if (budgetPolicy !== undefined) {
+          const availableUsd = roundBudgetGuard(
+            budgetPolicy.maxCumulativeGuardUsd -
+              priorTaskGuardUsd -
+              budgetPolicy.overshootReserveUsd,
+          );
+          const allocatedUsd = roundBudgetGuard(
+            Math.min(budgetPolicy.baseGuardUsd, availableUsd),
+          );
+          if (allocatedUsd <= 0) {
+            emit({
+              type: "error",
+              phase: "ending",
+              message: "task budget envelope is exhausted",
+              detail:
+                `cumulative=${priorTaskGuardUsd}; ` +
+                `max=${budgetPolicy.maxCumulativeGuardUsd}`,
+            });
+            return {
+              sessionId,
+              exitCode: 1,
+              touchedPaths: [],
+              logTail:
+                "[claude] task budget envelope is exhausted before an " +
+                `invocation (cumulative=${priorTaskGuardUsd}, ` +
+                `max=${budgetPolicy.maxCumulativeGuardUsd})`,
+              failure: createFailureRecord({
+                stage: "policy",
+                code: "task_budget_exhausted",
+                text: "task budget exhausted",
+                messageDetail:
+                  "no remaining task cumulative guard for an invocation",
+              }),
+              ...(parsedTaskBudget
+                ? { taskBudget: { ...parsedTaskBudget } }
+                : {}),
+              cost: unavailableCostTruth({
+                sessionId,
+                guardBudgetUsd: taskCumulativeGuardUsd,
+                note: "task budget envelope exhausted before invocation",
+              }),
+            };
+          }
+          sessionGuardUsd = allocatedUsd;
+          taskCumulativeGuardUsd = roundBudgetGuard(
+            priorTaskGuardUsd + allocatedUsd,
+          );
         }
 
         const retryNotes: string[] = [];
@@ -292,11 +402,9 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
           cumulativeTimeoutMs: timeoutMs,
           records: [],
         };
-        let cumulativeGuardUsd = maxBudgetUsd;
         try {
           let res!: ClaudeRunResult;
           let parsed: ClaudeResult | undefined;
-          let continuationCount = 0;
           let launch: ClaudeSessionLaunch = {
             kind: "fresh",
             sessionId: randomUUID(),
@@ -329,7 +437,7 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
                     ? { onExtension: input.onExtension }
                     : {}),
                   extensionState,
-                  maxBudgetUsd: cumulativeGuardUsd,
+                  maxBudgetUsd: sessionGuardUsd,
                   heartbeatMs,
                   launch: invocationLaunch,
                   prompt,
@@ -386,11 +494,18 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
               await delay(waitMs);
             }
 
+            const nextSessionGuardUsd =
+              budgetPolicy === undefined
+                ? sessionGuardUsd
+                : roundBudgetGuard(
+                    sessionGuardUsd + budgetPolicy.continuationGuardUsd,
+                  );
+            /** Task-wide next guard; prior attempts never reset. */
             const nextCumulativeGuardUsd =
               budgetPolicy === undefined
-                ? cumulativeGuardUsd
+                ? taskCumulativeGuardUsd
                 : roundBudgetGuard(
-                    cumulativeGuardUsd + budgetPolicy.continuationGuardUsd,
+                    priorTaskGuardUsd + nextSessionGuardUsd,
                   );
             if (
               !canConsiderBudgetContinuation({
@@ -477,7 +592,8 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
 
             extensionState.records.push(continuation);
             continuationCount += 1;
-            cumulativeGuardUsd = nextCumulativeGuardUsd;
+            sessionGuardUsd = nextSessionGuardUsd;
+            taskCumulativeGuardUsd = nextCumulativeGuardUsd;
             retryNotes.push(
               `[claude] budget continuation ${continuationCount}/` +
                 `${policy.maxContinuations}; provider session resumed`,
@@ -554,9 +670,20 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
                   })),
                 }
               : {}),
+            ...(budgetPolicy !== undefined
+              ? {
+                  taskBudget: taskBudgetState({
+                    taskId: input.contract.taskId,
+                    cumulativeGuardUsd: taskCumulativeGuardUsd,
+                    continuationCount,
+                    maxCumulativeGuardUsd:
+                      budgetPolicy.maxCumulativeGuardUsd,
+                  }),
+                }
+              : {}),
             cost: createCostTruth({
               observations,
-              guardBudgetUsd: cumulativeGuardUsd,
+              guardBudgetUsd: sessionGuardUsd,
             }),
           };
         } catch (e) {
@@ -599,15 +726,26 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
                   })),
                 }
               : {}),
+            ...(budgetPolicy !== undefined
+              ? {
+                  taskBudget: taskBudgetState({
+                    taskId: input.contract.taskId,
+                    cumulativeGuardUsd: taskCumulativeGuardUsd,
+                    continuationCount,
+                    maxCumulativeGuardUsd:
+                      budgetPolicy.maxCumulativeGuardUsd,
+                  }),
+                }
+              : {}),
             cost:
               observations.length > 0
                 ? createCostTruth({
                     observations,
-                    guardBudgetUsd: cumulativeGuardUsd,
+                    guardBudgetUsd: sessionGuardUsd,
                   })
                 : unavailableCostTruth({
                     sessionId,
-                    guardBudgetUsd: cumulativeGuardUsd,
+                    guardBudgetUsd: sessionGuardUsd,
                     note: "worker failed to start",
                   }),
           };
@@ -749,6 +887,57 @@ function hasNonBudgetFailureSignal(text: string): boolean {
 
 function roundBudgetGuard(value: number): number {
   return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+function taskBudgetState(input: {
+  taskId: string;
+  cumulativeGuardUsd: number;
+  continuationCount: number;
+  maxCumulativeGuardUsd: number;
+}): TaskBudgetContinuationState {
+  return {
+    version: TASK_BUDGET_LEDGER_VERSION,
+    taskId: input.taskId,
+    cumulativeGuardUsd: input.cumulativeGuardUsd,
+    continuationCount: input.continuationCount,
+    maxCumulativeGuardUsd: input.maxCumulativeGuardUsd,
+  };
+}
+
+/**
+ * A supplied task ledger that is malformed or contradicts the configured
+ * policy fails closed before any provider process starts. The guard remains a
+ * local cap; the unavailable cost truth never claims a spend or balance.
+ */
+function taskBudgetStateFailure(input: {
+  sessionId: string;
+  emit: ProgressEmitter;
+  code: string;
+  detail: string;
+  guardBudgetUsd: number;
+}): AgentResult {
+  input.emit({
+    type: "error",
+    phase: "ending",
+    message: input.detail,
+  });
+  return {
+    sessionId: input.sessionId,
+    exitCode: 1,
+    touchedPaths: [],
+    logTail: `[claude] ${input.detail}`,
+    failure: createFailureRecord({
+      stage: "policy",
+      policyBlocked: true,
+      code: input.code,
+      messageDetail: input.detail,
+    }),
+    cost: unavailableCostTruth({
+      sessionId: input.sessionId,
+      guardBudgetUsd: input.guardBudgetUsd,
+      note: input.detail,
+    }),
+  };
 }
 
 function delay(ms: number): Promise<void> {

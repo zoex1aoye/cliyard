@@ -901,10 +901,14 @@ posixTest(
     assert.ok(unrelatedPid);
     assert.equal(inspector.isAlive(unrelatedPid), true);
 
+    const unrelatedIdentity = await inspector.capture(unrelatedPid);
+    assert.ok(unrelatedIdentity);
     let managedPid: number | undefined;
-    // Same pid and pgid as the real unrelated process, but a forged start
-    // identity: revalidation must refuse instead of trusting the snapshot.
+    // The sampler records the fresh pid under a forged start identity. A later
+    // table shows the pid reused as the same group leader with its real start
+    // identity, so cleanup must detect a changed identity and refuse.
     const forgedStart = "Mon Jan  1 00:00:00 2001";
+    let forgeMode: "forged" | "reused" = "forged";
     const forgedInspector: WorkerProcessTreeInspector = {
       get host() {
         return inspector.host;
@@ -925,7 +929,10 @@ posixTest(
           pid: unrelatedPid,
           ppid: managedPid,
           pgid: unrelatedPid,
-          startedAt: forgedStart,
+          startedAt:
+            forgeMode === "forged"
+              ? forgedStart
+              : unrelatedIdentity.startedAt,
         });
         withoutUnrelated.sort((first, second) => first.pid - second.pid);
         return withoutUnrelated;
@@ -936,7 +943,19 @@ posixTest(
     const pidFile = nextPidFile("reused");
     const managed = spawnLeader(tree, pidFile, { children: 0 });
     managedPid = managed.pid;
+    const observed: WorkerNestedProcesses[] = [];
+    const unsubscribe = managed.observeExternalDescendants!((snapshot) => {
+      observed.push(snapshot);
+    });
     try {
+      await waitFor(
+        () =>
+          observed.some((snapshot) =>
+            snapshot.groups?.some((group) => group.pgid === unrelatedPid),
+          ),
+        "forged external group observation",
+      );
+      forgeMode = "reused";
       const outcome = await managed.cleanup("timeout");
       const record = outcome.record;
       assert.equal(outcome.treeOk, false);
@@ -957,11 +976,100 @@ posixTest(
       assert.match(record.detail ?? "", /changed or was reused/);
       assert.equal(inspector.isAlive(unrelatedPid), true);
     } finally {
+      unsubscribe();
       try {
         process.kill(-unrelatedPid, "SIGKILL");
       } catch {
         // Already gone.
       }
+      try {
+        unrelated.kill("SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+  },
+);
+
+posixTest(
+  "treats a reused leader pid as clean when the persisted group is gone",
+  async () => {
+    // A normal (non-detached) child preserves the reused leader PID in the
+    // test runner's group. The forged observation records that pid as the old
+    // group leader; the old group then disappears from fresh snapshots. A
+    // persisted group with no remaining member must be treated as gone
+    // without signalling the reused pid.
+    const unrelated = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      { stdio: "ignore", windowsHide: true },
+    );
+    await once(unrelated, "spawn");
+    const unrelatedPid = unrelated.pid;
+    assert.ok(unrelatedPid);
+
+    let managedPid: number | undefined;
+    let forgeReused = true;
+    const reusedInspector: WorkerProcessTreeInspector = {
+      get host() {
+        return inspector.host;
+      },
+      get supported() {
+        return inspector.supported;
+      },
+      isAlive: (pid) => inspector.isAlive(pid),
+      capture: (pid) => inspector.capture(pid),
+      listGroupMembers: (pgid) => {
+        if (pgid === unrelatedPid) return Promise.resolve([]);
+        return inspector.listGroupMembers(pgid);
+      },
+      async snapshotProcessTable(options) {
+        const table = await inspector.snapshotProcessTable(options);
+        if (managedPid === undefined || !forgeReused) return table;
+        const withoutUnrelated = table.filter(
+          (entry) => entry.pid !== unrelatedPid,
+        );
+        withoutUnrelated.push({
+          pid: unrelatedPid,
+          ppid: managedPid,
+          pgid: unrelatedPid,
+          startedAt: "Mon Jan  1 00:00:00 2001",
+        });
+        withoutUnrelated.sort((first, second) => first.pid - second.pid);
+        return withoutUnrelated;
+      },
+    };
+
+    const tree = manager({ inspector: reusedInspector });
+    const pidFile = nextPidFile("reused-gone");
+    const managed = spawnLeader(tree, pidFile, { children: 0 });
+    managedPid = managed.pid;
+    const observed: WorkerNestedProcesses[] = [];
+    const unsubscribe = managed.observeExternalDescendants!((snapshot) => {
+      observed.push(snapshot);
+    });
+    try {
+      await waitFor(
+        () =>
+          observed.some((snapshot) =>
+            snapshot.groups?.some((group) => group.pgid === unrelatedPid),
+          ),
+        "reused external group observation",
+      );
+      forgeReused = false;
+      const outcome = await managed.cleanup("timeout");
+      const record = outcome.record;
+      assert.equal(outcome.treeOk, true);
+      assert.equal(record.cleanupState, "terminated");
+      assert.equal(record.cleanupCompleteness, "complete");
+      assert.equal(record.nestedCleanup?.state, "clean");
+      assert.ok((record.nestedCleanup?.observedGroups ?? 0) >= 1);
+      assert.equal(record.nestedCleanup?.signalledGroups, 0);
+      assert.equal(record.nestedCleanup?.residualGroups, 0);
+      assert.equal(record.residualCount, 0);
+      assert.equal(inspector.isAlive(unrelatedPid), true);
+    } finally {
+      unsubscribe();
       try {
         unrelated.kill("SIGKILL");
       } catch {
@@ -1151,6 +1259,436 @@ posixTest(
           // Already gone.
         }
       }
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Bounded process-table projection for high-fanout external groups
+// ---------------------------------------------------------------------------
+
+interface SyntheticExternalGroup {
+  pgid: number;
+  /** Members beyond the leader row. */
+  members: number;
+  startedAt: string;
+}
+
+/**
+ * Deterministic process table for batched external-group cleanup. Groups are
+ * synthetic pids; `withRecordedSignals` intercepts `process.kill`, so a test
+ * observes every signal without touching a real process.
+ */
+class TableGroupInspector implements WorkerProcessTreeInspector {
+  readonly host = "host-a";
+  readonly supported = true;
+  readonly leaderPid = 9_000_001;
+  readonly leaderStartedAt = "Mon Jan  1 00:00:00 2024";
+  readonly ownGroupId = 9_000_002;
+  readonly groups: SyntheticExternalGroup[];
+  /** Groups removed from the table when a signal is delivered. */
+  readonly terminated = new Set<number>();
+  /** Groups whose leader row disappears on signal while members stay. */
+  readonly hideLeaderOnSignal = new Set<number>();
+  /** Leader rows removed from the table while their members stay. */
+  readonly hiddenLeaders = new Set<number>();
+  snapshotCalls = 0;
+  captureCalls: number[] = [];
+  listCalls: number[] = [];
+  snapshotProcessTable: WorkerProcessTreeInspector["snapshotProcessTable"] =
+    async (): Promise<ProcessTableEntry[]> => {
+      this.snapshotCalls += 1;
+      return this.rows();
+    };
+
+  constructor(groups: SyntheticExternalGroup[]) {
+    this.groups = groups;
+  }
+
+  isAlive(): boolean {
+    return false;
+  }
+
+  async capture(
+    pid: number | undefined,
+  ): Promise<RuntimeProcessIdentity | undefined> {
+    if (pid !== undefined) this.captureCalls.push(pid);
+    if (pid === process.pid) {
+      return {
+        pid: process.pid,
+        pgid: this.ownGroupId,
+        startedAt: this.leaderStartedAt,
+      };
+    }
+    const row = this.rows().find((entry) => entry.pid === pid);
+    return row
+      ? { pid: row.pid, pgid: row.pgid, startedAt: row.startedAt }
+      : undefined;
+  }
+
+  async listGroupMembers(
+    pgid: number | undefined,
+  ): Promise<RuntimeProcessIdentity[]> {
+    if (pgid === undefined) return [];
+    this.listCalls.push(pgid);
+    // The managed worker group is empty; only nested groups are listed.
+    if (pgid === this.leaderPid) return [];
+    return this.rows()
+      .filter((entry) => entry.pgid === pgid)
+      .map((entry) => ({ ...entry }));
+  }
+
+  /** Simulate the effect of a delivered group signal. */
+  applySignal(pgid: number): void {
+    if (this.hideLeaderOnSignal.has(pgid)) {
+      this.hiddenLeaders.add(pgid);
+    } else {
+      this.terminated.add(pgid);
+    }
+  }
+
+  private rows(): ProcessTableEntry[] {
+    const rows: ProcessTableEntry[] = [
+      {
+        pid: this.leaderPid,
+        ppid: 1,
+        pgid: this.leaderPid,
+        startedAt: this.leaderStartedAt,
+      },
+    ];
+    for (const group of this.groups) {
+      if (this.terminated.has(group.pgid)) continue;
+      if (!this.hiddenLeaders.has(group.pgid)) {
+        rows.push({
+          pid: group.pgid,
+          ppid: this.leaderPid,
+          pgid: group.pgid,
+          startedAt: group.startedAt,
+        });
+      }
+      for (let index = 0; index < group.members; index += 1) {
+        rows.push({
+          pid: group.pgid + 1 + index,
+          ppid: group.pgid,
+          pgid: group.pgid,
+          startedAt: group.startedAt,
+        });
+      }
+    }
+    rows.sort((first, second) => first.pid - second.pid);
+    return rows;
+  }
+}
+
+/**
+ * Run `body` with `process.kill` intercepted. Negative-pgid signals are
+ * recorded and applied to the synthetic table; no OS signal is delivered.
+ */
+async function withRecordedSignals(
+  fake: TableGroupInspector,
+  body: () => Promise<void>,
+): Promise<Array<{ pid: number; signal: string }>> {
+  const originalKill = process.kill;
+  const signals: Array<{ pid: number; signal: string }> = [];
+  process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+    if (signal === undefined || signal === 0) {
+      return originalKill(pid, signal);
+    }
+    signals.push({ pid, signal: String(signal) });
+    if (pid < 0) fake.applySignal(-pid);
+    return true;
+  }) as typeof process.kill;
+  try {
+    await body();
+  } finally {
+    process.kill = originalKill;
+  }
+  return signals;
+}
+
+function fakeManagedChild(pid: number): ChildProcess {
+  return Object.assign(new EventEmitter(), {
+    pid,
+    exitCode: null,
+    signalCode: null,
+    kill() {
+      return true;
+    },
+  }) as unknown as ChildProcess;
+}
+
+const syntheticStartedAt = "Mon Jan  1 00:00:00 2024";
+
+test(
+  "high-fanout cleanup projects every external group from bounded snapshots",
+  async () => {
+    const groupCount = 40;
+    const groups: SyntheticExternalGroup[] = Array.from(
+      { length: groupCount },
+      (_, index) => ({
+        pgid: 9_100_000 + index * 10,
+        members: 3,
+        startedAt: syntheticStartedAt,
+      }),
+    );
+    const expectedPgids = groups.map((group) => group.pgid).sort((a, b) => a - b);
+    const fake = new TableGroupInspector(groups);
+    const tree = manager({
+      platform: "linux",
+      inspector: fake,
+      termGraceMs: 200,
+      killGraceMs: 200,
+      pollMs: 5,
+      descendantPollMs: 250,
+    });
+    const managed = tree.manage(fakeManagedChild(fake.leaderPid));
+    const snapshots: WorkerNestedProcesses[] = [];
+    const unsubscribe = managed.observeExternalDescendants!((snapshot) => {
+      snapshots.push(snapshot);
+    });
+    try {
+      await waitFor(
+        () =>
+          snapshots.some(
+            (snapshot) =>
+              snapshot.truncated && (snapshot.groups?.length ?? 0) === 16,
+          ),
+        "truncated 40-group observation",
+      );
+      let record: WorkerProcessRecord | undefined;
+      let treeOk = false;
+      const signals = await withRecordedSignals(fake, async () => {
+        const outcome = await managed.cleanup("timeout");
+        record = outcome.record;
+        treeOk = outcome.treeOk;
+      });
+      assert.ok(record);
+      assert.equal(treeOk, true);
+      assert.equal(record.cleanupState, "terminated");
+      assert.equal(record.cleanupCompleteness, "complete");
+      assert.equal(record.durableRecoveryCompleteness, "truncated");
+      assert.equal(record.nestedCleanup?.state, "terminated");
+      assert.equal(record.nestedCleanup?.observedGroups, groupCount);
+      assert.equal(record.nestedCleanup?.signalledGroups, groupCount);
+      assert.equal(record.nestedCleanup?.residualGroups, 0);
+      assert.equal(record.nestedCleanup?.residualDescendants, 0);
+      assert.equal(record.observedExternalGroups?.length, 16);
+      assert.deepEqual(parseWorkerProcessRecord(record), record);
+
+      // Grouped cleanup never launches one membership listing per group and
+      // never re-captures a group leader: the managed group is listed once and
+      // all external work comes from bounded table snapshots.
+      assert.deepEqual(fake.listCalls, [fake.leaderPid]);
+      assert.equal(
+        fake.captureCalls.some((pid) => expectedPgids.includes(pid)),
+        false,
+        "no per-group leader capture",
+      );
+      // Sampling ticks plus initial/wait phases stay a small constant even
+      // with 40 external groups.
+      assert.ok(fake.snapshotCalls <= 8, `snapshots=${fake.snapshotCalls}`);
+      assert.ok(fake.snapshotCalls >= 3);
+
+      // Only exact negative-pgid group signals were sent: no positive-pid and
+      // no SIGKILL/broad target was used.
+      assert.deepEqual(
+        signals.map((entry) => entry.signal),
+        Array.from({ length: groupCount }, () => "SIGTERM"),
+      );
+      assert.deepEqual(
+        signals.map((entry) => -entry.pid).sort((a, b) => a - b),
+        expectedPgids,
+      );
+      assert.ok(signals.every((entry) => entry.pid < 0));
+      assert.ok(
+        record.signals.every(
+          (signal) =>
+            signal.scope === "nested-process-group" &&
+            signal.result === "sent" &&
+            expectedPgids.includes(signal.pgid as number),
+        ),
+      );
+    } finally {
+      unsubscribe();
+    }
+  },
+);
+
+test(
+  "fails closed when a group leader disappears before batched cleanup",
+  async () => {
+    const cleanGroup: SyntheticExternalGroup = {
+      pgid: 9_100_010,
+      members: 2,
+      startedAt: syntheticStartedAt,
+    };
+    const vanishedGroup: SyntheticExternalGroup = {
+      pgid: 9_100_000,
+      members: 2,
+      startedAt: syntheticStartedAt,
+    };
+    const fake = new TableGroupInspector([vanishedGroup, cleanGroup]);
+    const tree = manager({
+      platform: "linux",
+      inspector: fake,
+      termGraceMs: 100,
+      killGraceMs: 100,
+      pollMs: 5,
+    });
+    const managed = tree.manage(fakeManagedChild(fake.leaderPid));
+    const snapshots: WorkerNestedProcesses[] = [];
+    const unsubscribe = managed.observeExternalDescendants!((snapshot) => {
+      snapshots.push(snapshot);
+    });
+    try {
+      await waitFor(
+        () => snapshots.some((snapshot) => (snapshot.groups?.length ?? 0) === 2),
+        "two-group observation",
+      );
+      // The leader row disappears while its members remain: the group still
+      // has processes but no exact identity may authorize a group signal.
+      fake.hiddenLeaders.add(vanishedGroup.pgid);
+      let record: WorkerProcessRecord | undefined;
+      const signals = await withRecordedSignals(fake, async () => {
+        record = (await managed.cleanup("timeout")).record;
+      });
+      assert.ok(record);
+      assert.equal(record.cleanupState, "failed");
+      assert.equal(record.nestedCleanup?.state, "failed");
+      assert.equal(record.nestedCleanup?.observedGroups, 2);
+      assert.equal(record.nestedCleanup?.signalledGroups, 1);
+      assert.equal(record.nestedCleanup?.residualGroups, 1);
+      assert.match(record.detail ?? "", /leader is absent while 2 member/);
+      assert.deepEqual(parseWorkerProcessRecord(record), record);
+      // The intact group was cleaned; the leaderless group was never signalled.
+      assert.deepEqual(
+        signals.map((entry) => ({ pid: entry.pid, signal: entry.signal })),
+        [{ pid: -cleanGroup.pgid, signal: "SIGTERM" }],
+      );
+      assert.equal(
+        record.signals.some(
+          (signal) =>
+            signal.scope === "nested-process-group" &&
+            signal.pgid === vanishedGroup.pgid,
+        ),
+        false,
+      );
+      assert.deepEqual(fake.listCalls, [fake.leaderPid]);
+    } finally {
+      unsubscribe();
+    }
+  },
+);
+
+test(
+  "refuses SIGKILL when a leader disappears between SIGTERM and escalation",
+  async () => {
+    const group: SyntheticExternalGroup = {
+      pgid: 9_100_000,
+      members: 2,
+      startedAt: syntheticStartedAt,
+    };
+    const fake = new TableGroupInspector([group]);
+    fake.hideLeaderOnSignal.add(group.pgid);
+    const tree = manager({
+      platform: "linux",
+      inspector: fake,
+      termGraceMs: 80,
+      killGraceMs: 100,
+      pollMs: 5,
+    });
+    const managed = tree.manage(fakeManagedChild(fake.leaderPid));
+    const snapshots: WorkerNestedProcesses[] = [];
+    const unsubscribe = managed.observeExternalDescendants!((snapshot) => {
+      snapshots.push(snapshot);
+    });
+    try {
+      await waitFor(
+        () => snapshots.some((snapshot) => (snapshot.groups?.length ?? 0) === 1),
+        "one-group observation",
+      );
+      let record: WorkerProcessRecord | undefined;
+      const signals = await withRecordedSignals(fake, async () => {
+        record = (await managed.cleanup("timeout")).record;
+      });
+      assert.ok(record);
+      assert.equal(record.cleanupState, "failed");
+      assert.equal(record.nestedCleanup?.state, "failed");
+      assert.equal(record.nestedCleanup?.signalledGroups, 1);
+      assert.equal(record.nestedCleanup?.residualGroups, 1);
+      assert.match(record.detail ?? "", /refusing SIGKILL/);
+      assert.deepEqual(parseWorkerProcessRecord(record), record);
+      // The leader disappeared while its members survived: TERM was already
+      // delivered, but no identity may authorize escalation.
+      assert.deepEqual(
+        signals.map((entry) => ({ pid: entry.pid, signal: entry.signal })),
+        [{ pid: -group.pgid, signal: "SIGTERM" }],
+      );
+      assert.equal(fake.hiddenLeaders.has(group.pgid), true);
+      assert.deepEqual(fake.listCalls, [fake.leaderPid]);
+    } finally {
+      unsubscribe();
+    }
+  },
+);
+
+test(
+  "keeps the legacy per-group inspector fallback when snapshots are unavailable",
+  async () => {
+    const groups: SyntheticExternalGroup[] = [
+      { pgid: 9_100_000, members: 2, startedAt: syntheticStartedAt },
+      { pgid: 9_100_010, members: 2, startedAt: syntheticStartedAt },
+    ];
+    const fake = new TableGroupInspector(groups);
+    const tree = manager({
+      platform: "linux",
+      inspector: fake,
+      termGraceMs: 100,
+      killGraceMs: 100,
+      pollMs: 5,
+    });
+    const managed = tree.manage(fakeManagedChild(fake.leaderPid));
+    const snapshots: WorkerNestedProcesses[] = [];
+    const unsubscribe = managed.observeExternalDescendants!((snapshot) => {
+      snapshots.push(snapshot);
+    });
+    try {
+      await waitFor(
+        () => snapshots.some((snapshot) => (snapshot.groups?.length ?? 0) === 2),
+        "legacy fallback observation",
+      );
+      // Observation used a snapshot; cleanup must fall back to exact per-group
+      // capture plus membership listings when no snapshot source remains.
+      fake.snapshotProcessTable = undefined;
+      const beforeSnapshotCalls = fake.snapshotCalls;
+      let record: WorkerProcessRecord | undefined;
+      const signals = await withRecordedSignals(fake, async () => {
+        record = (await managed.cleanup("timeout")).record;
+      });
+      assert.ok(record);
+      assert.equal(record.cleanupState, "terminated");
+      assert.equal(record.nestedCleanup?.state, "terminated");
+      assert.equal(record.nestedCleanup?.observedGroups, 2);
+      assert.equal(record.nestedCleanup?.signalledGroups, 2);
+      assert.equal(record.nestedCleanup?.residualGroups, 0);
+      assert.equal(fake.snapshotCalls, beforeSnapshotCalls);
+      for (const group of groups) {
+        assert.ok(
+          fake.listCalls.includes(group.pgid),
+          `legacy listing for ${group.pgid}`,
+        );
+        assert.ok(
+          fake.captureCalls.includes(group.pgid),
+          `legacy exact capture for ${group.pgid}`,
+        );
+      }
+      assert.deepEqual(
+        signals.map((entry) => -entry.pid).sort((a, b) => a - b),
+        groups.map((group) => group.pgid),
+      );
+      assert.ok(signals.every((entry) => entry.signal === "SIGTERM"));
+    } finally {
+      unsubscribe();
     }
   },
 );
