@@ -1,0 +1,90 @@
+{
+  "planId": "statestore-v0",
+  "tasks": [
+    {
+      "taskId": "statestore-core",
+      "goal": "Implement a deterministic SQLite event-sourced StateStore core under a new src/statestore/ module, behind a minimal StateStoreDriver interface whose default implementation uses better-sqlite3 (synchronous, file-backed, WAL). Do not depend on node:sqlite (unavailable on Node 20). Store an append-only facts log and a projection in one transaction with optimistic concurrency (sequence conflict detection) and rebuild-from-log on format change; inject clock and randomness at the call boundary so the kernel stays deterministic. Model rows with stable runtime-handle identity (attempt id, backend type, runtime handle, desired/observed state) with PID/PGID diagnostic only. Keep large evidence out of the facts log (content-addressed files). Add unit tests for append, projection, conflict, rebuild, deterministic replay, bounded identity validation and driver swapability. Do not migrate or consume any existing JSON store yet and do not add a daemon or HTTP server.",
+      "nonGoals": [
+        "Do not change supervisor, queue or ledger write paths.",
+        "Do not add a daemon or HTTP Control API.",
+        "Do not require Node above 20.",
+        "Do not call node:sqlite or any Node-22-only API."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/ROADMAP.md",
+        "docs/CURRENT_STATE.md",
+        "design/delivery-control-plane-v2.md",
+        "design/statestore-v0.md",
+        "src/supervisor/types.ts",
+        "src/orchestration/control-snapshot.ts",
+        "src/orchestration/event-journal.ts"
+      ],
+      "writePaths": [
+        "src/statestore/schema.ts",
+        "src/statestore/store.ts",
+        "src/statestore/projection.ts",
+        "tests/statestore.test.ts"
+      ],
+      "verifyCommands": [
+        "npx tsx --test tests/statestore.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "A tested SQLite event-sourced StateStore core.",
+        "Deterministic replay and conflict detection.",
+        "Bounded runtime-handle identity validation."
+      ],
+      "forbidden": [
+        "Do not write to or read from ledger.json, queue.json or runs/*.json.",
+        "Do not store large evidence payloads in the facts log.",
+        "Do not read system clock or random values inside the kernel."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "statestore-read",
+      "goal": "Add a read-only projection that seeds from the existing JSON truth on startup and exposes status --json and events subcommands backed by the StateStore projection. Verify against the existing control-snapshot output by semantic equivalence: canonicalized deep-equal with an explicit float tolerance, with byte-identical comparison available only as an optional diagnostic, never the acceptance gate. Seed queue, run manifest, ledger and event-journal data into the store read path without changing any write path. Add tests proving the projection is semantically equivalent to the current control snapshot for a fixture repo and that a fresh process rebuilds the same view. Do not add a daemon or HTTP server and do not change supervisor/queue/ledger writes.",
+      "nonGoals": [
+        "Do not migrate JSON write paths to SQLite.",
+        "Do not add an HTTP endpoint or authentication.",
+        "Do not alter existing control-snapshot semantics."
+      ],
+      "dependsOn": [
+        "statestore-core"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/ROADMAP.md",
+        "docs/CURRENT_STATE.md",
+        "design/statestore-v0.md",
+        "src/cli.ts",
+        "src/orchestration/control-snapshot.ts",
+        "src/orchestration/event-journal.ts",
+        "src/supervisor/store.ts",
+        "src/persistence/ledger.ts"
+      ],
+      "writePaths": [
+        "src/statestore/read.ts",
+        "src/cli.ts",
+        "tests/statestore-read.test.ts"
+      ],
+      "verifyCommands": [
+        "npx tsx --test tests/statestore.test.ts tests/statestore-read.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "Read-only status/events projection seeded from JSON truth.",
+        "Parity verification against the existing control snapshot.",
+        "Fresh-process rebuild test."
+      ],
+      "forbidden": [
+        "Do not make the JSON stores the write authority twice.",
+        "Do not require Node above 20.",
+        "Do not claim write-path migration is complete."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
