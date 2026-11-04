@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import {
   existsSync,
@@ -12,7 +12,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { hostname, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { StateStoreLegacyDriftError } from "../src/statestore/write.js";
 import {
   acquireSupervisorLock,
   assertContractsHash,
@@ -26,6 +28,7 @@ import {
   getActiveRunId,
   inspectRun,
   inspectSupervisorLock,
+  inspectSupervisorStateStore,
   loadRunManifest,
   markRunInterrupted,
   NoActiveRunError,
@@ -34,6 +37,7 @@ import {
   saveRunManifest,
   setActiveRun,
   supervisorPaths,
+  supervisorStatePaths,
   SupervisorLockHeldError,
   updateRunManifest,
   withSupervisorLock,
@@ -480,3 +484,247 @@ async function assertConcurrentReaderSeesCompleteManifests(
     if (child.exitCode === null && !child.killed) child.kill();
   }
 }
+
+// ---------------------------------------------------------------------------
+// StateStore cutover: one-time import, fresh-process rebuild, drift
+// ---------------------------------------------------------------------------
+
+const STORE_MODULE_URL = pathToFileURL(
+  resolve(dirname(fileURLToPath(import.meta.url)), "../src/supervisor/store.ts"),
+).href;
+
+const FRESH_PROCESS_SOURCE = `
+const { loadRunManifest, getActiveRunId, inspectSupervisorStateStore } =
+  await import(process.argv[2]);
+const [repo, runId] = process.argv.slice(3);
+try {
+  const manifest = loadRunManifest(repo, runId);
+  const inspection = inspectSupervisorStateStore(repo);
+  process.stdout.write(
+    "RESULT:" +
+      JSON.stringify({
+        manifest,
+        activeRunId: getActiveRunId(repo),
+        backend: inspection?.backend,
+        storedRunIds: inspection?.runs.map((run) => run.runId) ?? [],
+      }) +
+      "\\n",
+  );
+} catch (error) {
+  console.error(error?.stack ?? String(error));
+  process.exit(1);
+}
+`;
+
+interface FreshProcessState {
+  manifest: ReturnType<typeof loadRunManifest>;
+  activeRunId: string | undefined;
+  backend: string | undefined;
+  storedRunIds: string[];
+}
+
+function readFreshProcessState(
+  repo: string,
+  runId: string,
+): FreshProcessState {
+  const probeDir = mkdtempSync(join(tmpdir(), "cliyard-fresh-probe-"));
+  const scriptPath = join(probeDir, "probe.mjs");
+  writeFileSync(scriptPath, FRESH_PROCESS_SOURCE, "utf8");
+  try {
+    const child = spawnSync(
+      process.execPath,
+      ["--import", "tsx", scriptPath, STORE_MODULE_URL, repo, runId],
+      {
+        cwd: resolve(dirname(fileURLToPath(import.meta.url)), ".."),
+        encoding: "utf8",
+      },
+    );
+    assert.equal(child.status, 0, child.stderr);
+    const line = child.stdout
+      .split("\n")
+      .find((entry) => entry.startsWith("RESULT:"));
+    assert.ok(line, `child produced no result: ${child.stdout}`);
+    return JSON.parse(line.slice("RESULT:".length)) as FreshProcessState;
+  } finally {
+    rmSync(probeDir, { recursive: true, force: true });
+  }
+}
+
+test("first write imports legacy runs once and verifies the import hash", async () => {
+  await withTempRepo((repo) => {
+    const contractsPath = writeContracts(repo);
+    const manifest = createRunManifest(
+      repo,
+      baseInput(contractsPath, { runId: "legacy-run" }),
+    );
+    updateRunManifest(repo, manifest.runId, (current) => {
+      current.tasks["task-a"]!.status = "accepted";
+      current.tasks["task-a"]!.accepted = true;
+      current.tasks["task-a"]!.resultCommit = RESULT_COMMIT;
+      current.integrationHead = RESULT_COMMIT;
+    });
+
+    // Drop the StateStore to simulate a repository written before the cutover.
+    rmSync(supervisorStatePaths(repo).stateDir, {
+      recursive: true,
+      force: true,
+    });
+    assert.equal(inspectSupervisorStateStore(repo), undefined);
+    const legacy = loadRunManifest(repo, manifest.runId);
+    assert.equal(legacy.tasks["task-a"]!.accepted, true);
+
+    const updated = updateRunManifest(repo, manifest.runId, (current) => {
+      current.tasks["task-b"]!.status = "running";
+    });
+
+    const inspection = inspectSupervisorStateStore(repo);
+    assert.ok(inspection, "the first write must create the StateStore");
+    assert.ok(inspection.migration, "the import marker must be recorded");
+    assert.equal(inspection.migration.importedRuns, 1);
+    assert.match(inspection.migration.importHash, /^[0-9a-f]{64}$/);
+    assert.match(inspection.migration.sourceHash, /^[0-9a-f]{64}$/);
+    assert.match(inspection.migration.contentHash, /^[0-9a-f]{64}$/);
+    assert.ok(!Number.isNaN(Date.parse(inspection.migration.importedAt)));
+    assert.deepEqual(inspection.runs, [updated]);
+    assert.equal(inspection.activeRun?.runId, manifest.runId);
+
+    // The import is one-time: later checkpoints must not re-import.
+    const second = updateRunManifest(repo, manifest.runId, (current) => {
+      current.status = "completed";
+    });
+    const again = inspectSupervisorStateStore(repo);
+    assert.ok(again?.migration);
+    assert.equal(again.migration.importedAt, inspection.migration.importedAt);
+    assert.equal(again.migration.importHash, inspection.migration.importHash);
+    assert.deepEqual(again.runs, [second]);
+  });
+});
+
+test("a fresh process rebuilds the same run state without JSON exports", async () => {
+  await withTempRepo((repo) => {
+    const contractsPath = writeContracts(repo);
+    const manifest = createRunManifest(
+      repo,
+      baseInput(contractsPath, { runId: "fresh-run" }),
+    );
+    const saved = updateRunManifest(repo, manifest.runId, (current) => {
+      current.tasks["task-a"]!.status = "accepted";
+      current.tasks["task-a"]!.accepted = true;
+      current.tasks["task-a"]!.resultCommit = RESULT_COMMIT;
+      current.tasks["task-b"]!.status = "running";
+      current.integrationHead = RESULT_COMMIT;
+      current.status = "completed";
+    });
+
+    // Legacy JSON is only an export: deleting it must lose no authority.
+    rmSync(supervisorPaths(repo).runsDir, { recursive: true, force: true });
+    assert.equal(existsSync(runManifestPath(repo, manifest.runId)), false);
+    assert.equal(existsSync(supervisorPaths(repo).activePath), false);
+
+    // Identity is owned by the store, so a deleted export cannot be reused
+    // to create a second run with the same id.
+    assert.throws(
+      () =>
+        createRunManifest(
+          repo,
+          baseInput(contractsPath, { runId: manifest.runId }),
+        ),
+      /already exists/,
+    );
+
+    const rebuilt = readFreshProcessState(repo, manifest.runId);
+    assert.deepEqual(rebuilt.manifest, saved);
+    assert.equal(rebuilt.manifest.status, "completed");
+    assert.equal(rebuilt.manifest.tasks["task-a"]!.accepted, true);
+    assert.equal(rebuilt.manifest.tasks["task-a"]!.resultCommit, RESULT_COMMIT);
+    assert.equal(rebuilt.activeRunId, manifest.runId);
+    assert.deepEqual(rebuilt.storedRunIds, [manifest.runId]);
+    assert.ok(rebuilt.backend, "the child must report the store backend");
+
+    // A missing export is a recoverable projection, not drift: the next
+    // checkpoint rebuilds it from the StateStore record.
+    const recovered = updateRunManifest(repo, manifest.runId, (current) => {
+      current.tasks["task-b"]!.reason = "rebuilt export";
+    });
+    assert.ok(existsSync(runManifestPath(repo, manifest.runId)));
+    assert.equal(
+      loadRunManifest(repo, manifest.runId).tasks["task-b"]!.reason,
+      "rebuilt export",
+    );
+    assert.deepEqual(inspectSupervisorStateStore(repo)?.runs, [recovered]);
+  });
+});
+
+test("legacy JSON drift fails closed, keeps facts, and recovers", async () => {
+  await withTempRepo((repo) => {
+    const contractsPath = writeContracts(repo);
+    const manifest = createRunManifest(
+      repo,
+      baseInput(contractsPath, { runId: "drift-run" }),
+    );
+    const path = runManifestPath(repo, manifest.runId);
+    const original = readFileSync(path, "utf8");
+    const before = inspectSupervisorStateStore(repo);
+    assert.ok(before);
+
+    const tampered = JSON.parse(original) as ReturnType<
+      typeof loadRunManifest
+    >;
+    tampered.status = "completed";
+    tampered.tasks["task-a"]!.status = "accepted";
+    tampered.tasks["task-a"]!.accepted = true;
+    tampered.tasks["task-a"]!.resultCommit = RESULT_COMMIT;
+    const tamperedBytes = JSON.stringify(tampered, null, 2) + "\n";
+    writeFileSync(path, tamperedBytes, "utf8");
+
+    assert.throws(
+      () =>
+        updateRunManifest(repo, manifest.runId, (current) => {
+          current.status = "blocked";
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof StateStoreLegacyDriftError);
+        assert.equal(error.code, "statestore.write.legacy_drift");
+        assert.equal(error.needsHuman, true);
+        assert.match(error.message, /supervisor export drift/);
+        assert.match(error.message, /needs human/);
+        return true;
+      },
+    );
+
+    // No fact is appended and the drifted export is not silently overwritten.
+    const after = inspectSupervisorStateStore(repo);
+    assert.ok(after);
+    assert.deepEqual(after.runs, before.runs);
+    assert.deepEqual(after.activeRun, before.activeRun);
+    assert.equal(readFileSync(path, "utf8"), tamperedBytes);
+
+    // A foreign run export is equally fatal: it has no StateStore record.
+    writeFileSync(path, original, "utf8");
+    const ghost = JSON.parse(original) as ReturnType<typeof loadRunManifest>;
+    ghost.runId = "ghost-run";
+    ghost.updatedAt = new Date().toISOString();
+    writeFileSync(
+      runManifestPath(repo, ghost.runId),
+      JSON.stringify(ghost, null, 2) + "\n",
+      "utf8",
+    );
+    assert.throws(
+      () =>
+        updateRunManifest(repo, manifest.runId, (current) => {
+          current.status = "blocked";
+        }),
+      (error: unknown) =>
+        error instanceof StateStoreLegacyDriftError &&
+        /ghost-run/.test(error.message),
+    );
+
+    // Restoring the export (or removing a foreign one) unblocks writes.
+    rmSync(runManifestPath(repo, ghost.runId), { force: true });
+    const recovered = updateRunManifest(repo, manifest.runId, (current) => {
+      current.status = "blocked";
+    });
+    assert.equal(recovered.status, "blocked");
+    assert.deepEqual(inspectSupervisorStateStore(repo)?.runs, [recovered]);
+  });
+});
