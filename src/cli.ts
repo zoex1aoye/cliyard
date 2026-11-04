@@ -16,6 +16,7 @@ import { runArchitectCli } from "./architect/cli.js";
 import { runRuntimeDrillCli } from "./runtime/failure-drills.js";
 import { runSupervisorCli } from "./supervisor/cli.js";
 import { runQueueCli } from "./orchestration/cli.js";
+import { runStateStoreCli } from "./statestore/read.js";
 import type { PermissionIntent, WorkerId } from "./types.js";
 
 function usage(): never {
@@ -60,6 +61,8 @@ Usage:
   cliyard queue cancel <queue-id> --repo <path> [--json]
   cliyard queue run --repo <path> [--continue-on-blocked]
                     [--max-dispatches n] [--json]
+  cliyard statestore status --repo <path> [--json] [--journal-limit n]
+  cliyard statestore events --repo <path> [--json] [--journal-limit n]
 
 Master (DeepSeek Harness plugin / local demo):
   npm run master-monitor
@@ -184,6 +187,12 @@ async function main(): Promise<void> {
   if (cmd === "queue") {
     // Let Node exit naturally so stdout is flushed before the process ends.
     process.exitCode = await runQueueCli(argv.slice(1));
+    return;
+  }
+
+  if (cmd === "statestore") {
+    // Read-only JSON projection; no daemon and no write path.
+    process.exitCode = await runStateStoreCli(argv.slice(1));
     return;
   }
 
