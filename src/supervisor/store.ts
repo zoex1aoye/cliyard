@@ -20,6 +20,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -58,11 +59,59 @@ import {
   type WorkspaceBoundaryRecord,
 } from "./types.js";
 import { normalizeEvidencePath } from "../agents/workspace-boundary.js";
+import {
+  FileEvidenceStore,
+  META_PROJECTION_FORMAT,
+  META_PROJECTION_SEQ,
+  StateStore,
+  StateStoreClosedError,
+  StateStoreCorruptionError,
+  StateStoreDriverUnavailableError,
+  createBetterSqlite3Driver,
+  type AttemptRow,
+  type EvidenceRow,
+  type PersistedFact,
+  type StateStoreDriver,
+  type StateStoreTransaction,
+} from "../statestore/store.js";
+import {
+  findCoveringMarker,
+  migrateLegacyJson,
+} from "../statestore/migrate.js";
+import {
+  StateStoreDomainWriter,
+  StateStoreLegacyDriftError,
+  canonicalStateStoreJson,
+  projectStateStoreDomainRecords,
+  readStateStoreDomainRecords,
+  sha256Hex,
+  type StateStoreLegacyGuard,
+} from "../statestore/write.js";
 
 export const SUPERVISOR_DIR = ".cliyard";
 export const RUNS_DIR = "runs";
 export const ACTIVE_RUN_FILE = "active.json";
 export const SUPERVISOR_LOCK_FILE = "supervisor.lock";
+/**
+ * The StateStore lives under the control-plane runtime root because the
+ * WorkspaceBoundary excludes `.cliyard/runtime/` while a worker wave runs.
+ * Supervisor checkpoints are control-plane writes, not authority-checkout
+ * changes; keeping them outside the compared tree is what lets a checkpoint
+ * land mid-wave without being reported as a boundary violation. The reaper
+ * only scans `<runtime>/<id>/runtime-manifest.json` directories, so this
+ * sibling is ignored by runtime reconciliation.
+ */
+export const STATE_DIR = "runtime/statestore";
+export const STATE_SQLITE_FILE = "state.sqlite";
+export const STATE_FACTS_FILE = "facts.json";
+export const STATE_EVIDENCE_DIR = "evidence";
+
+/**
+ * Reserved active-pointer id stored in the append-only log when the active
+ * run is cleared. It is not a legal run id (the colon is not allowed), so it
+ * can never collide with a real run and is never written to `active.json`.
+ */
+export const CLEARED_ACTIVE_RUN_ID = "state:cleared";
 
 const RUN_STATUSES: readonly RunStatus[] = [
   "running",
@@ -97,6 +146,33 @@ export function supervisorPaths(repoRoot: string): SupervisorPaths {
 export function runManifestPath(repoRoot: string, runId: string): string {
   assertSafeRunId(runId);
   return join(supervisorPaths(repoRoot).runsDir, `${runId}.json`);
+}
+
+export interface SupervisorStatePaths {
+  repoRoot: string;
+  stateDir: string;
+  /** SQLite authority when `better-sqlite3` is installed. */
+  sqlitePath: string;
+  /** Durable single-process fallback when the native driver is absent. */
+  factsPath: string;
+  evidenceDir: string;
+}
+
+/**
+ * StateStore location for the supervisor run domain. The legacy
+ * `.cliyard/runs/*.json` files stay in place as the read-only JSON export;
+ * the append-only state log is the write authority.
+ */
+export function supervisorStatePaths(repoRoot: string): SupervisorStatePaths {
+  const root = resolve(repoRoot);
+  const stateDir = join(root, SUPERVISOR_DIR, STATE_DIR);
+  return {
+    repoRoot: root,
+    stateDir,
+    sqlitePath: join(stateDir, STATE_SQLITE_FILE),
+    factsPath: join(stateDir, STATE_FACTS_FILE),
+    evidenceDir: join(stateDir, STATE_EVIDENCE_DIR),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +234,715 @@ export class SupervisorLockHeldError extends SupervisorStoreError {
 }
 
 // ---------------------------------------------------------------------------
+// StateStore authority and read-only JSON export
+// ---------------------------------------------------------------------------
+
+/**
+ * Migration imports the parsed legacy truth by calling the public loaders in
+ * this module. Those loaders must read the legacy files directly while the
+ * import is in flight; opening the store there would recurse into migration.
+ * The bypass is synchronous because every store operation is synchronous.
+ */
+let legacyReadBypassDepth = 0;
+
+function withLegacyReadBypass<T>(fn: () => T): T {
+  legacyReadBypassDepth += 1;
+  try {
+    return fn();
+  } finally {
+    legacyReadBypassDepth -= 1;
+  }
+}
+
+function isLegacyReadBypass(): boolean {
+  return legacyReadBypassDepth > 0;
+}
+
+function supervisorStateExists(repoRoot: string): boolean {
+  const paths = supervisorStatePaths(repoRoot);
+  return existsSync(paths.sqlitePath) || existsSync(paths.factsPath);
+}
+
+interface SupervisorStateContext {
+  root: string;
+  paths: SupervisorStatePaths;
+  backend: string;
+  store: StateStore;
+  evidence: FileEvidenceStore;
+  writer: StateStoreDomainWriter;
+}
+
+/**
+ * Durable single-process driver used when the optional `better-sqlite3`
+ * native module is unavailable. It preserves the StateStore contract the
+ * supervisor relies on (append-only facts, contiguous sequence, atomic
+ * commit) in one atomically replaced JSON file. It does not add cross-process
+ * writer locking; SQLite transactions remain the only multi-process claim.
+ */
+class JsonFileStateStoreDriver implements StateStoreDriver {
+  readonly kind = "json-file";
+
+  private readonly facts = new Map<number, PersistedFact>();
+  private readonly eventIds = new Set<string>();
+  private readonly meta = new Map<string, string>();
+  private readonly attempts = new Map<string, AttemptRow>();
+  private readonly evidence = new Map<string, EvidenceRow>();
+  private last = 0;
+  private initialized = false;
+  private inTransaction = false;
+  private dirty = false;
+  private closed = false;
+
+  constructor(private readonly filePath: string) {}
+
+  initialize(): void {
+    this.assertOpen();
+    if (this.initialized) return;
+    this.initialized = true;
+
+    let raw: string;
+    try {
+      raw = readFileSync(this.filePath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw new StateStoreCorruptionError(
+        `cannot read StateStore facts ${this.filePath}: ${errorMessage(error)}`,
+      );
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw) as unknown;
+    } catch (error) {
+      throw new StateStoreCorruptionError(
+        `invalid JSON in StateStore facts ${this.filePath}: ` +
+          errorMessage(error),
+      );
+    }
+    if (
+      !isRecord(parsed) ||
+      parsed.version !== 1 ||
+      !Array.isArray(parsed.facts)
+    ) {
+      throw new StateStoreCorruptionError(
+        `StateStore facts ${this.filePath} must be { version: 1, facts: [] }`,
+      );
+    }
+
+    if (parsed.meta !== undefined) {
+      if (!isRecord(parsed.meta)) {
+        throw new StateStoreCorruptionError(
+          `StateStore facts ${this.filePath} contain invalid metadata`,
+        );
+      }
+      for (const [key, value] of Object.entries(parsed.meta)) {
+        if (typeof value !== "string") {
+          throw new StateStoreCorruptionError(
+            `StateStore facts ${this.filePath} contain invalid metadata ` +
+              `for ${key}`,
+          );
+        }
+        this.meta.set(key, value);
+      }
+    }
+
+    for (const candidate of parsed.facts) {
+      if (
+        !isRecord(candidate) ||
+        !Number.isSafeInteger(candidate.seq) ||
+        (candidate.seq as number) < 1 ||
+        typeof candidate.eventId !== "string" ||
+        candidate.eventId.length === 0 ||
+        typeof candidate.at !== "string" ||
+        typeof candidate.kind !== "string" ||
+        typeof candidate.attemptId !== "string" ||
+        !("payload" in candidate)
+      ) {
+        throw new StateStoreCorruptionError(
+          `StateStore facts ${this.filePath} contain an invalid record`,
+        );
+      }
+      const fact = candidate as unknown as PersistedFact;
+      if (this.facts.has(fact.seq)) {
+        throw new StateStoreCorruptionError(
+          `StateStore facts ${this.filePath} contain duplicate sequence ` +
+            `${fact.seq}`,
+          fact.seq,
+        );
+      }
+      if (this.eventIds.has(fact.eventId)) {
+        throw new StateStoreCorruptionError(
+          `StateStore facts ${this.filePath} contain duplicate event id ` +
+            `${fact.eventId}`,
+          fact.seq,
+        );
+      }
+      this.facts.set(fact.seq, { ...fact });
+      this.eventIds.add(fact.eventId);
+      if (fact.seq > this.last) this.last = fact.seq;
+    }
+    for (let seq = 1; seq <= this.last; seq += 1) {
+      if (!this.facts.has(seq)) {
+        throw new StateStoreCorruptionError(
+          `StateStore facts ${this.filePath} are not contiguous at sequence ` +
+            `${seq}`,
+          seq,
+        );
+      }
+    }
+  }
+
+  transaction<T>(work: (tx: StateStoreTransaction) => T): T {
+    this.assertOpen();
+    if (!this.initialized) {
+      throw new StateStoreCorruptionError(
+        "StateStoreDriver.initialize() must run before transaction()",
+      );
+    }
+    if (this.inTransaction) {
+      throw new StateStoreCorruptionError(
+        "StateStore driver transactions cannot nest",
+      );
+    }
+    const snapshot = this.capture();
+    this.inTransaction = true;
+    this.dirty = false;
+    try {
+      const result = work(this.transactionApi);
+      if (this.dirty) this.persist();
+      return result;
+    } catch (error) {
+      this.restore(snapshot);
+      throw error;
+    } finally {
+      this.inTransaction = false;
+      this.dirty = false;
+    }
+  }
+
+  close(): void {
+    this.closed = true;
+  }
+
+  private readonly transactionApi: StateStoreTransaction = {
+    getMeta: (key) => {
+      this.assertOpen();
+      return this.meta.get(key);
+    },
+    setMeta: (key, value) => {
+      this.assertOpen();
+      this.meta.set(key, value);
+    },
+    deleteMeta: (key) => {
+      this.assertOpen();
+      this.meta.delete(key);
+    },
+    lastSeq: () => {
+      this.assertOpen();
+      return this.last;
+    },
+    readFacts: (afterSeq, limit) => {
+      this.assertOpen();
+      if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) {
+        throw new StateStoreCorruptionError(
+          "afterSeq must be a non-negative safe integer",
+        );
+      }
+      if (!Number.isSafeInteger(limit) || limit < 1) {
+        throw new StateStoreCorruptionError(
+          "limit must be a positive safe integer",
+        );
+      }
+      return [...this.facts.values()]
+        .filter((fact) => fact.seq > afterSeq)
+        .sort((left, right) => left.seq - right.seq)
+        .slice(0, limit)
+        .map((fact) => ({ ...fact }));
+    },
+    appendFact: (fact) => {
+      this.assertOpen();
+      if (fact.seq !== this.last + 1) {
+        throw new StateStoreCorruptionError(
+          `StateStore fact sequence ${fact.seq} is not contiguous after ` +
+            `${this.last}`,
+          fact.seq,
+        );
+      }
+      if (this.eventIds.has(fact.eventId)) {
+        throw new StateStoreCorruptionError(
+          `StateStore event id ${fact.eventId} already exists`,
+          fact.seq,
+        );
+      }
+      this.facts.set(fact.seq, { ...fact });
+      this.eventIds.add(fact.eventId);
+      this.last = fact.seq;
+      this.dirty = true;
+    },
+    clearProjection: () => {
+      this.assertOpen();
+      this.attempts.clear();
+      this.evidence.clear();
+      this.meta.delete(META_PROJECTION_FORMAT);
+      this.meta.delete(META_PROJECTION_SEQ);
+    },
+    readAttempts: () => {
+      this.assertOpen();
+      return [...this.attempts.values()]
+        .sort((left, right) =>
+          left.attemptId < right.attemptId
+            ? -1
+            : left.attemptId > right.attemptId
+              ? 1
+              : 0,
+        )
+        .map((row) => ({ ...row }));
+    },
+    putAttempt: (row) => {
+      this.assertOpen();
+      this.attempts.set(row.attemptId, { ...row });
+    },
+    readEvidence: () => {
+      this.assertOpen();
+      return [...this.evidence.values()]
+        .sort((left, right) =>
+          left.attemptId < right.attemptId
+            ? -1
+            : left.attemptId > right.attemptId
+              ? 1
+              : left.contentHash < right.contentHash
+                ? -1
+                : left.contentHash > right.contentHash
+                  ? 1
+                  : 0,
+        )
+        .map((row) => ({ ...row }));
+    },
+    putEvidence: (row) => {
+      this.assertOpen();
+      this.evidence.set(`${row.attemptId} ${row.contentHash}`, { ...row });
+    },
+  };
+
+  private assertOpen(): void {
+    if (this.closed) throw new StateStoreClosedError();
+  }
+
+  private capture(): {
+    facts: Map<number, PersistedFact>;
+    eventIds: Set<string>;
+    meta: Map<string, string>;
+    attempts: Map<string, AttemptRow>;
+    evidence: Map<string, EvidenceRow>;
+    last: number;
+  } {
+    return {
+      facts: new Map(
+        [...this.facts].map(([seq, fact]) => [seq, { ...fact }]),
+      ),
+      eventIds: new Set(this.eventIds),
+      meta: new Map(this.meta),
+      attempts: new Map(
+        [...this.attempts].map(([key, row]) => [key, { ...row }]),
+      ),
+      evidence: new Map(
+        [...this.evidence].map(([key, row]) => [key, { ...row }]),
+      ),
+      last: this.last,
+    };
+  }
+
+  private restore(snapshot: {
+    facts: Map<number, PersistedFact>;
+    eventIds: Set<string>;
+    meta: Map<string, string>;
+    attempts: Map<string, AttemptRow>;
+    evidence: Map<string, EvidenceRow>;
+    last: number;
+  }): void {
+    this.facts.clear();
+    for (const [seq, fact] of snapshot.facts) this.facts.set(seq, fact);
+    this.eventIds.clear();
+    for (const eventId of snapshot.eventIds) this.eventIds.add(eventId);
+    this.meta.clear();
+    for (const [key, value] of snapshot.meta) this.meta.set(key, value);
+    this.attempts.clear();
+    for (const [key, row] of snapshot.attempts) this.attempts.set(key, row);
+    this.evidence.clear();
+    for (const [key, row] of snapshot.evidence) this.evidence.set(key, row);
+    this.last = snapshot.last;
+  }
+
+  private persist(): void {
+    // Derived projection rows are rebuilt from the fact log on every open.
+    // Only the fact-log format metadata is durable; the projection markers
+    // are deliberately omitted so a stale derived view can never be trusted.
+    const meta: Record<string, string> = {};
+    for (const [key, value] of this.meta) {
+      if (key === META_PROJECTION_FORMAT || key === META_PROJECTION_SEQ) {
+        continue;
+      }
+      meta[key] = value;
+    }
+    writeJsonAtomic(this.filePath, {
+      version: 1,
+      meta,
+      facts: [...this.facts.values()].sort(
+        (left, right) => left.seq - right.seq,
+      ),
+    });
+  }
+}
+
+function createSupervisorStateDriver(
+  paths: SupervisorStatePaths,
+): StateStoreDriver {
+  const hasSqlite = existsSync(paths.sqlitePath);
+  const hasFallback = existsSync(paths.factsPath);
+  if (hasSqlite && hasFallback) {
+    throw new StateStoreCorruptionError(
+      `both ${paths.sqlitePath} and ${paths.factsPath} exist; refusing to ` +
+        "choose between two StateStore authorities (needs human)",
+    );
+  }
+  if (hasSqlite) {
+    return createBetterSqlite3Driver({ path: paths.sqlitePath });
+  }
+  if (hasFallback) {
+    return new JsonFileStateStoreDriver(paths.factsPath);
+  }
+  try {
+    return createBetterSqlite3Driver({ path: paths.sqlitePath });
+  } catch (error) {
+    if (error instanceof StateStoreDriverUnavailableError) {
+      return new JsonFileStateStoreDriver(paths.factsPath);
+    }
+    throw error;
+  }
+}
+
+function openSupervisorState(repoRoot: string): SupervisorStateContext {
+  const root = resolve(repoRoot);
+  const paths = supervisorStatePaths(root);
+  mkdirSync(paths.stateDir, { recursive: true, mode: 0o700 });
+  const driver = createSupervisorStateDriver(paths);
+  let store: StateStore;
+  try {
+    store = StateStore.open(driver);
+  } catch (error) {
+    driver.close();
+    throw error;
+  }
+  try {
+    const evidence = new FileEvidenceStore({ directory: paths.evidenceDir });
+    const writer = new StateStoreDomainWriter({ store, evidence });
+    return {
+      root,
+      paths,
+      backend: driver.kind,
+      store,
+      evidence,
+      writer,
+    };
+  } catch (error) {
+    store.close();
+    throw error;
+  }
+}
+
+/**
+ * Run a write with the StateStore as the only authority.
+ *
+ * First use imports the existing `.cliyard/runs` directory exactly once; the
+ * import hash is verified by the migration before any new fact is appended.
+ * Afterwards every append is guarded by the read-only export comparison below.
+ */
+function withSupervisorStateWrite<T>(
+  repoRoot: string,
+  fn: (context: SupervisorStateContext) => T,
+): T {
+  const context = openSupervisorState(repoRoot);
+  try {
+    let marker = findCoveringMarker(
+      readStateStoreDomainRecords(context),
+      ["run"],
+    );
+    if (marker === undefined) {
+      const imported = withLegacyReadBypass(() =>
+        migrateLegacyJson({
+          repoRoot: context.root,
+          writer: context.writer,
+          domains: ["run"],
+        }),
+      );
+      const records = readStateStoreDomainRecords(context);
+      marker = findCoveringMarker(records, ["run"]);
+      if (marker === undefined) {
+        throw new SupervisorStoreError(
+          "StateStore run import did not become visible; refusing to write " +
+            "(needs human)",
+        );
+      }
+      if (
+        imported.status === "imported" &&
+        (marker.payload.importHash !== imported.importHash ||
+          marker.payload.sourceHash !== imported.sourceHash)
+      ) {
+        throw new SupervisorStoreError(
+          "StateStore run import did not verify its import hash; refusing " +
+            "to write (needs human)",
+        );
+      }
+    }
+    context.writer.setLegacyGuard(createSupervisorExportGuard(context));
+    return fn(context);
+  } finally {
+    context.store.close();
+  }
+}
+
+/**
+ * The JSON files under `.cliyard/runs` are a derived, read-only export. A
+ * write is refused when an export no longer matches the StateStore record.
+ * `updatedAt` is the control plane's checkpoint stamp and is allowed to move
+ * independently (a live extension checkpoint may refresh it), but every
+ * authority-bearing field must match. Missing exports are recoverable
+ * projections and are rewritten on the next checkpoint; malformed, foreign or
+ * conflicting exports fail closed with `needs_human`.
+ */
+function createSupervisorExportGuard(
+  context: SupervisorStateContext,
+): StateStoreLegacyGuard {
+  return {
+    domains: ["run"],
+    assertUnchanged(): void {
+      const projection = projectStateStoreDomainRecords(
+        readStateStoreDomainRecords(context),
+      );
+      const storedRuns = new Map(
+        projection.runs.map((manifest) => [manifest.runId, manifest]),
+      );
+      const diskRuns = new Map<string, RunManifest>();
+      const problems: string[] = [];
+
+      for (const runId of listRunManifestIds(context.root)) {
+        const path = runManifestPath(context.root, runId);
+        let disk: RunManifest;
+        try {
+          assertSafeRunId(runId);
+          disk = readRunManifestFile(path, runId);
+        } catch (error) {
+          problems.push(
+            `${runId}: unreadable export (${errorMessage(error)})`,
+          );
+          continue;
+        }
+        diskRuns.set(runId, disk);
+        const stored = storedRuns.get(runId);
+        if (stored === undefined) {
+          problems.push(
+            `${runId}: export exists without a StateStore record`,
+          );
+          continue;
+        }
+        if (!jsonEqualIgnoringUpdatedAt(stored, disk)) {
+          problems.push(
+            `${runId}: export differs from the StateStore record`,
+          );
+        }
+      }
+
+      let diskActive: ActiveRunPointer | undefined;
+      try {
+        diskActive = readActiveRunFile(context.root);
+      } catch (error) {
+        problems.push(`active: unreadable export (${errorMessage(error)})`);
+      }
+      const storedActive = projection.activeRun;
+      const storedCleared =
+        storedActive === null ||
+        storedActive.runId === CLEARED_ACTIVE_RUN_ID;
+      if (storedCleared) {
+        if (existsSync(supervisorPaths(context.root).activePath)) {
+          problems.push(
+            "active: export exists without an active StateStore pointer",
+          );
+        }
+      } else if (
+        diskActive !== undefined &&
+        !jsonEqualIgnoringUpdatedAt(storedActive, diskActive)
+      ) {
+        problems.push(
+          "active: export differs from the StateStore pointer",
+        );
+      }
+
+      if (problems.length === 0) return;
+      const expectedSourceHash = sha256Hex(
+        canonicalStateStoreJson(
+          exportHashShape(projection.runs, projection.activeRun),
+        ),
+      );
+      const actualSourceHash = sha256Hex(
+        canonicalStateStoreJson(
+          exportHashShape([...diskRuns.values()], diskActive ?? null),
+        ),
+      );
+      throw new StateStoreLegacyDriftError({
+        domains: ["run"],
+        expectedSourceHash,
+        actualSourceHash,
+        repoRoot: context.root,
+        detail:
+          `supervisor export drift: ${problems.slice(0, 3).join("; ")}. ` +
+          "Refusing the write so the StateStore stays the only authority " +
+          "(needs human).",
+      });
+    },
+  };
+}
+
+function exportHashShape(
+  runs: readonly RunManifest[],
+  activeRun: ActiveRunPointer | null,
+): unknown {
+  return {
+    runs: [...runs]
+      .sort((left, right) =>
+        left.runId < right.runId ? -1 : left.runId > right.runId ? 1 : 0,
+      )
+      .map((manifest) => stripUpdatedAt(manifest)),
+    activeRun:
+      activeRun === null ? null : stripUpdatedAt(activeRun),
+  };
+}
+
+function stripUpdatedAt(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  const clone: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (key !== "updatedAt") clone[key] = entry;
+  }
+  return clone;
+}
+
+function jsonEqualIgnoringUpdatedAt(left: unknown, right: unknown): boolean {
+  return jsonEqualDeep(stripUpdatedAt(left), stripUpdatedAt(right));
+}
+
+function jsonEqualDeep(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right)) return false;
+    if (left.length !== right.length) return false;
+    return left.every((value, index) =>
+      jsonEqualDeep(value, right[index]),
+    );
+  }
+  if (isRecord(left) && isRecord(right)) {
+    const leftKeys = Object.keys(left)
+      .filter((key) => left[key] !== undefined)
+      .sort();
+    const rightKeys = Object.keys(right)
+      .filter((key) => right[key] !== undefined)
+      .sort();
+    if (leftKeys.length !== rightKeys.length) return false;
+    return leftKeys.every(
+      (key, index) =>
+        key === rightKeys[index] &&
+        jsonEqualDeep(left[key], right[rightKeys[index]!]),
+    );
+  }
+  return false;
+}
+
+function listRunManifestIds(repoRoot: string): string[] {
+  const runsDir = supervisorPaths(repoRoot).runsDir;
+  let names: string[];
+  try {
+    names = readdirSync(runsDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw new SupervisorStoreError(
+      `cannot list run manifests under ${runsDir}: ${errorMessage(error)}`,
+    );
+  }
+  return names
+    .filter(
+      (name) =>
+        name.endsWith(".json") &&
+        name !== ACTIVE_RUN_FILE &&
+        !name.startsWith("."),
+    )
+    .map((name) => name.slice(0, -".json".length))
+    .filter((runId) => runId.length > 0)
+    .sort();
+}
+
+function readStoreRunProjection(
+  repoRoot: string,
+): ReturnType<typeof projectStateStoreDomainRecords> | undefined {
+  if (!supervisorStateExists(repoRoot)) return undefined;
+  const context = openSupervisorState(repoRoot);
+  try {
+    return projectStateStoreDomainRecords(
+      readStateStoreDomainRecords(context),
+    );
+  } finally {
+    context.store.close();
+  }
+}
+
+export interface SupervisorStateInspection {
+  backend: string;
+  runs: RunManifest[];
+  activeRun: ActiveRunPointer | null;
+  migration: {
+    importedAt: string;
+    sourceHash: string;
+    contentHash: string;
+    importHash: string;
+    importedRuns: number;
+  } | null;
+}
+
+/**
+ * Read-only diagnostic view of the supervisor StateStore projection. Returns
+ * `undefined` when no StateStore exists yet (legacy-only repository).
+ */
+export function inspectSupervisorStateStore(
+  repoRoot: string,
+): SupervisorStateInspection | undefined {
+  const root = resolve(repoRoot);
+  if (!supervisorStateExists(root)) return undefined;
+  const context = openSupervisorState(root);
+  try {
+    const records = readStateStoreDomainRecords(context);
+    const projection = projectStateStoreDomainRecords(records);
+    const marker = findCoveringMarker(records, ["run"]);
+    return {
+      backend: context.backend,
+      runs: projection.runs.map((manifest) =>
+        parseRunManifest(manifest, "StateStore run.manifest"),
+      ),
+      activeRun: projection.activeRun,
+      migration:
+        marker === undefined
+          ? null
+          : {
+              importedAt: marker.payload.importedAt,
+              sourceHash: marker.payload.sourceHash,
+              contentHash: marker.payload.contentHash,
+              importHash: marker.payload.importHash,
+              importedRuns: marker.payload.counts.runs,
+            },
+    };
+  } finally {
+    context.store.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Create / load / save / update
 // ---------------------------------------------------------------------------
 
@@ -202,6 +987,12 @@ export function createRunManifest(
   const path = runManifestPath(root, runId);
   if (existsSync(path)) {
     throw new RunManifestError(`run manifest already exists: ${path}`);
+  }
+  if (!isLegacyReadBypass() && supervisorStateExists(root)) {
+    const projection = readStoreRunProjection(root);
+    if (projection?.runs.some((manifest) => manifest.runId === runId)) {
+      throw new RunManifestError(`run manifest already exists: ${path}`);
+    }
   }
 
   const contractsPath = resolveContractsPath(root, input.contractsPath);
@@ -253,33 +1044,31 @@ export function createRunManifest(
   return manifest;
 }
 
+/**
+ * Persist one checkpoint through the StateStore, then refresh the JSON
+ * export at the legacy path. The export is derived and never read as truth
+ * when the export is absent; all writes are refused on export drift.
+ */
 export function saveRunManifest(manifest: RunManifest): void {
   parseRunManifest(manifest, "RunManifest");
-  writeJsonAtomic(
-    runManifestPath(manifest.repoRoot, manifest.runId),
-    manifest,
-  );
+  withSupervisorStateWrite(manifest.repoRoot, (context) => {
+    context.writer.appendRunManifest(manifest, {
+      at: manifest.updatedAt,
+    });
+    writeJsonAtomic(
+      runManifestPath(manifest.repoRoot, manifest.runId),
+      manifest,
+    );
+  });
 }
 
-/**
- * Load a manifest by id, or the active run when `runId` is omitted.
- * Throws RunNotFoundError / NoActiveRunError when there is nothing to load.
- */
-export function loadRunManifest(
-  repoRoot: string,
-  runId?: string,
-): RunManifest {
-  const root = resolve(repoRoot);
-  const id = runId ?? getActiveRunId(root);
-  if (!id) throw new NoActiveRunError(root);
-
-  const path = runManifestPath(root, id);
+function readRunManifestFile(path: string, runId: string): RunManifest {
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new RunNotFoundError(id, path);
+      throw new RunNotFoundError(runId, path);
     }
     throw new SupervisorStoreError(
       `cannot read run manifest ${path}: ${errorMessage(error)}`,
@@ -295,6 +1084,39 @@ export function loadRunManifest(
     );
   }
   return parseRunManifest(parsed, path);
+}
+
+/**
+ * Load a manifest by id, or the active run when `runId` is omitted.
+ *
+ * The JSON export is read first for compatibility with tooling and with
+ * legacy repositories that have no StateStore yet; when the export is absent
+ * the StateStore projection is the authority. A malformed export fails
+ * validation exactly as before instead of being silently replaced.
+ */
+export function loadRunManifest(
+  repoRoot: string,
+  runId?: string,
+): RunManifest {
+  const root = resolve(repoRoot);
+  const id = runId ?? getActiveRunId(root);
+  if (!id) throw new NoActiveRunError(root);
+
+  const path = runManifestPath(root, id);
+  if (
+    !isLegacyReadBypass() &&
+    !existsSync(path) &&
+    supervisorStateExists(root)
+  ) {
+    const projection = readStoreRunProjection(root);
+    const stored = projection?.runs.find(
+      (manifest) => manifest.runId === id,
+    );
+    if (stored !== undefined) {
+      return parseRunManifest(stored, `${path} (StateStore)`);
+    }
+  }
+  return readRunManifestFile(path, id);
 }
 
 /**
@@ -348,8 +1170,10 @@ export function setActiveRun(
   runId: string,
 ): ActiveRunPointer {
   const root = resolve(repoRoot);
+  assertSafeRunId(runId);
   const manifestPath = runManifestPath(root, runId);
-  if (!existsSync(manifestPath)) {
+  const diskManifestExists = existsSync(manifestPath);
+  if (!diskManifestExists && !supervisorStateExists(root)) {
     throw new RunNotFoundError(runId, manifestPath);
   }
   const pointer: ActiveRunPointer = {
@@ -357,29 +1181,64 @@ export function setActiveRun(
     runId,
     updatedAt: new Date().toISOString(),
   };
-  writeJsonAtomic(supervisorPaths(root).activePath, pointer);
+  withSupervisorStateWrite(root, (context) => {
+    if (!diskManifestExists) {
+      const projection = projectStateStoreDomainRecords(
+        readStateStoreDomainRecords(context),
+      );
+      if (
+        !projection.runs.some((manifest) => manifest.runId === runId)
+      ) {
+        throw new RunNotFoundError(runId, manifestPath);
+      }
+    }
+    context.writer.appendActiveRun(pointer, { at: pointer.updatedAt });
+    writeJsonAtomic(supervisorPaths(root).activePath, pointer);
+  });
   return pointer;
 }
 
 /**
  * Remove the active pointer. When `runId` is given, the pointer is cleared
- * only if it still points at that run.
+ * only if it still points at that run. The append-only state log records a
+ * reserved tombstone so a fresh process does not resurrect a stale export.
  */
 export function clearActiveRun(repoRoot: string, runId?: string): boolean {
   const root = resolve(repoRoot);
   const pointer = readActiveRun(root);
   if (!pointer) return false;
   if (runId !== undefined && pointer.runId !== runId) return false;
-  try {
-    unlinkSync(supervisorPaths(root).activePath);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
-  }
+  withSupervisorStateWrite(root, (context) => {
+    const tombstone: ActiveRunPointer = {
+      version: ACTIVE_RUN_VERSION,
+      runId: CLEARED_ACTIVE_RUN_ID,
+      updatedAt: new Date().toISOString(),
+    };
+    context.writer.appendActiveRun(tombstone, { at: tombstone.updatedAt });
+    try {
+      unlinkSync(supervisorPaths(root).activePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  });
+  return true;
 }
 
 function readActiveRun(root: string): ActiveRunPointer | undefined {
+  if (isLegacyReadBypass() || !supervisorStateExists(root)) {
+    return readActiveRunFile(root);
+  }
+  const projection = readStoreRunProjection(root);
+  const stored = projection?.activeRun ?? null;
+  if (stored !== null && stored.runId === CLEARED_ACTIVE_RUN_ID) {
+    return undefined;
+  }
+  const disk = readActiveRunFile(root);
+  if (disk !== undefined) return disk;
+  return stored ?? undefined;
+}
+
+function readActiveRunFile(root: string): ActiveRunPointer | undefined {
   const path = supervisorPaths(root).activePath;
   let raw: string;
   try {

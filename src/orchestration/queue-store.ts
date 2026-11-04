@@ -1,16 +1,31 @@
 /**
  * Durable foreground orchestration queue storage
- * (design/durable-orchestration-v0.md).
+ * (design/durable-orchestration-v0.md,
+ * design/statestore-write-migration-v0.md).
  *
  * Layout, relative to the repository root:
  *
- *   .cliyard/queue.json   ordered queue items
- *   .cliyard/queue.lock   exclusive queue ownership
+ *   .cliyard/queue.json              derived, read-only queue export
+ *   .cliyard/queue.export-meta.json  export sequence/content cache
+ *   .cliyard/state.db                StateStore fact log (SQLite)
+ *   .cliyard/state-evidence/         content-addressed domain evidence
+ *   .cliyard/state-fallback/         durable fact log used only when the
+ *                                    SQLite driver is unavailable
+ *   .cliyard/queue.lock              foreground run ownership
  *
- * Queue JSON is replaced atomically. Mutations take the queue lock, so two
- * foreground commands cannot interleave a read-modify-write. The lock records
- * pid/host/token; a same-host lock whose owner is dead is stale and may be
- * reclaimed. A foreign-host or unreadable lock fails closed.
+ * The StateStore fact log is the queue write authority. The legacy queue JSON
+ * is imported once (hash verified) and afterwards is a derived export that is
+ * rewritten atomically after every durable StateStore append. Mutations read
+ * the projected queue document from the store, append through the typed
+ * domain write API, and rely on the store's sequence compare-and-swap instead
+ * of the file-level queue lock. A stale or hand-edited export fails closed as
+ * `StateStoreLegacyDriftError` unless the bytes are exactly a historical
+ * export left by an interrupted writer, in which case they are repaired from
+ * the authority.
+ *
+ * The queue file lock remains for foreground `queue run` ownership (reconciling
+ * running items against RunManifests); individual queue mutations no longer
+ * take it.
  *
  * The queue only coordinates Supervisor runs. It never writes a RunManifest.
  */
@@ -24,6 +39,7 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -55,11 +71,47 @@ import {
   type ExecutionProfile,
   type ExecutionRuntimeId,
 } from "../execution/profile.js";
+import {
+  FileEvidenceStore,
+  META_PROJECTION_FORMAT,
+  META_PROJECTION_SEQ,
+  SequenceConflictError,
+  StateStore,
+  StateStoreCorruptionError,
+  StateStoreDriverUnavailableError,
+  StateStoreValidationError,
+  openFileStateStore,
+  type AttemptRow,
+  type EvidenceRow,
+  type PersistedFact,
+  type StateStoreDriver,
+  type StateStoreTransaction,
+} from "../statestore/store.js";
+import { findCoveringMarker, migrateLegacyJson } from "../statestore/migrate.js";
+import {
+  StateStoreDomainWriter,
+  StateStoreLegacyDriftError,
+  canonicalStateStoreJson,
+  projectStateStoreDomainRecords,
+  readStateStoreDomainRecords,
+  sha256Hex as statestoreSha256Hex,
+  type StateStoreDomainEvidenceStore,
+  type StateStoreDomainRecord,
+} from "../statestore/write.js";
 
 export const QUEUE_VERSION = 1 as const;
 export const QUEUE_FILE = "queue.json";
 export const QUEUE_LOCK_FILE = "queue.lock";
 export const DEFAULT_MAX_ATTEMPTS = 3;
+/** Derived export metadata; cached CAS position for `saveQueue` callers. */
+export const QUEUE_EXPORT_META_FILE = "queue.export-meta.json";
+export const QUEUE_STATE_DB_FILE = "state.db";
+export const QUEUE_STATE_EVIDENCE_DIR = "state-evidence";
+export const QUEUE_STATE_FALLBACK_DIR = "state-fallback";
+const QUEUE_STATE_FALLBACK_FILE = "facts.json";
+const QUEUE_STATE_FALLBACK_LOCK_FILE = "facts.lock";
+/** Bounded reopen-and-retry for optimistic queue mutations. */
+const QUEUE_MUTATION_ATTEMPTS = 5;
 
 /** First formal operator resolution format (design/queue-adoption-v1.md). */
 export const OPERATOR_RESOLUTION_VERSION = 1 as const;
@@ -285,6 +337,33 @@ export function queuePaths(repoRoot: string): QueuePaths {
   };
 }
 
+/** StateStore-owned queue write authority and its derived export cache. */
+export interface QueueStatePaths {
+  repoRoot: string;
+  cliyardDir: string;
+  dbPath: string;
+  evidenceDir: string;
+  fallbackDir: string;
+  fallbackFactsPath: string;
+  fallbackLockPath: string;
+  exportMetaPath: string;
+}
+
+export function queueStatePaths(repoRoot: string): QueueStatePaths {
+  const { repoRoot: root, cliyardDir } = queuePaths(repoRoot);
+  const fallbackDir = join(cliyardDir, QUEUE_STATE_FALLBACK_DIR);
+  return {
+    repoRoot: root,
+    cliyardDir,
+    dbPath: join(cliyardDir, QUEUE_STATE_DB_FILE),
+    evidenceDir: join(cliyardDir, QUEUE_STATE_EVIDENCE_DIR),
+    fallbackDir,
+    fallbackFactsPath: join(fallbackDir, QUEUE_STATE_FALLBACK_FILE),
+    fallbackLockPath: join(fallbackDir, QUEUE_STATE_FALLBACK_LOCK_FILE),
+    exportMetaPath: join(cliyardDir, QUEUE_EXPORT_META_FILE),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -329,6 +408,350 @@ export class QueueLockHeldError extends QueueLockError {
     );
     this.name = "QueueLockHeldError";
   }
+}
+
+// ---------------------------------------------------------------------------
+// StateStore write authority
+// ---------------------------------------------------------------------------
+
+/**
+ * Caller-owned StateStore seams for embedding and tests. When either is
+ * supplied the other is required, the pair is never closed here, and
+ * optimistic retries are disabled (the caller owns the store lifetime).
+ */
+export interface QueueStateStoreOptions {
+  store?: StateStore;
+  evidence?: StateStoreDomainEvidenceStore;
+  /** Explicit sequence compare-and-swap position for a full-document write. */
+  expectedSeq?: number;
+}
+
+interface QueueExportToken {
+  /** Sequence of the queue evidence fact the document was loaded from. */
+  seq: number;
+  /** Canonical document hash at that sequence. */
+  contentHash: string;
+}
+
+interface QueueExportMeta extends QueueExportToken {
+  version: 1;
+}
+
+/**
+ * Loaded documents remember their exact projection position so a long-lived
+ * caller (`queue run`) cannot silently clobber a concurrent mutation. The
+ * map is keyed by object identity; `loadQueue` and `saveQueue` share it.
+ */
+const queueExportTokens = new WeakMap<QueueDocument, QueueExportToken>();
+
+interface QueueStateContext {
+  store: StateStore;
+  evidence: StateStoreDomainEvidenceStore;
+  writer: StateStoreDomainWriter;
+}
+
+interface QueueAuthority {
+  records: StateStoreDomainRecord[];
+  document: QueueDocument;
+  latest: StateStoreDomainRecord<"queue.document"> | undefined;
+}
+
+interface QueueMutationOutcome<T> {
+  value: T;
+  changed: boolean;
+  /** Observational audit event, emitted only after a durable write. */
+  event?: () => void;
+}
+
+function withQueueStateContext<T>(
+  repoRoot: string,
+  options: QueueStateStoreOptions,
+  fn: (context: QueueStateContext) => T,
+): T {
+  const injected =
+    options.store !== undefined || options.evidence !== undefined;
+  if (injected) {
+    if (options.store === undefined || options.evidence === undefined) {
+      throw new QueueValidationError(
+        "StateStore options must provide both store and evidence",
+      );
+    }
+    return fn({
+      store: options.store,
+      evidence: options.evidence,
+      writer: new StateStoreDomainWriter({
+        store: options.store,
+        evidence: options.evidence,
+      }),
+    });
+  }
+
+  const paths = queueStatePaths(repoRoot);
+  const evidence = new FileEvidenceStore({ directory: paths.evidenceDir });
+  let store: StateStore;
+  try {
+    store = openFileStateStore({ path: paths.dbPath });
+  } catch (error) {
+    if (!(error instanceof StateStoreDriverUnavailableError)) throw error;
+    // The SQLite binding is an optional native dependency. Keep the same
+    // durable, multi-process write semantics through the StateStore driver
+    // seam rather than silently writing queue.json as a second authority.
+    store = StateStore.open(
+      new QueueFallbackStateStoreDriver(
+        paths.fallbackFactsPath,
+        paths.fallbackLockPath,
+      ),
+    );
+  }
+  try {
+    return fn({
+      store,
+      evidence,
+      writer: new StateStoreDomainWriter({ store, evidence }),
+    });
+  } finally {
+    store.close();
+  }
+}
+
+/** Import the legacy queue exactly once, before the first state-store write. */
+function ensureQueueImported(
+  repoRoot: string,
+  context: QueueStateContext,
+): void {
+  const records = readStateStoreDomainRecords({
+    store: context.store,
+    evidence: context.evidence,
+  });
+  if (findCoveringMarker(records, ["queue"]) !== undefined) return;
+  // Reads and hashes queue.json, appends the parsed truth, verifies it by
+  // reading back, and only then records the import marker.
+  migrateLegacyJson({
+    repoRoot,
+    writer: context.writer,
+    domains: ["queue"],
+  });
+}
+
+function readQueueAuthority(context: QueueStateContext): QueueAuthority {
+  const records = readStateStoreDomainRecords({
+    store: context.store,
+    evidence: context.evidence,
+  });
+  const projection = projectStateStoreDomainRecords(records);
+  let latest: StateStoreDomainRecord<"queue.document"> | undefined;
+  for (const record of records) {
+    if (record.kind === "queue.document") latest = record;
+  }
+  return {
+    records,
+    document: projection.queue ?? emptyQueue(),
+    latest,
+  };
+}
+
+function queueDocumentExportBytes(document: QueueDocument): string {
+  return JSON.stringify(document, null, 2) + "\n";
+}
+
+function writeQueueExport(repoRoot: string, document: QueueDocument): void {
+  writeJsonAtomic(queuePaths(repoRoot).queuePath, document);
+}
+
+function queueDocumentContentHash(document: QueueDocument): string {
+  return statestoreSha256Hex(canonicalStateStoreJson(document));
+}
+
+function readQueueExportMeta(repoRoot: string): QueueExportMeta | undefined {
+  const path = queueStatePaths(repoRoot).exportMetaPath;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (
+    !isRecord(parsed) ||
+    parsed.version !== 1 ||
+    typeof parsed.seq !== "number" ||
+    !Number.isSafeInteger(parsed.seq) ||
+    parsed.seq < 1 ||
+    typeof parsed.contentHash !== "string" ||
+    !SHA256_PATTERN.test(parsed.contentHash)
+  ) {
+    return undefined;
+  }
+  return {
+    version: 1,
+    seq: parsed.seq,
+    contentHash: parsed.contentHash,
+  };
+}
+
+function writeQueueExportMeta(
+  repoRoot: string,
+  token: QueueExportToken,
+): void {
+  // Derived cache only: losing it degrades a full-document save to an
+  // unchecked append, never to a second authority.
+  try {
+    writeJsonAtomic(queueStatePaths(repoRoot).exportMetaPath, {
+      version: 1,
+      seq: token.seq,
+      contentHash: token.contentHash,
+    } satisfies QueueExportMeta);
+  } catch {
+    /* the authoritative write already succeeded */
+  }
+}
+
+/**
+ * Verify the on-disk export is the authority's projection.
+ *
+ * - missing or a remembered historical export: rewrite (interrupted writer);
+ * - canonical match: nothing to do;
+ * - anything else: fail closed as legacy drift, without appending.
+ *
+ * A structurally invalid export keeps its precise validation error (for
+ * example a dependency cycle) because the StateStore can never have written
+ * it; both paths refuse the write.
+ */
+function assertQueueExportInSync(
+  repoRoot: string,
+  authority: QueueAuthority,
+): void {
+  const path = queuePaths(repoRoot).queuePath;
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      writeQueueExport(repoRoot, authority.document);
+      if (authority.latest !== undefined) {
+        writeQueueExportMeta(repoRoot, {
+          seq: authority.latest.seq,
+          contentHash: queueDocumentContentHash(authority.document),
+        });
+      }
+      return;
+    }
+    throw new QueueStoreError(
+      `cannot read queue ${path}: ${errorMessage(error)}`,
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch (error) {
+    throw new QueueValidationError(
+      `invalid JSON in queue ${path}: ${errorMessage(error)}`,
+    );
+  }
+  const onDisk = parseQueueDocument(parsed, path, resolve(repoRoot));
+  const onDiskCanonical = canonicalStateStoreJson(onDisk);
+  if (onDiskCanonical === canonicalStateStoreJson(authority.document)) return;
+
+  for (const record of authority.records) {
+    if (
+      record.kind === "queue.document" &&
+      canonicalStateStoreJson(record.payload) === onDiskCanonical
+    ) {
+      writeQueueExport(repoRoot, authority.document);
+      if (authority.latest !== undefined) {
+        writeQueueExportMeta(repoRoot, {
+          seq: authority.latest.seq,
+          contentHash: queueDocumentContentHash(authority.document),
+        });
+      }
+      return;
+    }
+  }
+
+  throw new StateStoreLegacyDriftError({
+    domains: ["queue"],
+    expectedSourceHash: statestoreSha256Hex(
+      queueDocumentExportBytes(authority.document),
+    ),
+    actualSourceHash: statestoreSha256Hex(raw),
+    repoRoot: resolve(repoRoot),
+    detail:
+      "queue.json is not the exported StateStore projection; refusing to " +
+      "choose a writable queue authority.",
+  });
+}
+
+function appendQueueDocument(
+  repoRoot: string,
+  context: QueueStateContext,
+  document: QueueDocument,
+  expectedSeq: number | undefined,
+): QueueExportToken {
+  const result = context.writer.appendQueue(document, { expectedSeq });
+  const token: QueueExportToken = {
+    seq: result.seq,
+    contentHash: queueDocumentContentHash(document),
+  };
+  writeQueueExport(repoRoot, document);
+  writeQueueExportMeta(repoRoot, token);
+  return token;
+}
+
+/**
+ * Read the projected queue, apply one mutation and append the whole document.
+ *
+ * The sequence compare-and-swap is taken immediately before the append; a
+ * conflict reopens a fresh store context (the conflicted context's projection
+ * is stale because `StateStore.append` throws before catching up). Validation
+ * errors never append or export anything.
+ */
+function mutateQueueDocument<T>(
+  repoRoot: string,
+  options: QueueStateStoreOptions,
+  mutate: (document: QueueDocument) => QueueMutationOutcome<T>,
+): T {
+  const root = resolve(repoRoot);
+  const injected =
+    options.store !== undefined || options.evidence !== undefined;
+  const attempts = injected ? 1 : QUEUE_MUTATION_ATTEMPTS;
+  let lastConflict: SequenceConflictError | undefined;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return withQueueStateContext(root, options, (context) => {
+        ensureQueueImported(root, context);
+        const authority = readQueueAuthority(context);
+        assertQueueExportInSync(root, authority);
+        const outcome = mutate(authority.document);
+        if (!outcome.changed) return outcome.value;
+        const normalized = parseQueueDocument(
+          authority.document,
+          "queue",
+          root,
+        );
+        appendQueueDocument(
+          root,
+          context,
+          normalized,
+          context.store.lastSeq,
+        );
+        outcome.event?.();
+        return outcome.value;
+      });
+    } catch (error) {
+      if (
+        !(error instanceof SequenceConflictError) ||
+        attempt === attempts - 1
+      ) {
+        throw error;
+      }
+      lastConflict = error;
+    }
+  }
+  throw (
+    lastConflict ??
+    new QueueStoreError("queue mutation exhausted its write attempts")
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -415,9 +838,17 @@ function emptyQueue(): QueueDocument {
   };
 }
 
-/** Load the queue. A missing queue file is an empty queue. */
+/**
+ * Load the derived queue export. A missing queue file is an empty queue.
+ *
+ * This remains the read path for compatibility and, critically, for the
+ * one-shot migration (which must read the legacy bytes without opening the
+ * StateStore). When the export metadata matches the parsed bytes, the
+ * document remembers its projection sequence for optimistic `saveQueue`.
+ */
 export function loadQueue(repoRoot: string): QueueDocument {
-  const path = queuePaths(repoRoot).queuePath;
+  const root = resolve(repoRoot);
+  const path = queuePaths(root).queuePath;
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
@@ -438,14 +869,64 @@ export function loadQueue(repoRoot: string): QueueDocument {
       `invalid JSON in queue ${path}: ${errorMessage(error)}`,
     );
   }
-  return parseQueueDocument(parsed, path, resolve(repoRoot));
+  const document = parseQueueDocument(parsed, path, root);
+  const meta = readQueueExportMeta(root);
+  if (
+    meta !== undefined &&
+    meta.contentHash === queueDocumentContentHash(document)
+  ) {
+    queueExportTokens.set(document, {
+      seq: meta.seq,
+      contentHash: meta.contentHash,
+    });
+  }
+  return document;
 }
 
-/** Validate and atomically replace the queue JSON. */
-export function saveQueue(repoRoot: string, document: QueueDocument): void {
+/**
+ * Validate and durably append the queue document through the StateStore, then
+ * rewrite the JSON export. The sequence compare-and-swap rejects a caller
+ * whose document was loaded before a concurrent queue write.
+ */
+export function saveQueue(
+  repoRoot: string,
+  document: QueueDocument,
+  options: QueueStateStoreOptions = {},
+): void {
   const root = resolve(repoRoot);
   const normalized = parseQueueDocument(document, "queue", root);
-  writeJsonAtomic(queuePaths(root).queuePath, normalized);
+  const token = queueExportTokens.get(document);
+
+  const appended = withQueueStateContext(root, options, (context) => {
+    ensureQueueImported(root, context);
+    const authority = readQueueAuthority(context);
+    assertQueueExportInSync(root, authority);
+
+    let expectedSeq = options.expectedSeq;
+    if (expectedSeq === undefined) {
+      if (token !== undefined) {
+        const latest = authority.latest;
+        const latestHash =
+          latest === undefined
+            ? undefined
+            : queueDocumentContentHash(latest.payload);
+        if (
+          latest === undefined ||
+          latest.seq !== token.seq ||
+          latestHash !== token.contentHash
+        ) {
+          throw new SequenceConflictError(
+            token.seq,
+            latest?.seq ?? 0,
+          );
+        }
+      }
+      expectedSeq = context.store.lastSeq;
+    }
+    return appendQueueDocument(root, context, normalized, expectedSeq);
+  });
+
+  queueExportTokens.set(document, appended);
 }
 
 export interface QueueCounts {
@@ -491,16 +972,17 @@ export interface AddQueueItemInput {
 
 /**
  * Add one approved contracts file. The contracts path is made absolute and
- * hashed under the queue lock so the frozen identity matches the bytes the
+ * hashed against the current bytes in the same optimistic read-modify-write
+ * that appends the queue document, so the frozen identity matches what the
  * operator approved.
  */
 export function addQueueItem(
   repoRoot: string,
   input: AddQueueItemInput,
+  options: QueueStateStoreOptions = {},
 ): QueueItem {
   const root = resolve(repoRoot);
-  return withQueueLock(root, () => {
-    const document = loadQueue(root);
+  return mutateQueueDocument(root, options, (document) => {
     assertSafeQueueId(input.id, "queue id");
     if (document.items.some((item) => item.id === input.id)) {
       throw new QueueValidationError(
@@ -571,19 +1053,22 @@ export function addQueueItem(
     };
     document.items.push(item);
     document.updatedAt = at;
-    saveQueue(root, document);
-    tryAppendQueueEvent(root, {
-      type: "queue.item.added",
-      at,
-      itemId: item.id,
-      status: item.status,
-      action: item.nextAction,
-      ...executionProfileEventFields(
-        item.executionProfile,
-        item.continuationPolicy,
-      ),
-    });
-    return item;
+    return {
+      value: item,
+      changed: true,
+      event: () =>
+        tryAppendQueueEvent(root, {
+          type: "queue.item.added",
+          at,
+          itemId: item.id,
+          status: item.status,
+          action: item.nextAction,
+          ...executionProfileEventFields(
+            item.executionProfile,
+            item.continuationPolicy,
+          ),
+        }),
+    };
   });
 }
 
@@ -602,18 +1087,19 @@ export interface AddPlanQueueItemInput {
 }
 
 /**
- * Add one explicitly approved Plan. The Plan is read exactly once under the
- * queue lock, snapshotted as an absolute path plus SHA-256, parsed and compiled
- * at the repository HEAD captured by this mutation. Nothing is materialized or
- * dispatched here: the queue only persists the human authority.
+ * Add one explicitly approved Plan. The Plan is read exactly once in the
+ * optimistic mutation, snapshotted as an absolute path plus SHA-256, parsed
+ * and compiled at the repository HEAD captured by this mutation. Nothing is
+ * materialized or dispatched here: the queue only persists the human
+ * authority.
  */
 export function addPlanQueueItem(
   repoRoot: string,
   input: AddPlanQueueItemInput,
+  options: QueueStateStoreOptions = {},
 ): QueueItem {
   const root = resolve(repoRoot);
-  return withQueueLock(root, () => {
-    const document = loadQueue(root);
+  return mutateQueueDocument(root, options, (document) => {
     assertSafeQueueId(input.id, "queue id");
     if (document.items.some((item) => item.id === input.id)) {
       throw new QueueValidationError(
@@ -721,19 +1207,22 @@ export function addPlanQueueItem(
     };
     document.items.push(item);
     document.updatedAt = at;
-    saveQueue(root, document);
-    tryAppendQueueEvent(root, {
-      type: "queue.item.added",
-      at,
-      itemId: item.id,
-      status: item.status,
-      action: item.nextAction,
-      ...executionProfileEventFields(
-        item.executionProfile,
-        item.continuationPolicy,
-      ),
-    });
-    return item;
+    return {
+      value: item,
+      changed: true,
+      event: () =>
+        tryAppendQueueEvent(root, {
+          type: "queue.item.added",
+          at,
+          itemId: item.id,
+          status: item.status,
+          action: item.nextAction,
+          ...executionProfileEventFields(
+            item.executionProfile,
+            item.continuationPolicy,
+          ),
+        }),
+    };
   });
 }
 
@@ -741,10 +1230,13 @@ export function addPlanQueueItem(
  * Return a blocked item to pending. `nextAction` is `resume` whenever a run id
  * is recorded, otherwise `start`. A pending item is already retryable.
  */
-export function retryQueueItem(repoRoot: string, id: string): QueueItem {
+export function retryQueueItem(
+  repoRoot: string,
+  id: string,
+  options: QueueStateStoreOptions = {},
+): QueueItem {
   const root = resolve(repoRoot);
-  return withQueueLock(root, () => {
-    const document = loadQueue(root);
+  return mutateQueueDocument(root, options, (document) => {
     const item = requireQueueItem(document, root, id);
     if (item.status === "completed") {
       throw new QueueValidationError(
@@ -764,7 +1256,9 @@ export function retryQueueItem(repoRoot: string, id: string): QueueItem {
           "run `cliyard queue run` to reconcile it before retrying",
       );
     }
-    if (item.status === "pending") return item;
+    if (item.status === "pending") {
+      return { value: item, changed: false };
+    }
 
     const at = now();
     item.status = "pending";
@@ -775,29 +1269,36 @@ export function retryQueueItem(repoRoot: string, id: string): QueueItem {
     delete item.failure;
     item.updatedAt = at;
     document.updatedAt = at;
-    saveQueue(root, document);
-    tryAppendQueueEvent(root, {
-      type: "queue.retry",
-      at,
-      itemId: item.id,
-      ...(item.lastRunId !== undefined ? { runId: item.lastRunId } : {}),
-      attempt: item.attempts,
-      status: item.status,
-      action: item.nextAction,
-    });
-    return item;
+    return {
+      value: item,
+      changed: true,
+      event: () =>
+        tryAppendQueueEvent(root, {
+          type: "queue.retry",
+          at,
+          itemId: item.id,
+          ...(item.lastRunId !== undefined ? { runId: item.lastRunId } : {}),
+          attempt: item.attempts,
+          status: item.status,
+          action: item.nextAction,
+        }),
+    };
   });
 }
 
 /**
- * Cancel an item. Completed and already-cancelled items are monotonic; a stale
- * running item may be cancelled because holding the queue lock proves no queue
- * dispatch is active.
+ * Cancel an item. Completed and already-cancelled items are monotonic. A
+ * running item may be cancelled through the queue authority; a concurrently
+ * active dispatch detects the changed sequence when it next saves and fails
+ * closed instead of clobbering the cancellation.
  */
-export function cancelQueueItem(repoRoot: string, id: string): QueueItem {
+export function cancelQueueItem(
+  repoRoot: string,
+  id: string,
+  options: QueueStateStoreOptions = {},
+): QueueItem {
   const root = resolve(repoRoot);
-  return withQueueLock(root, () => {
-    const document = loadQueue(root);
+  return mutateQueueDocument(root, options, (document) => {
     const item = requireQueueItem(document, root, id);
     if (item.status === "completed") {
       throw new QueueValidationError(
@@ -805,23 +1306,28 @@ export function cancelQueueItem(repoRoot: string, id: string): QueueItem {
           "completed items never run again",
       );
     }
-    if (item.status === "cancelled") return item;
+    if (item.status === "cancelled") {
+      return { value: item, changed: false };
+    }
 
     const at = now();
     item.status = "cancelled";
     item.reason = "cancelled";
     item.updatedAt = at;
     document.updatedAt = at;
-    saveQueue(root, document);
-    tryAppendQueueEvent(root, {
-      type: "queue.cancel",
-      at,
-      itemId: item.id,
-      ...(item.lastRunId !== undefined ? { runId: item.lastRunId } : {}),
-      attempt: item.attempts,
-      status: item.status,
-    });
-    return item;
+    return {
+      value: item,
+      changed: true,
+      event: () =>
+        tryAppendQueueEvent(root, {
+          type: "queue.cancel",
+          at,
+          itemId: item.id,
+          ...(item.lastRunId !== undefined ? { runId: item.lastRunId } : {}),
+          attempt: item.attempts,
+          status: item.status,
+        }),
+    };
   });
 }
 
@@ -878,10 +1384,10 @@ export interface AdoptQueueItemInput {
 export function adoptQueueItem(
   repoRoot: string,
   input: AdoptQueueItemInput,
+  options: QueueStateStoreOptions = {},
 ): QueueItem {
   const root = resolve(repoRoot);
-  return withQueueLock(root, () => {
-    const document = loadQueue(root);
+  return mutateQueueDocument(root, options, (document) => {
     const item = requireQueueItem(document, root, input.id);
     const runId = requireRunId(input.runId);
     const approvedBy = requireAdoptionText(
@@ -918,7 +1424,7 @@ export function adoptQueueItem(
         item.resolution.approvedAt,
       );
       assertSameResolutionIdentity(item.resolution, candidate);
-      return item;
+      return { value: item, changed: false };
     }
 
     if (item.status !== "blocked") {
@@ -956,24 +1462,28 @@ export function adoptQueueItem(
     item.nextAction = item.lastRunId ? "resume" : "start";
     item.updatedAt = at;
     document.updatedAt = at;
-    saveQueue(root, document);
-    // Observability only: resolution in queue.json is the durable authority.
-    tryAppendQueueEvent(root, {
-      type: "queue.item.adopted",
-      at: resolution.approvedAt,
-      itemId: resolution.queueItemId,
-      runId: resolution.sourceRunId,
-      status: "completed",
-      sourceManifestStatus: resolution.sourceManifestStatus,
-      baseCommit: resolution.baseCommit,
-      reviewedCommit: resolution.reviewedCommit,
-      contractsHash: resolution.contractsHash,
-      reviewEvidencePath: resolution.reviewEvidencePath,
-      reviewEvidenceHash: resolution.reviewEvidenceHash,
-      approvedBy: resolution.approvedBy,
-      reason: resolution.reason,
-    });
-    return item;
+    return {
+      value: item,
+      changed: true,
+      // Observability only: the OperatorResolution in the StateStore queue
+      // document is the durable authority.
+      event: () =>
+        tryAppendQueueEvent(root, {
+          type: "queue.item.adopted",
+          at: resolution.approvedAt,
+          itemId: resolution.queueItemId,
+          runId: resolution.sourceRunId,
+          status: "completed",
+          sourceManifestStatus: resolution.sourceManifestStatus,
+          baseCommit: resolution.baseCommit,
+          reviewedCommit: resolution.reviewedCommit,
+          contractsHash: resolution.contractsHash,
+          reviewEvidencePath: resolution.reviewEvidencePath,
+          reviewEvidenceHash: resolution.reviewEvidenceHash,
+          approvedBy: resolution.approvedBy,
+          reason: resolution.reason,
+        }),
+    };
   });
 }
 
@@ -2779,6 +3289,363 @@ function assertQueueGraph(items: QueueItem[], source: string): void {
       `${source}: dependency cycle: ${cycle.cycle.join(" -> ")}`,
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Durable fallback StateStore driver
+// ---------------------------------------------------------------------------
+
+/**
+ * Durable file-backed driver used only when `better-sqlite3` is unavailable.
+ *
+ * It implements the same synchronous transaction/compare-and-swap seam as the
+ * SQLite driver: every transaction reloads the fact log from disk, applies the
+ * work, and atomically replaces the file under an exclusive lock. It is not
+ * the default and never becomes a second authority; it keeps the cutover
+ * usable on hosts that cannot install the optional native dependency.
+ */
+class QueueFallbackStateStoreDriver implements StateStoreDriver {
+  readonly kind = "queue-file-fallback";
+
+  constructor(
+    private readonly factsPath: string,
+    private readonly lockPath: string,
+  ) {}
+
+  initialize(): void {
+    mkdirSync(dirname(this.factsPath), { recursive: true });
+  }
+
+  transaction<T>(work: (tx: StateStoreTransaction) => T): T {
+    mkdirSync(dirname(this.factsPath), { recursive: true });
+    const release = acquireFallbackStateLock(this.lockPath);
+    try {
+      const state = readFallbackState(this.factsPath);
+      let changed = false;
+      const touch = (): void => {
+        changed = true;
+      };
+      const transaction: StateStoreTransaction = {
+        getMeta: (key) => state.meta[key],
+        setMeta: (key, value) => {
+          state.meta[key] = value;
+          touch();
+        },
+        deleteMeta: (key) => {
+          if (key in state.meta) {
+            delete state.meta[key];
+            touch();
+          }
+        },
+        lastSeq: () =>
+          state.facts.reduce((max, fact) => Math.max(max, fact.seq), 0),
+        readFacts: (afterSeq, limit) => {
+          assertFallbackReadRange(afterSeq, limit);
+          return [...state.facts]
+            .sort((left, right) => left.seq - right.seq)
+            .filter((fact) => fact.seq > afterSeq)
+            .slice(0, limit)
+            .map((fact) => ({ ...fact }));
+        },
+        appendFact: (fact) => {
+          if (state.facts.some((existing) => existing.seq === fact.seq)) {
+            throw new StateStoreValidationError(
+              `fact sequence ${fact.seq} already exists`,
+              "fact.seq",
+            );
+          }
+          if (
+            state.facts.some(
+              (existing) => existing.eventId === fact.eventId,
+            )
+          ) {
+            throw new StateStoreValidationError(
+              `event id ${fact.eventId} already exists`,
+              "fact.eventId",
+            );
+          }
+          state.facts.push({ ...fact });
+          touch();
+        },
+        clearProjection: () => {
+          state.attempts = [];
+          state.evidence = [];
+          delete state.meta[META_PROJECTION_FORMAT];
+          delete state.meta[META_PROJECTION_SEQ];
+          touch();
+        },
+        readAttempts: () =>
+          state.attempts
+            .slice()
+            .sort((left, right) =>
+              left.attemptId < right.attemptId
+                ? -1
+                : left.attemptId > right.attemptId
+                  ? 1
+                  : 0,
+            )
+            .map(copyFallbackAttempt),
+        putAttempt: (row) => {
+          const index = state.attempts.findIndex(
+            (existing) => existing.attemptId === row.attemptId,
+          );
+          if (index === -1) state.attempts.push(copyFallbackAttempt(row));
+          else state.attempts[index] = copyFallbackAttempt(row);
+          touch();
+        },
+        readEvidence: () => state.evidence.map((row) => ({ ...row })),
+        putEvidence: (row) => {
+          const index = state.evidence.findIndex(
+            (existing) =>
+              existing.attemptId === row.attemptId &&
+              existing.contentHash === row.contentHash,
+          );
+          if (index === -1) state.evidence.push({ ...row });
+          else state.evidence[index] = { ...row };
+          touch();
+        },
+      };
+      const result = work(transaction);
+      if (changed) writeJsonAtomic(this.factsPath, state);
+      return result;
+    } finally {
+      release();
+    }
+  }
+
+  close(): void {
+    /* file handles are opened per transaction */
+  }
+}
+
+interface FallbackState {
+  version: 1;
+  meta: Record<string, string>;
+  facts: PersistedFact[];
+  attempts: AttemptRow[];
+  evidence: EvidenceRow[];
+}
+
+function readFallbackState(path: string): FallbackState {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { version: 1, meta: {}, facts: [], attempts: [], evidence: [] };
+    }
+    throw new StateStoreCorruptionError(
+      `cannot read the fallback StateStore log ${path}: ${errorMessage(error)}`,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    throw new StateStoreCorruptionError(
+      `fallback StateStore log ${path} is not valid JSON`,
+    );
+  }
+  if (
+    !isRecord(parsed) ||
+    parsed.version !== 1 ||
+    !isRecord(parsed.meta) ||
+    !Array.isArray(parsed.facts) ||
+    !Array.isArray(parsed.attempts) ||
+    !Array.isArray(parsed.evidence)
+  ) {
+    throw new StateStoreCorruptionError(
+      `fallback StateStore log ${path} has an unsupported shape`,
+    );
+  }
+  const meta: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parsed.meta)) {
+    if (typeof value !== "string") {
+      throw new StateStoreCorruptionError(
+        `fallback StateStore meta ${key} is not a string`,
+      );
+    }
+    meta[key] = value;
+  }
+  const facts: PersistedFact[] = [];
+  for (const value of parsed.facts) {
+    if (
+      !isRecord(value) ||
+      typeof value.seq !== "number" ||
+      !Number.isSafeInteger(value.seq) ||
+      typeof value.eventId !== "string" ||
+      typeof value.at !== "string" ||
+      typeof value.kind !== "string" ||
+      typeof value.attemptId !== "string"
+    ) {
+      throw new StateStoreCorruptionError(
+        `fallback StateStore fact in ${path} has an unsupported shape`,
+      );
+    }
+    facts.push({
+      seq: value.seq,
+      eventId: value.eventId,
+      at: value.at,
+      kind: value.kind,
+      attemptId: value.attemptId,
+      payload: value.payload,
+    });
+  }
+  return {
+    version: 1,
+    meta,
+    facts,
+    attempts: parsed.attempts as AttemptRow[],
+    evidence: parsed.evidence as EvidenceRow[],
+  };
+}
+
+function copyFallbackAttempt(row: AttemptRow): AttemptRow {
+  return {
+    ...row,
+    diagnostics: { pid: row.diagnostics.pid, pgid: row.diagnostics.pgid },
+  };
+}
+
+function assertFallbackReadRange(afterSeq: number, limit: number): void {
+  if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) {
+    throw new StateStoreValidationError(
+      "afterSeq must be a non-negative safe integer",
+      "afterSeq",
+    );
+  }
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new StateStoreValidationError(
+      "limit must be a positive safe integer",
+      "limit",
+    );
+  }
+}
+
+interface FallbackLockSnapshot {
+  stale: boolean;
+  token: string | undefined;
+}
+
+function acquireFallbackStateLock(lockPath: string): () => void {
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    try {
+      const fd = openSync(lockPath, "wx", 0o600);
+      try {
+        writeFileSync(
+          fd,
+          JSON.stringify({
+            pid: process.pid,
+            host: hostname(),
+            token: randomUUID(),
+            acquiredAt: new Date().toISOString(),
+          }) + "\n",
+          "utf8",
+        );
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      return () => {
+        try {
+          unlinkSync(lockPath);
+        } catch {
+          /* already released */
+        }
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw new QueueStoreError(
+          `cannot acquire the fallback StateStore lock ${lockPath}: ` +
+            errorMessage(error),
+        );
+      }
+      const snapshot = inspectFallbackStateLock(lockPath);
+      if (snapshot.stale) {
+        reclaimFallbackStateLock(lockPath, snapshot.token);
+        continue;
+      }
+      if (Date.now() > deadline) {
+        throw new QueueStoreError(
+          `timed out waiting for the fallback StateStore lock ${lockPath}; ` +
+            "another cliyard process is writing the queue",
+        );
+      }
+      sleepSync(10);
+    }
+  }
+}
+
+function inspectFallbackStateLock(lockPath: string): FallbackLockSnapshot {
+  let raw: string;
+  try {
+    raw = readFileSync(lockPath, "utf8");
+  } catch (error) {
+    // The holder may have released between EEXIST and this read.
+    return {
+      stale: (error as NodeJS.ErrnoException).code === "ENOENT",
+      token: undefined,
+    };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    parsed = undefined;
+  }
+  if (
+    !isRecord(parsed) ||
+    typeof parsed.pid !== "number" ||
+    typeof parsed.host !== "string" ||
+    typeof parsed.token !== "string"
+  ) {
+    // An unreadable lock blocks writes for a bounded time; after that a human
+    // can remove it. Never guess that it is free.
+    let ageMs = 0;
+    try {
+      ageMs = Date.now() - statSync(lockPath).mtimeMs;
+    } catch {
+      return { stale: true, token: undefined };
+    }
+    return {
+      stale: ageMs > 60_000,
+      token: undefined,
+    };
+  }
+  if (!isSameHost(parsed.host)) {
+    return { stale: false, token: parsed.token };
+  }
+  return {
+    stale: !isProcessAlive(parsed.pid),
+    token: parsed.token,
+  };
+}
+
+function reclaimFallbackStateLock(
+  lockPath: string,
+  expectedToken: string | undefined,
+): void {
+  try {
+    if (expectedToken !== undefined) {
+      const current = JSON.parse(readFileSync(lockPath, "utf8")) as unknown;
+      if (
+        !isRecord(current) ||
+        current.token !== expectedToken
+      ) {
+        return;
+      }
+    }
+    unlinkSync(lockPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      /* the next inspection retries */
+    }
+  }
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 /** Write JSON through a same-directory temp file, then rename atomically. */
