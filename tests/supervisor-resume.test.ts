@@ -28,7 +28,10 @@ import { runSupervisorCli } from "../src/supervisor/cli.js";
 import {
   ContractsHashMismatchError,
   createRunManifest,
+  inspectSupervisorStateStore,
   loadRunManifest,
+  supervisorPaths,
+  supervisorStatePaths,
   updateRunManifest,
 } from "../src/supervisor/store.js";
 
@@ -521,6 +524,67 @@ test("resume records an unavailable abandoned session in missing", async () => {
     // remain missing in the merged truth.
     assert.ok(task.cost.missing.includes("cost.amount"));
     assert.ok(task.cost.missing.includes("cost.usage"));
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("a resumed legacy run checkpoints through the StateStore", async () => {
+  const repo = initRepo();
+  try {
+    const abandonedCost = createCostTruth({
+      observations: [
+        createCostObservation({
+          sessionId: "abandoned-session",
+          amount: 0.04,
+          currency: "USD",
+          usage: FULL_USAGE,
+        }),
+      ],
+    });
+    const { runId } = seedInterruptedRun(repo, abandonedCost);
+
+    // Simulate a run directory written before the cutover: no StateStore yet.
+    rmSync(supervisorStatePaths(repo).stateDir, {
+      recursive: true,
+      force: true,
+    });
+    assert.equal(inspectSupervisorStateStore(repo), undefined);
+
+    assert.equal(await resumeWithCost(repo, runId, "new-session", 0.02), 0);
+
+    const inspection = inspectSupervisorStateStore(repo);
+    assert.ok(inspection, "resume must create the StateStore authority");
+    assert.ok(inspection.migration, "resume must import the legacy run once");
+    assert.equal(inspection.migration.importedRuns, 1);
+    assert.match(inspection.migration.importHash, /^[0-9a-f]{64}$/);
+    assert.equal(inspection.runs[0]?.runId, runId);
+    assert.equal(inspection.activeRun?.runId, runId);
+
+    // The JSON export is derived: removing it must not lose resume state.
+    rmSync(supervisorPaths(repo).runsDir, { recursive: true, force: true });
+    assert.equal(existsSync(supervisorPaths(repo).activePath), false);
+
+    const completed = loadRunManifest(repo, runId);
+    assert.equal(completed.status, "completed");
+    const task = completed.tasks["task"]!;
+    assert.equal(task.accepted, true);
+    assert.ok(task.cost);
+    assert.equal(task.cost.amount, 0.06);
+    assert.equal(task.cost.observations.length, 2);
+    assert.equal(
+      task.cost.observations.filter(
+        (observation) => observation.sessionId === "abandoned-session",
+      ).length,
+      1,
+    );
+    assert.equal(
+      task.cost.observations.filter(
+        (observation) => observation.sessionId === "new-session",
+      ).length,
+      1,
+    );
+    assert.deepEqual(inspection.runs, [completed]);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
