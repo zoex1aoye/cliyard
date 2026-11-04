@@ -1,0 +1,86 @@
+{
+  "planId": "daemon-control-api-v0",
+  "tasks": [
+    {
+      "taskId": "cliyardd-daemon-core",
+      "goal": "Add a long-running cliyardd process under a new src/daemon/ module on Node 20. It opens the StateStore, takes a store-backed single-instance lease, binds a 127.0.0.1 TCP socket on an ephemeral or leased port, prints the bound address and pid, and handles SIGINT/SIGTERM with graceful shutdown that releases the lease and closes the store. Expose start/stop/status CLI subcommands. Keep it read-only: it must not mutate run, queue, ledger or evidence state. Add tests for lease exclusion, graceful shutdown, address reporting and store handoff. Do not add HTTP endpoints, the ExecutionSupervisor or any action endpoint yet.",
+      "nonGoals": [
+        "Do not add HTTP or action endpoints.",
+        "Do not replace the foreground Supervisor.",
+        "Do not require Node above 20."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/ROADMAP.md",
+        "design/daemon-control-api-v0.md",
+        "src/statestore/store.ts",
+        "src/statestore/write.ts",
+        "src/cli.ts",
+        "src/runtime/ports.ts"
+      ],
+      "writePaths": [
+        "src/daemon/core.ts",
+        "src/daemon/cli.ts",
+        "src/cli.ts",
+        "tests/daemon-core.test.ts"
+      ],
+      "verifyCommands": [
+        "npx tsx --test tests/daemon-core.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "A long-running cliyardd process with lease and graceful shutdown.",
+        "CLI start/stop/status subcommands.",
+        "Single-instance and shutdown tests."
+      ],
+      "forbidden": [
+        "Do not mutate run, queue, ledger or evidence state.",
+        "Do not bind a fixed well-known port.",
+        "Do not leave a lease held after stop."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "control-api-read",
+      "goal": "Serve a versioned read-only HTTP Control API from cliyardd using Node built-in http on the bound 127.0.0.1 port. Implement GET /v1/status returning an authoritative snapshot with an opaque version token, GET /v1/events returning bounded NDJSON with a replay cursor (?after=), and GET /v1/runs/:runId returning one run's manifest and evidence reference. Build each response from the StateStore projection and the existing control snapshot; never mutate state or change acceptance. Add tests that start the daemon on a temp port, fetch all three endpoints, verify the version token changes only with state, and that unknown cursors and ids return bounded errors. Do not add authentication, SSE or action endpoints.",
+      "nonGoals": [
+        "Do not add write/action endpoints or authentication.",
+        "Do not use SSE.",
+        "Do not expose anything beyond 127.0.0.1."
+      ],
+      "dependsOn": [
+        "cliyardd-daemon-core"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/ROADMAP.md",
+        "design/daemon-control-api-v0.md",
+        "src/daemon/core.ts",
+        "src/statestore/read.ts",
+        "src/orchestration/control-snapshot.ts",
+        "src/orchestration/event-journal.ts"
+      ],
+      "writePaths": [
+        "src/daemon/http.ts",
+        "src/daemon/api.ts",
+        "tests/control-api-read.test.ts"
+      ],
+      "verifyCommands": [
+        "npx tsx --test tests/daemon-core.test.ts tests/control-api-read.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "GET /v1/status, /v1/events and /v1/runs/:runId read endpoints.",
+        "Opaque version token and bounded NDJSON replay.",
+        "Endpoint and cursor tests."
+      ],
+      "forbidden": [
+        "Do not mutate state or acceptance from any endpoint.",
+        "Do not bind beyond 127.0.0.1.",
+        "Do not add authentication yet."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
