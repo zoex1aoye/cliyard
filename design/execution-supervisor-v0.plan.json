@@ -1,0 +1,169 @@
+{
+  "planId": "execution-supervisor-v0",
+  "tasks": [
+    {
+      "taskId": "execution-interface",
+      "goal": "Add a platform-neutral ExecutionSupervisor interface and RuntimeHandle/ExecutionHandle schema under a new src/execution/ module. Define Start, Inspect, Attach, Stop, Collect and Destroy operations with context cancellation and error classification, a RuntimeHandle type whose authority is backendType plus a stable handle string (PID/PGID diagnostic only), an ExecutionStatus with desiredState and observedState, and a capability model covering descendant control, restart recovery, resource limits and filesystem/network isolation. Include a mock backend for tests. Do not migrate any existing process-tree or worker-lease code and do not add a launchd or Windows backend yet.",
+      "nonGoals": [
+        "Do not refactor worker-lease or process-tree in this task.",
+        "Do not add launchd, Windows or sandbox backends.",
+        "Do not require Node above 20."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/ROADMAP.md",
+        "design/execution-supervisor-v0.md",
+        "design/delivery-control-plane-v2.md",
+        "src/agents/types.ts",
+        "src/agents/worker-lease.ts"
+      ],
+      "writePaths": [
+        "src/execution/types.ts",
+        "src/execution/supervisor.ts",
+        "tests/execution-interface.test.ts"
+      ],
+      "verifyCommands": [
+        "npx tsx --test tests/execution-interface.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "ExecutionSupervisor interface and handle/status/capability schema.",
+        "A mock backend and interface tests."
+      ],
+      "forbidden": [
+        "Do not expose PID as the recovery authority.",
+        "Do not introduce a second process-tree abstraction."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "runtime-handle-authority",
+      "goal": "Migrate worker-lease recovery authority from the top-level PGID to a stable RuntimeHandle that records backend type and an exact identity handle, keeping PID/PGID diagnostic only. Preserve the exact-identity comparison, the identity-reuse vanished classification from the P2a fix, fail-closed behavior and the bounded durable registry. Add tests proving resume/recovery reads the RuntimeHandle, an identity-reused handle is never signalled and never treated as authority, and a truncated registry still returns needs_human. Do not change contract schema or add a launchd backend.",
+      "nonGoals": [
+        "Do not weaken exact-identity or fail-closed safety.",
+        "Do not remove the P2a vanished classification.",
+        "Do not change contract schema in this task."
+      ],
+      "dependsOn": [
+        "execution-interface"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/ROADMAP.md",
+        "design/execution-supervisor-v0.md",
+        "src/execution/types.ts",
+        "src/agents/worker-lease.ts",
+        "src/agents/process-tree.ts",
+        "tests/worker-lease.test.ts",
+        "tests/worker-process-tree.test.ts"
+      ],
+      "writePaths": [
+        "src/agents/worker-lease.ts",
+        "src/agents/process-tree.ts",
+        "tests/worker-lease.test.ts",
+        "tests/worker-process-tree.test.ts"
+      ],
+      "verifyCommands": [
+        "npx tsx --test tests/worker-lease.test.ts tests/worker-process-tree.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "RuntimeHandle as durable recovery authority.",
+        "Exact-identity and identity-reuse safety preserved.",
+        "Recovery and registry-bound tests."
+      ],
+      "forbidden": [
+        "Do not signal an identity-reused handle.",
+        "Do not let a reused PID become recovery authority.",
+        "Do not drop the bounded durable registry semantics."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "continuity-policy",
+      "goal": "Add an execution.continuity field to TaskContract and Plan with fail-closed (default) and durable values, validate it in the contract schema, accept it through Plan compilation and Taskfile defaults, and wire it into supervisor start/resume so durable tasks re-attach by RuntimeHandle after controller restart while fail-closed tasks stop on lease expiry. Preserve legacy contracts as fail-closed. Add tests for validation, defaults, plan round-trip and resume behavior for both values. Do not add a launchd backend and do not change process cleanup semantics.",
+      "nonGoals": [
+        "Do not default to durable for legacy contracts.",
+        "Do not implement cross-host recovery.",
+        "Do not change process-tree cleanup semantics."
+      ],
+      "dependsOn": [
+        "execution-interface"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/ROADMAP.md",
+        "design/execution-supervisor-v0.md",
+        "src/contracts/schema.ts",
+        "src/contracts/fromTaskfile.ts",
+        "src/planner/plan.ts",
+        "src/supervisor/cli.ts",
+        "tests/contract-runtime.test.ts",
+        "tests/supervisor-resume.test.ts"
+      ],
+      "writePaths": [
+        "src/contracts/schema.ts",
+        "src/contracts/fromTaskfile.ts",
+        "src/planner/plan.ts",
+        "src/supervisor/cli.ts",
+        "tests/contract-runtime.test.ts",
+        "tests/supervisor-resume.test.ts"
+      ],
+      "verifyCommands": [
+        "npx tsx --test tests/contract-runtime.test.ts tests/supervisor-resume.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "execution.continuity contract field with validation and defaults.",
+        "Fail-closed vs durable resume wiring.",
+        "Validation and resume tests."
+      ],
+      "forbidden": [
+        "Do not make durable unbounded.",
+        "Do not change legacy contracts to durable.",
+        "Do not conflate controller crash with user cancel."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "runtime-conformance",
+      "goal": "Add a runtime-conformance suite for the macOS process-group backend that proves cancellation and restart semantics. Cover: setsid escape leaves no residual; orphaned grandchildren after leader exit; closed output pipes; controller kill then re-attach by RuntimeHandle; an explicitly cancelled task is never rerun by restart; resource/cleanup of PTY, pipes, temp dirs and handles; and a parallel task is unaffected. Record capability limits honestly (process group is not full descendant-tree containment). Do not add launchd or Windows backends and do not weaken the identity-reuse safety.",
+      "nonGoals": [
+        "Do not add launchd or Windows backends.",
+        "Do not claim cgroup-equivalent containment.",
+        "Do not run unbounded or real-provider fixtures."
+      ],
+      "dependsOn": [
+        "runtime-handle-authority"
+      ],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/ROADMAP.md",
+        "design/execution-supervisor-v0.md",
+        "src/execution/supervisor.ts",
+        "src/agents/worker-lease.ts",
+        "src/agents/process-tree.ts"
+      ],
+      "writePaths": [
+        "src/execution/conformance.ts",
+        "tests/runtime-conformance.test.ts"
+      ],
+      "verifyCommands": [
+        "npx tsx --test tests/runtime-conformance.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "A conformance suite for the macOS process-group backend.",
+        "Cancel, restart, re-attach and cleanup fixtures.",
+        "Explicit capability-limit records."
+      ],
+      "forbidden": [
+        "Do not signal by name or unverified identity.",
+        "Do not claim full descendant containment.",
+        "Do not depend on launchd in this slice."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
