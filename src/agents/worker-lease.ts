@@ -2,9 +2,13 @@
  * WorkerLease v1 (design/worker-lease-v1.md).
  *
  * A lease is the credential-free, same-host record of which controller owns a
- * worker process group. It is written immediately after spawn, updated with
- * the exact OS identity before a result can be accepted, and updated again
- * with the process-tree cleanup outcome.
+ * worker process group. It is written immediately after spawn, updated with a
+ * stable RuntimeHandle before a result can be accepted, and updated again with
+ * the process-tree cleanup outcome.
+ *
+ * Recovery authority is exactly `(runtime.backendType, runtime.handle)`. The
+ * worker pid/pgid/start fields are diagnostics: they may be stale or reused
+ * and never authorize inspection or a signal on their own.
  *
  * A lease is observational coordination. It never grants task acceptance and
  * recovery never rewrites a RunManifest.
@@ -25,6 +29,13 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import {
+  MAX_RUNTIME_HANDLE_LENGTH,
+  MOCK_BACKEND_TYPE,
+  parseRuntimeHandle,
+  sameRuntimeHandle,
+  type RuntimeHandle,
+} from "../execution/types.js";
 import {
   MAX_PROCESS_TABLE_ROWS,
   compareProcessIdentity,
@@ -70,6 +81,89 @@ export const MAX_WORKER_LEASE_NESTED_GROUPS = MAX_NESTED_GROUPS;
 /** Hard bound for the observed nested count carried as evidence. */
 export const MAX_WORKER_LEASE_NESTED_COUNT = 100_000;
 
+/** Backend type of a worker's dedicated POSIX process group. */
+export const WORKER_PROCESS_GROUP_BACKEND = "process-group" as const;
+
+const PROCESS_GROUP_HANDLE_PREFIX = "pg1";
+const PROCESS_GROUP_HANDLE_PATTERN = /^pg1:([1-9][0-9]*):([0-9a-f]+)$/;
+/** Same bound as RuntimeDiagnostics; OS process ids never approach this. */
+const MAX_RUNTIME_PROCESS_ID = 2_147_483_647;
+
+function normalizeRuntimeStartIdentity(value: string): string {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+/**
+ * Encode one exact dedicated-group leader identity as a stable RuntimeHandle.
+ *
+ * The opaque handle is the recovery authority. It survives pid/pgid reuse
+ * because the OS-reported start identity is part of the key; diagnostics are
+ * carried for operators only and never participate in equality.
+ */
+export function processGroupRuntimeHandle(
+  identity: RuntimeProcessIdentity,
+): RuntimeHandle {
+  if (
+    !isProcessIdentity(identity) ||
+    identity.pid !== identity.pgid ||
+    identity.pid > MAX_RUNTIME_PROCESS_ID
+  ) {
+    throw new WorkerLeaseError(
+      "a process-group runtime handle requires an exact dedicated-group identity",
+    );
+  }
+  const startedAt = normalizeRuntimeStartIdentity(identity.startedAt);
+  const encodedStart = Buffer.from(startedAt, "utf8").toString("hex");
+  const handle =
+    `${PROCESS_GROUP_HANDLE_PREFIX}:${identity.pgid}:${encodedStart}`;
+  if (handle.length > MAX_RUNTIME_HANDLE_LENGTH) {
+    throw new WorkerLeaseError(
+      "process-group runtime handle exceeds its bound",
+    );
+  }
+  return {
+    backendType: WORKER_PROCESS_GROUP_BACKEND,
+    handle,
+    diagnostics: { pid: identity.pid, pgid: identity.pgid },
+  };
+}
+
+/**
+ * Decode the exact leader identity from a persisted RuntimeHandle.
+ *
+ * Only canonical handles are accepted: one exact identity has one stable
+ * handle, so two encodings can never disagree about the same unit. A handle
+ * for another backend, an unsupported backend, or a malformed payload is
+ * unusable authority and recovery must fail closed.
+ */
+export function processGroupIdentityFromRuntimeHandle(
+  value: unknown,
+): RuntimeProcessIdentity | undefined {
+  const runtime = parseRuntimeHandle(value);
+  if (!runtime || runtime.backendType !== WORKER_PROCESS_GROUP_BACKEND) {
+    return undefined;
+  }
+  const match = PROCESS_GROUP_HANDLE_PATTERN.exec(runtime.handle);
+  if (!match) return undefined;
+  const pgid = Number(match[1]);
+  if (!isProcessPid(pgid) || pgid <= 1 || pgid > MAX_RUNTIME_PROCESS_ID) {
+    return undefined;
+  }
+  const encodedStart = match[2] as string;
+  if (encodedStart.length % 2 !== 0) return undefined;
+  const startedAt = Buffer.from(encodedStart, "hex").toString("utf8");
+  if (Buffer.from(startedAt, "utf8").toString("hex") !== encodedStart) {
+    return undefined;
+  }
+  const identity: RuntimeProcessIdentity = { pid: pgid, pgid, startedAt };
+  if (!isProcessIdentity(identity)) return undefined;
+  // Canonicality: re-encoding the decoded identity must reproduce the handle.
+  if (processGroupRuntimeHandle(identity).handle !== runtime.handle) {
+    return undefined;
+  }
+  return identity;
+}
+
 /**
  * Optional, all-or-nothing durable nested-descendant evidence. The shape is
  * shared with the managed-process observer; a lease without this field keeps
@@ -97,6 +191,13 @@ export interface WorkerLeaseController {
   identity: RuntimeProcessIdentity;
 }
 
+/**
+ * Diagnostic view of the spawned worker for operators and status output.
+ *
+ * `pid`/`pgid`/`osStartIdentity` are never recovery authority: they may be
+ * absent, stale or reused, and no inspection or signal decision may read them
+ * instead of {@link WorkerLease.runtime}.
+ */
 export interface WorkerLeaseWorker {
   /** Absent only when spawn failed before the OS reported a pid. */
   pid?: number;
@@ -151,6 +252,13 @@ export interface WorkerLease {
   invocationId: string;
   controller: WorkerLeaseController;
   worker: WorkerLeaseWorker;
+  /**
+   * Stable recovery authority captured at attach time. Identity is exactly
+   * `(backendType, handle)`; `worker.pid`/`pgid`/`osStartIdentity` are
+   * diagnostics and never authorize recovery. Absent for legacy or
+   * not-yet-captured leases, which recovery preserves for a human.
+   */
+  runtime?: RuntimeHandle;
   workspace: string;
   startedAt: string;
   updatedAt: string;
@@ -289,6 +397,11 @@ export function parseWorkerLease(value: unknown): WorkerLease | undefined {
   if (!controller) return undefined;
   const worker = parseWorker(value.worker);
   if (!worker) return undefined;
+  const runtime =
+    value.runtime === undefined
+      ? undefined
+      : parseLeaseRuntimeHandle(value.runtime);
+  if (value.runtime !== undefined && !runtime) return undefined;
   const nestedProcesses =
     value.nestedProcesses === undefined
       ? undefined
@@ -331,6 +444,7 @@ export function parseWorkerLease(value: unknown): WorkerLease | undefined {
     invocationId,
     controller,
     worker,
+    ...(runtime !== undefined ? { runtime } : {}),
     workspace,
     startedAt: value.startedAt,
     updatedAt: value.updatedAt,
@@ -504,6 +618,22 @@ function parseWorker(value: unknown): WorkerLeaseWorker | undefined {
     ...(startedAt !== undefined ? { osStartIdentity: startedAt } : {}),
     captureMode: value.captureMode as WorkerLeaseCaptureMode,
   };
+}
+
+/**
+ * Persisted handles are production authority: the test-only mock backend is
+ * never accepted, and a process-group handle must decode canonically.
+ */
+function parseLeaseRuntimeHandle(value: unknown): RuntimeHandle | undefined {
+  const runtime = parseRuntimeHandle(value);
+  if (!runtime || runtime.backendType === MOCK_BACKEND_TYPE) return undefined;
+  if (
+    runtime.backendType === WORKER_PROCESS_GROUP_BACKEND &&
+    !processGroupIdentityFromRuntimeHandle(runtime)
+  ) {
+    return undefined;
+  }
+  return runtime;
 }
 
 function parseCleanupEvidence(
@@ -785,6 +915,10 @@ export function createWorkerLeaseAttacher(
       }
       if (capture.identity && managed.pid !== undefined) {
         if (capture.identity.pid === managed.pid) {
+          const runtime = runtimeHandleForManagedIdentity(
+            managed,
+            capture.identity,
+          );
           current = {
             ...current,
             worker: {
@@ -793,6 +927,7 @@ export function createWorkerLeaseAttacher(
               pgid: capture.identity.pgid,
               osStartIdentity: capture.identity.startedAt,
             },
+            ...(runtime !== undefined ? { runtime } : {}),
             state: "active",
           };
         } else {
@@ -1165,6 +1300,28 @@ function sameIdentities(
   return true;
 }
 
+/**
+ * Build persistence-only recovery authority from a captured worker identity.
+ *
+ * Only a dedicated POSIX group leader is recoverable in this slice; anything
+ * else leaves `runtime` absent, which recovery treats as fail-closed rather
+ * than inventing an identity from diagnostics.
+ */
+function runtimeHandleForManagedIdentity(
+  managed: ManagedWorkerProcess,
+  identity: RuntimeProcessIdentity,
+): RuntimeHandle | undefined {
+  if (managed.captureSupport !== "posix-process-group") return undefined;
+  if (identity.pid !== managed.pid || identity.pid !== identity.pgid) {
+    return undefined;
+  }
+  try {
+    return processGroupRuntimeHandle(identity);
+  } catch {
+    return undefined;
+  }
+}
+
 function provisionalLease(input: {
   leaseId: string;
   repoRoot: string;
@@ -1248,20 +1405,32 @@ function leaseStateForCleanup(
   if (!outcome.treeOk || outcome.record.cleanupState === "failed") {
     return "cleanup-failed";
   }
+  const authority = processGroupIdentityFromRuntimeHandle(lease.runtime);
+  // The cleanup record must prove the same RuntimeHandle identity. Diagnostic
+  // pid/pgid fields are deliberately not consulted; a lease without a stable
+  // handle stays unknown evidence rather than a success claim.
   if (
-    lease.worker.captureMode !== "posix-group" ||
+    authority === undefined ||
     outcome.record.captureSupport !== "posix-process-group" ||
-    !lease.worker.osStartIdentity ||
-    !isProcessPid(lease.worker.pid) ||
-    !isProcessPid(lease.worker.pgid) ||
     outcome.record.captureSource === "none" ||
-    outcome.record.captureSource === "unsupported"
+    outcome.record.captureSource === "unsupported" ||
+    !isProcessIdentity(outcome.record.identity) ||
+    compareProcessIdentity(authority, outcome.record.identity) !== "match"
   ) {
     // A short-lived worker or a platform without group ownership never gains a
     // fabricated identity. It remains unknown evidence, not a success claim.
     return "unknown";
   }
   return "released";
+}
+
+/** Absence is itself part of the recorded authority and cannot be added later. */
+function sameOptionalRuntimeHandle(
+  left: RuntimeHandle | undefined,
+  right: RuntimeHandle | undefined,
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return sameRuntimeHandle(left, right);
 }
 
 function assertImmutableLeaseFields(
@@ -1286,7 +1455,8 @@ function assertImmutableLeaseFields(
     onDisk.worker.pid === expected.worker.pid &&
     onDisk.worker.pgid === expected.worker.pgid &&
     onDisk.worker.osStartIdentity === expected.worker.osStartIdentity &&
-    onDisk.worker.captureMode === expected.worker.captureMode;
+    onDisk.worker.captureMode === expected.worker.captureMode &&
+    sameOptionalRuntimeHandle(onDisk.runtime, expected.runtime);
   if (!same) {
     throw new WorkerLeasePersistenceError(
       `worker lease identity was rewritten concurrently: ${onDisk.leaseId}`,
@@ -1485,6 +1655,8 @@ export interface WorkerLeaseStatusEntry {
     state: WorkerLeaseControllerState;
   };
   worker: WorkerLeaseWorker;
+  /** Stable recovery authority; diagnostics inside it are display-only. */
+  runtime?: RuntimeHandle;
   cleanupReason?: WorkerLeaseCleanupReason;
   cleanedAt?: string;
   cleanup?: WorkerLeaseCleanupEvidence;
@@ -1629,6 +1801,7 @@ async function statusEntry(
       state: controllerState,
     },
     worker: { ...lease.worker },
+    ...(lease.runtime !== undefined ? { runtime: { ...lease.runtime } } : {}),
     ...(lease.cleanupReason !== undefined
       ? { cleanupReason: lease.cleanupReason }
       : {}),
@@ -2095,6 +2268,42 @@ async function observeController(
   }
 }
 
+type WorkerRuntimeAuthority =
+  | { ok: true; identity: RuntimeProcessIdentity }
+  | { ok: false; reason: string };
+
+/**
+ * The RuntimeHandle is the only recovery authority. `lease.worker.pid/pgid`
+ * are diagnostics and are deliberately not read here: a stale or reused
+ * diagnostic must never authorize inspection or a signal.
+ */
+function resolveWorkerRuntimeAuthority(
+  lease: WorkerLease,
+): WorkerRuntimeAuthority {
+  if (lease.runtime === undefined) {
+    return {
+      ok: false,
+      reason: "worker runtime handle is missing; processes preserved",
+    };
+  }
+  if (lease.runtime.backendType !== WORKER_PROCESS_GROUP_BACKEND) {
+    return {
+      ok: false,
+      reason:
+        `worker runtime backend ${lease.runtime.backendType} has no ` +
+        "recoverable POSIX group; processes preserved",
+    };
+  }
+  const identity = processGroupIdentityFromRuntimeHandle(lease.runtime);
+  if (!identity) {
+    return {
+      ok: false,
+      reason: "worker runtime handle is malformed; processes preserved",
+    };
+  }
+  return { ok: true, identity };
+}
+
 async function recoverWorkerGroup(
   lease: WorkerLease,
   context: RecoveryContext,
@@ -2103,30 +2312,11 @@ async function recoverWorkerGroup(
   if (lease.nestedProcesses !== undefined) {
     return recoverNestedWorker(lease, context, path);
   }
-  const pid = lease.worker.pid;
-  const pgid = lease.worker.pgid;
-  const osStartIdentity = lease.worker.osStartIdentity;
-  if (lease.worker.captureMode !== "posix-group") {
-    return preserveNeedsHuman(
-      "worker was captured as windows-exact-child; no recoverable POSIX group",
-    );
-  }
-  if (!isProcessPid(pid) || !isProcessPid(pgid) || !osStartIdentity) {
-    return preserveNeedsHuman(
-      "exact worker pid/pgid/OS start identity is missing; processes preserved",
-    );
-  }
-  if (pgid !== pid) {
-    return preserveNeedsHuman(
-      "worker was not the leader of its dedicated process group; processes preserved",
-    );
-  }
-
-  const expectedIdentity: RuntimeProcessIdentity = {
-    pid,
-    pgid,
-    startedAt: osStartIdentity,
-  };
+  const authority = resolveWorkerRuntimeAuthority(lease);
+  if (!authority.ok) return preserveNeedsHuman(authority.reason);
+  const expectedIdentity = authority.identity;
+  const pid = expectedIdentity.pid;
+  const pgid = expectedIdentity.pgid;
   let observed: RuntimeProcessIdentity | undefined;
   try {
     observed = await context.inspector.capture(pid);
@@ -2156,7 +2346,8 @@ async function recoverWorkerGroup(
   }
   if (compareProcessIdentity(expectedIdentity, observed) !== "match") {
     return preserveNeedsHuman(
-      "worker exact identity does not match the lease; processes preserved",
+      "worker runtime handle identity was reused or mismatched; " +
+        "processes preserved",
     );
   }
 
@@ -2425,29 +2616,11 @@ async function recoverNestedWorker(
     }
   }
 
-  const pid = lease.worker.pid;
-  const pgid = lease.worker.pgid;
-  const osStartIdentity = lease.worker.osStartIdentity;
-  if (lease.worker.captureMode !== "posix-group") {
-    return preserve(
-      "worker was captured as windows-exact-child; no recoverable POSIX group",
-    );
-  }
-  if (!isProcessPid(pid) || !isProcessPid(pgid) || !osStartIdentity) {
-    return preserve(
-      "exact worker pid/pgid/OS start identity is missing; processes preserved",
-    );
-  }
-  if (pgid !== pid) {
-    return preserve(
-      "worker was not the leader of its dedicated process group; processes preserved",
-    );
-  }
-  const expectedIdentity: RuntimeProcessIdentity = {
-    pid,
-    pgid,
-    startedAt: osStartIdentity,
-  };
+  const authority = resolveWorkerRuntimeAuthority(lease);
+  if (!authority.ok) return preserve(authority.reason);
+  const expectedIdentity = authority.identity;
+  const pid = expectedIdentity.pid;
+  const pgid = expectedIdentity.pgid;
 
   // Rule 2/3: classify the top-level leader. Capture errors stay ambiguous;
   // an absent or reused leader only disables group cleanup.
