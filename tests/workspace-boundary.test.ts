@@ -223,7 +223,7 @@ test("symlinks are snapshotted by target and never followed", async (t) => {
 
 test("excluded control-plane paths never dirty the boundary", async (t) => {
   const fx = fixture(t);
-  for (const rel of [
+  const mutableControlPaths = [
     ".cliyard/worktrees/w1/scratch.txt",
     ".cliyard/runtime/reaper.json",
     ".cliyard/worker-events/event.jsonl",
@@ -231,37 +231,41 @@ test("excluded control-plane paths never dirty the boundary", async (t) => {
     ".cliyard/queue-events/queue.jsonl",
     ".cliyard/logs/run.log",
     ".cliyard/ledger.json",
-  ]) {
+    ".cliyard/ledger-master-test.json",
+    ".cliyard/queue.json",
+    ".cliyard/plans/task-v0.json",
+    ".cliyard/contracts/task-v0.contracts.json",
+    ".cliyard/evidence/run.md",
+  ];
+  for (const rel of mutableControlPaths) {
     fx.write(rel, "mutable");
   }
-  const protectedAuthority = [
-    ".cliyard/contracts/plan.json",
-    ".cliyard/queue.json",
-    ".cliyard/runs/run-1.json",
-  ];
+  // `.cliyard` is mutable control state as a whole; only RunManifest files
+  // under `.cliyard/runs` remain protected task authority.
+  const protectedAuthority = [".cliyard/runs/run-1.json"];
   for (const rel of protectedAuthority) fx.write(rel, "protected");
   fx.write("src/app.ts", "protected source");
   const before = await capture(fx);
 
-  for (const rel of [
-    ".cliyard/worktrees/w1/scratch.txt",
-    ".cliyard/worktrees/w2/new.txt",
-    ".cliyard/runtime/reaper.json",
-    ".cliyard/worker-events/event.jsonl",
-    ".cliyard/worker-leases/lease.json",
-    ".cliyard/queue-events/queue.jsonl",
-    ".cliyard/logs/run.log",
-    ".cliyard/ledger.json",
-  ]) {
+  // The excluded containers are traversed but never recorded, so their
+  // creation or removal is not boundary evidence.
+  const entryPaths = [...before.entries.values()].map((entry) => entry.path);
+  assert.ok(!entryPaths.includes(".cliyard"));
+  assert.ok(!entryPaths.includes(".cliyard/runs"));
+  assert.ok(entryPaths.includes(".cliyard/runs/run-1.json"));
+
+  for (const rel of mutableControlPaths) {
     fx.write(rel, "mutated by control plane");
   }
+  // A brand-new control-state file during a run is not a violation.
+  fx.write(".cliyard/ledger-created-during-run.json", "{}");
   const after = await capture(fx);
   assert.deepEqual(compareWorkspaceBoundary(before, after), {
     status: "clean",
     changes: [],
   });
 
-  // Control authority files under .cliyard stay protected.
+  // RunManifest authority under .cliyard/runs stays protected.
   for (const rel of protectedAuthority) {
     // Restore the baseline before mutating one authority file.
     for (const restore of protectedAuthority) fx.write(restore, "protected");
@@ -270,6 +274,122 @@ test("excluded control-plane paths never dirty the boundary", async (t) => {
     assert.equal(tampered.status, "dirty", `expected dirty for ${rel}`);
     if (tampered.status !== "dirty") continue;
     assert.deepEqual(changedPaths(tampered.changes), [rel]);
+  }
+});
+
+test("mutable .cliyard state is not evidence but source roots stay protected", async (t) => {
+  const fx = fixture(t);
+  const worktree = join(fx.root, ".cliyard", "worktrees", "task-1");
+  const writeIn = (rel: string, content = "x"): void => {
+    const abs = join(worktree, rel);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, content);
+  };
+  const removeIn = (rel: string): void => {
+    rmSync(join(worktree, rel.split("/")[0]!), {
+      recursive: true,
+      force: true,
+    });
+  };
+  writeIn("src/app.ts", "source v1");
+  writeIn("package.json", "{\"name\":\"fixture\"}");
+
+  const policy = taskWorkspaceBoundaryPolicy({
+    worktreePath: worktree,
+    writePaths: ["src/owned.ts"],
+  });
+  const before = await captureWorkspaceBoundary(policy);
+
+  // A run creates ledger variants and other mutable control-plane files.
+  // None of them may become boundary evidence.
+  writeIn(".cliyard/ledger-master-test.json", "{\"task\":\"fixture\"}");
+  writeIn(".cliyard/ledger-created-during-run.json", "{\"run\":\"fixture\"}");
+  writeIn(".cliyard/queue.json", "{}");
+  writeIn(".cliyard/plans/plan-v0.json", "{}");
+  writeIn(".cliyard/contracts/task.contracts.json", "{}");
+  writeIn(".cliyard/evidence/run.md", "# evidence");
+  // A contract write path is audit-owned, not boundary evidence.
+  writeIn("src/owned.ts", "worker output");
+  assert.deepEqual(
+    compareWorkspaceBoundary(before, await captureWorkspaceBoundary(policy)),
+    { status: "clean", changes: [] },
+  );
+
+  // A newly added source file outside writePaths is still a violation.
+  writeIn("src/rogue.ts", "unexpected");
+  const rogue = compareWorkspaceBoundary(
+    before,
+    await captureWorkspaceBoundary(policy),
+  );
+  assert.equal(rogue.status, "dirty");
+  if (rogue.status !== "dirty") return;
+  assert.deepEqual(changedPaths(rogue.changes), ["src/rogue.ts"]);
+  assert.equal(rogue.changes[0]!.change, "added");
+  assert.equal(rogue.changes[0]!.kind, "file");
+  rmSync(join(worktree, "src", "rogue.ts"), { force: true });
+
+  // An existing protected file is still detected by digest.
+  writeIn("package.json", "{\"name\":\"tampered\"}");
+  const pkg = compareWorkspaceBoundary(
+    before,
+    await captureWorkspaceBoundary(policy),
+  );
+  assert.equal(pkg.status, "dirty");
+  if (pkg.status !== "dirty") return;
+  assert.deepEqual(changedPaths(pkg.changes), ["package.json"]);
+  writeIn("package.json", "{\"name\":\"fixture\"}");
+
+  // Every source, design, docs, plugin, test and example root stays
+  // protected; only the `.cliyard` control state is excluded.
+  for (const rel of [
+    "src/added.ts",
+    "design/added.md",
+    "docs/added.md",
+    "plugins/added.ts",
+    "tests/added.test.ts",
+    "examples/added.ts",
+  ]) {
+    writeIn(rel, "protected");
+    const result = compareWorkspaceBoundary(
+      before,
+      await captureWorkspaceBoundary(policy),
+    );
+    assert.equal(result.status, "dirty", `expected dirty for ${rel}`);
+    if (result.status !== "dirty") continue;
+    assert.ok(
+      changedPaths(result.changes).includes(rel),
+      `expected ${rel} in ${JSON.stringify(changedPaths(result.changes))}`,
+    );
+    for (const change of result.changes) {
+      assert.ok(
+        !change.path.startsWith(".cliyard"),
+        `control state must not be evidence: ${change.path}`,
+      );
+    }
+    removeIn(rel);
+  }
+});
+
+test("default exclusions cover .cliyard as a whole and no source root", () => {
+  assert.ok(
+    DEFAULT_EXCLUDED_CONTROL_PATHS.includes(".cliyard"),
+    ".cliyard must be excluded as a whole",
+  );
+  assert.ok(DEFAULT_EXCLUDED_CONTROL_PATHS.includes(".git"));
+  assert.ok(DEFAULT_EXCLUDED_CONTROL_PATHS.includes("dist"));
+  for (const root of [
+    "src",
+    "design",
+    "docs",
+    "plugins",
+    "tests",
+    "examples",
+    "package.json",
+  ]) {
+    assert.ok(
+      !DEFAULT_EXCLUDED_CONTROL_PATHS.includes(root),
+      `${root} must stay protected`,
+    );
   }
 });
 

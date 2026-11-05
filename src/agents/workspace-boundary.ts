@@ -25,13 +25,22 @@ export const DEFAULT_MAX_PATH_LENGTH = 4_096;
 export const DEFAULT_MAX_DIAGNOSTIC_LENGTH = 2_048;
 
 /**
- * Control-plane mutable paths excluded by default (design/workspace-boundary-v1.md).
+ * Control-plane mutable paths excluded by default
+ * (design/workspace-boundary-v1.md, design/workspace-boundary-exclude-cliyard-v0.md).
  *
  * `.git` is excluded wholesale and then re-included selectively: the
  * important common-directory state (`HEAD`, `index`, `packed-refs`, `config`,
  * `hooks`, `refs`) is protected while objects, logs and per-worktree state
- * are not hashed. `.cliyard/ledger.json` is the default ledger path from
- * `src/persistence/ledger.ts`; a configured ledger path is added by policy.
+ * are not hashed.
+ *
+ * `.cliyard` is the control plane's mutable state directory, not protected
+ * source. Its ledgers (including per-task and test-fixture variants such as
+ * `.cliyard/ledger-master-test.json`), queue state, plans, contracts,
+ * evidence, worktrees, runtime state and event logs may be created or
+ * rewritten while a worker runs, so the whole directory is excluded from
+ * comparison. RunManifest files under `.cliyard/runs/` remain protected task
+ * authority (design/workspace-boundary-v1.md); a caller may exclude the exact
+ * active manifest while the control plane checkpoints it.
  *
  * `dist` is the TypeScript build output (`npm run build`). Workers and
  * verifiers may legitimately compile in their task worktree, so build output
@@ -39,15 +48,26 @@ export const DEFAULT_MAX_DIAGNOSTIC_LENGTH = 2_048;
  */
 export const DEFAULT_EXCLUDED_CONTROL_PATHS: readonly string[] = Object.freeze([
   ".git",
-  ".cliyard/worktrees",
-  ".cliyard/runtime",
-  ".cliyard/worker-events",
-  ".cliyard/worker-leases",
-  ".cliyard/queue-events",
-  ".cliyard/logs",
-  ".cliyard/ledger.json",
+  ".cliyard",
   "dist",
 ]);
+
+/**
+ * Excluded container directories that are still traversed so protected
+ * descendants can be inspected. The containers themselves are never recorded
+ * as snapshot entries, so creating `.cliyard` (or `.cliyard/runs`) during a
+ * run is not boundary evidence.
+ */
+const EXCLUDED_TRAVERSAL_PATHS: readonly string[] = Object.freeze([
+  ".cliyard",
+  ".cliyard/runs",
+]);
+
+/**
+ * RunManifest files are task authority, not disposable control state. Every
+ * manifest except the caller-excluded active one stays protected.
+ */
+const RUN_MANIFEST_PATH_PATTERN = /^\.cliyard\/runs\/[^/]+\.json$/;
 
 /** Important Git common-directory state protected despite the `.git` exclusion. */
 const DEFAULT_GIT_STATE_PATHS: readonly string[] = Object.freeze([
@@ -527,8 +547,17 @@ async function walkDirectory(
 
     // Excluded entries are never inspected: they are not classified, hashed
     // or recursed into, so a FIFO, socket or unreadable file under a mutable
-    // control-plane path cannot fail the inspection.
-    if (!isProtectedEntry(absPath, relPath, exclusions)) continue;
+    // control-plane path cannot fail the inspection. Excluded containers such
+    // as `.cliyard` are traversed without being recorded so protected
+    // descendants (RunManifests) can still be compared.
+    const protection = entryProtection(absPath, relPath, exclusions);
+    if (protection === "skip") continue;
+    if (protection === "recurse") {
+      if (dirent.isDirectory()) {
+        await walkDirectory(absPath, relPath, rootIndex, exclusions, caps, entries, state);
+      }
+      continue;
+    }
 
     if (CONTROL_CHARACTER_PATTERN.test(dirent.name)) {
       throw new WorkspaceBoundaryInspectionError(
@@ -582,24 +611,40 @@ async function classifyEntry(
   );
 }
 
-/** Important Git state wins over the `.git` exclusion for every root. */
-function isProtectedEntry(
+type EntryProtection = "include" | "recurse" | "skip";
+
+/**
+ * Classify a dirent for the walk. Important Git state wins over the `.git`
+ * exclusion. The `.cliyard` exclusion is wholesale for mutable control state,
+ * but the container and the runs directory are traversed so RunManifest
+ * authority files stay protected.
+ */
+function entryProtection(
   absPath: string,
   relPath: string,
   exclusions: RootExclusions,
-): boolean {
-  if (isGitStatePath(relPath)) return true;
+): EntryProtection {
+  if (isGitStatePath(relPath)) return "include";
   for (const exclusion of exclusions.absolute) {
     if (absPath === exclusion || absPath.startsWith(`${exclusion}${sep}`)) {
-      return false;
+      return "skip";
     }
   }
+  let controlStateExcluded = false;
   for (const exclusion of exclusions.relative) {
     if (relPath === exclusion || relPath.startsWith(`${exclusion}/`)) {
-      return false;
+      // A caller-provided exclusion narrower than the default `.cliyard`
+      // entry still wins; the RunManifest re-inclusion is only a default.
+      if (exclusion !== ".cliyard") return "skip";
+      controlStateExcluded = true;
     }
   }
-  return true;
+  if (controlStateExcluded) {
+    if (EXCLUDED_TRAVERSAL_PATHS.includes(relPath)) return "recurse";
+    if (RUN_MANIFEST_PATH_PATTERN.test(relPath)) return "include";
+    return "skip";
+  }
+  return "include";
 }
 
 function isGitStatePath(relPath: string): boolean {
