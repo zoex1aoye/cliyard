@@ -48,6 +48,16 @@ verdict and reason
 - 缺失 cost 是 `unavailable`，不是 `$0`。
 - 自动 retry/续期必须比通用 retry 更窄，并有 reason、attempt bound 和 durable audit。
 
+## 成本真相与确定性门禁
+
+- attempt 成本必须累积，不覆盖；中断、resume 或 provider 错误的场次显式标 `missing`，绝不静默丢弃。
+- run 级聚合必须包含每一场真实 session；`missing: []` 只有在确实没有缺失场时成立。
+- guard budget 是护栏；`provider-reported` / `cli-estimated` / `usage-only` / `unavailable` 分开记录，不混为一个数字。
+- 确定性门禁（build / full test / path audit / boundary）是纯 shell，绝不路由经过模型。
+- 合入前必须跑完整套件；只跑 focused tests 不能宣称全量回归。
+- 门禁失败只把 run 标为 blocked/needs_human，不改写已 accepted 的任务 verdict。
+- 失败分类决定重试：实现/verifier 失败可 resume；门禁、基础设施、policy 失败先确定性修门禁，不重付模型。
+
 ## blocked 与 adoption
 
 - blocked/interrupted RunManifest 是历史真相，不改写成成功。

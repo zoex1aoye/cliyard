@@ -90,6 +90,13 @@ DSH、WorkBuddy 或未来自有 Web UI 是可替换人机入口；cliyard 负责
 11. **工具迭代工具必须用对来源**：用 cliyard 改 cliyard 时，从最新已验收 integration worktree 启动控制面，
     目标仓库仍是主 checkout；任务分支里的新代码不能声称已在同一次 run 中自举验证。
 12. **保留人工合入门**：accepted 表示证据足以进入人工审查，不等于自动合入；worktree 默认保留到 diff 审完。
+13. **成本真相不丢场次**：attempt 成本必须累积，不得被后续 attempt 覆盖；中断、resume 或 provider 错误的场次
+    必须显式标 `missing`，绝不静默丢弃或当 `$0`。guard budget 是本地护栏，不是 provider 账单或余额。
+14. **执行隔离要 fail-fast**：worker 与 verifier 的 cwd 必须等于 task worktree 的绝对路径，绝不等于 repoRoot；
+    spawn 前校验，不满足即中止并留错误证据。WorkspaceBoundary 按目录排除构建产物与控制面状态
+    （`dist/`、`.cliyard/`），不按单个文件逐个点名。
+15. **确定性门禁不经模型**：build / full test / path audit / boundary 检查是纯 shell 命令，绝不路由经过模型；
+    合入前必须全量套件绿；门禁失败只标 blocked/needs_human，不改写已 accepted 的任务 verdict。
 
 ## 6. 当前安全与能力事实
 

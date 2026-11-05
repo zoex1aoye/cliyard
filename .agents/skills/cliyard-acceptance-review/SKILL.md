@@ -52,6 +52,8 @@ git -C <worktree> diff --name-status <base>...<artifact>
 - 在需要时从 artifact 独立重跑 focused tests；集成审查再跑 build/full suite。
 - 测试失败、未运行、被跳过和 flaky 历史都必须写清。
 - 不以文档声称、Worker 摘要或单个 exit 0 代替可复现证据。
+- 集成审查必须经过 [cliyard-deterministic-gate](../cliyard-deterministic-gate/SKILL.md)
+  的全量门禁；只跑 focused tests 不能给 merge 建议。
 
 ### 4. Runtime and process
 
@@ -76,6 +78,15 @@ git -C <worktree> diff --name-status <base>...<artifact>
 - 结果是否被错误描述成 OS sandbox、完整进程树恢复、动态路由或全量并行；
 - 是否存在新的 P0/P1 安全缺口；
 - 是否把 `accepted_with_gap` 写成完整闭环。
+
+### 7. Cost truth
+
+用 [cliyard-cost-truth-audit](../cliyard-cost-truth-audit/SKILL.md) 审成本真相：
+
+- attempt 成本是否累积、中断场是否显式 `missing`；
+- run 级聚合是否覆盖每一场真实 session；
+- guard 与 provider/CLI/usage/unavailable 是否分开标；
+- 结论为 `complete` 才能把成本写进 merge 建议；`partial` 必须列为缺口。
 
 ## Verdict Format
 

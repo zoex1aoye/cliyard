@@ -30,6 +30,17 @@ alwaysApply: true
 - 禁止按进程名、端口、模糊 `ps` 结果或“看起来像孤儿”做 broad kill。
 - CLI 或 test runner 可能创建 nested group/session；不能假设顶层 worker group 自动拥有全部后代。
 - 当前 controller-death nested-group recovery 尚未闭环，报告中不得声称已覆盖。
+- 外部组 leader 身份变化或 PID 被复用时，归类为 `vanished` 证据（不 signal、不计 residual），
+  前提是剩余行都不匹配已采样的 worker 后代身份；否则 `needs_human`，绝不自动接受。
+- `RuntimeHandle` 是恢复权威，PID/PGID 只作诊断字段；身份复用的 PID 绝不能成为恢复权威。
+
+## 执行隔离
+
+- worker 与 verifier 的 cwd 必须等于 task worktree 的绝对路径，绝不等于 repoRoot。
+- spawn 前 fail-fast 校验：cwd 非空、绝对、存在、是目录、canonical 后不等于 repoRoot、且等于已准备的 task worktree；
+  任何一条不满足即中止，不进入 spawn。
+- WorkspaceBoundary 的排除按目录声明（`dist/`、`.cliyard/` 等），不按单个文件逐个点名，
+  避免构建产物或控制面状态文件误触发保护根检测。
 
 ## 运行与端口
 

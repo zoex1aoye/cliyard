@@ -130,6 +130,9 @@ npx tsx src/cli.ts supervisor start <target>/design/<id>.contracts.json \
 - timeout/budget 只有在有界、健康且可审计的 policy 下才能续期。
 - controller death 后用精确 lease identity 恢复；身份不明则 `needs_human`。
 - 不对未知进程做 broad kill，不删除 dirty worktree，不重写失败 RunManifest。
+- 失败分类决定重试：实现/verifier 失败可 `resume`；门禁、基础设施、policy 失败
+  先确定性修门禁，不盲目重付模型。预算护栏用历史遥测分位数（P75 + 余量）校准，
+  不套静态公式。
 
 ## 7. Review Before Merge
 
@@ -147,6 +150,10 @@ npx tsx src/cli.ts supervisor start <target>/design/<id>.contracts.json \
 
 默认保留 task/integration worktree。向用户交付可合入 commit 和 diff 摘要，
 只有用户明确要求时才 merge、push 或清理。
+
+合入前先跑 [cliyard-deterministic-gate](../cliyard-deterministic-gate/SKILL.md)
+的 integration 全量门禁（build + 完整套件）；失败不 merge。并用
+[cliyard-cost-truth-audit](../cliyard-cost-truth-audit/SKILL.md) 审成本真相。
 
 ## 8. Feed Findings Back
 
