@@ -1,0 +1,49 @@
+{
+  "planId": "workspace-boundary-exclude-cliyard-v0",
+  "contracts": [
+    {
+      "taskId": "workspace-boundary-exclude-cliyard",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Exclude the .cliyard directory as a whole from DEFAULT_EXCLUDED_CONTROL_PATHS in src/agents/workspace-boundary.ts so every mutable control-plane file (ledger variants, queue, runs, plans, contracts, evidence) is excluded from the protected-root comparison, while source roots remain protected. Add a regression test proving a newly added .cliyard/ledger-<name>.json file during a run does not trigger a boundary violation, while a newly added src/ file outside writePaths still does, and that the source-root protections are unchanged. Preserve fail-closed caps and the .git selective re-inclusion."
+      ],
+      "nonGoals": [
+        "Do not weaken source, design or docs protection.",
+        "Do not change write-path auditing.",
+        "Do not exclude anything beyond the .cliyard control state."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/KNOWN_GAPS_2026-10-28.md",
+        "design/workspace-boundary-exclude-cliyard-v0.md",
+        "design/workspace-boundary-v1.md",
+        "src/agents/workspace-boundary.ts",
+        "tests/workspace-boundary.test.ts",
+        "tests/workspace-boundary-integration.test.ts"
+      ],
+      "writePaths": [
+        "src/agents/workspace-boundary.ts",
+        "tests/workspace-boundary.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "703a59eb07758de82728c377931e74d57085be6a",
+      "verifyCommands": [
+        "npx tsx --test tests/workspace-boundary.test.ts tests/workspace-boundary-integration.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        ".cliyard excluded as a whole from the default boundary protections.",
+        "A control-state vs source regression test.",
+        "Preserved source-root protections and fail-closed caps."
+      ],
+      "forbidden": [
+        "Do not exclude src, design, docs, plugins, tests or examples.",
+        "Do not change write-path auditing.",
+        "Do not weaken the caps."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
