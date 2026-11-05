@@ -1,0 +1,43 @@
+{
+  "planId": "workspace-boundary-exclude-build-v0",
+  "tasks": [
+    {
+      "taskId": "workspace-boundary-exclude-build",
+      "goal": "Add 'dist' to DEFAULT_EXCLUDED_CONTROL_PATHS in src/agents/workspace-boundary.ts so build output emitted by npm run build is never hashed or reported as a protected-root change. Add a regression test proving that a newly added dist/ file during a run does not produce a workspace-boundary violation, while a newly added src/ file outside writePaths still does, and that every existing default exclusion remains intact. Preserve fail-closed caps and the .git selective re-inclusion. Do not change the write-path audit or any other guard behavior.",
+      "nonGoals": [
+        "Do not weaken source, design or evidence protection.",
+        "Do not change write-path audit semantics.",
+        "Do not exclude anything besides the dist build output."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/KNOWN_GAPS_2026-10-28.md",
+        "design/workspace-boundary-exclude-build-v0.md",
+        "design/workspace-boundary-v1.md",
+        "src/agents/workspace-boundary.ts",
+        "tests/workspace-boundary.test.ts",
+        "tests/workspace-boundary-integration.test.ts"
+      ],
+      "writePaths": [
+        "src/agents/workspace-boundary.ts",
+        "tests/workspace-boundary.test.ts"
+      ],
+      "verifyCommands": [
+        "npx tsx --test tests/workspace-boundary.test.ts tests/workspace-boundary-integration.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "dist excluded from the default WorkspaceBoundary protections.",
+        "A build-output vs outside-write-path regression test.",
+        "Preserved existing exclusions and fail-closed caps."
+      ],
+      "forbidden": [
+        "Do not exclude src, design, docs, evidence or Git state.",
+        "Do not change the write-path audit.",
+        "Do not weaken the 100,000-entry or change caps."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
