@@ -4,7 +4,11 @@
  */
 import { loadTaskFile } from "../taskfile.js";
 import type { TaskFile, TaskFileItem } from "../types.js";
-import { validateContract, type TaskContract } from "./schema.js";
+import {
+  validateContract,
+  type ExecutionContinuityPolicy,
+  type TaskContract,
+} from "./schema.js";
 
 export interface FromTaskfileOptions {
   /** Frozen contract version (default 1). */
@@ -18,6 +22,11 @@ export interface FromTaskfileOptions {
    * Absent keeps the verifier's 30-second default for legacy imports.
    */
   verifyTimeoutMs?: number;
+  /**
+   * Execution-continuity policy applied to every generated contract. Absent
+   * keeps the legacy fail-closed behavior and leaves `execution` unwritten.
+   */
+  continuity?: ExecutionContinuityPolicy;
   /** Mark contracts frozen for dispatch (default true). */
   frozen?: boolean;
 }
@@ -44,6 +53,7 @@ export function taskItemToContract(
   const frozen = opts.frozen ?? DEFAULTS.frozen;
   const verifyCommands = opts.verifyCommands ?? [...DEFAULTS.verifyCommands];
   const verifyTimeoutMs = opts.verifyTimeoutMs;
+  const continuity = opts.continuity;
 
   const writePaths = item.paths?.length ? [...item.paths] : [];
   const contractFiles = file.shared?.contract_files ?? [];
@@ -66,6 +76,9 @@ export function taskItemToContract(
     verifyCommands,
     maxRepairs,
     ...(verifyTimeoutMs === undefined ? {} : { verifyTimeoutMs }),
+    ...(continuity === undefined
+      ? {}
+      : { execution: { continuity } }),
   };
 
   const result = validateContract(raw);

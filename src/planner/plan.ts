@@ -252,6 +252,9 @@ function compileTask(
   const verifyTimeoutMs = raw.verifyTimeoutMs ?? defaultVerifyTimeoutMs;
 
   const runtime = raw.runtime;
+  // Forward the optional execution policy unchanged; validateContract owns the
+  // value rules so Plan and direct contract loading cannot drift.
+  const execution = raw.execution;
   const result = validateContract({
     taskId: taskId ?? path,
     version,
@@ -269,6 +272,7 @@ function compileTask(
     maxRepairs: maxRepairsRaw,
     ...(verifyTimeoutMs === undefined ? {} : { verifyTimeoutMs }),
     ...(runtime === undefined || runtime === null ? {} : { runtime }),
+    ...(execution === undefined || execution === null ? {} : { execution }),
   });
   if (!result.ok) {
     for (const issue of result.issues) {

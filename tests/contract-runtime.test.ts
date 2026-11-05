@@ -6,7 +6,10 @@ import {
   PlanValidationError,
 } from "../src/planner/plan.js";
 import {
+  DEFAULT_EXECUTION_CONTINUITY,
   DEFAULT_VERIFY_TIMEOUT_MS,
+  EXECUTION_CONTINUITY_POLICIES,
+  executionContinuity,
   loadContractJson,
   MAX_VERIFY_TIMEOUT_MS,
   validateContract,
@@ -364,6 +367,161 @@ test("loadContractJson: verifyTimeoutMs and runtime survive a round-trip", () =>
   const loaded = loadContractJson(JSON.stringify(validated.contract));
   assert.equal(loaded.verifyTimeoutMs, 120_000);
   assert.deepEqual(loaded.runtime, validRuntime);
+});
+
+function taskPlanWithExecution(execution: unknown): Record<string, unknown> {
+  const plan = taskPlan();
+  (plan.tasks as Record<string, unknown>[])[0]!.execution = execution;
+  return plan;
+}
+
+function compileWithExecution(execution: unknown) {
+  return compilePlan(taskPlanWithExecution(execution), { baseCommit: base });
+}
+
+test("compilePlan: execution.continuity is preserved through the contract", () => {
+  const expected = ["fail-closed", "durable"] as const;
+  assert.deepEqual(EXECUTION_CONTINUITY_POLICIES, expected);
+  assert.equal(DEFAULT_EXECUTION_CONTINUITY, "fail-closed");
+
+  for (const continuity of expected) {
+    const compiled = compileWithExecution({ continuity });
+    const contract = compiled.contracts[0]!;
+    assert.deepEqual(contract.execution, { continuity });
+    assert.equal(executionContinuity(contract), continuity);
+
+    const document = JSON.parse(
+      JSON.stringify(makeContractDocument(compiled)),
+    ) as { contracts: { execution?: unknown }[] };
+    assert.deepEqual(document.contracts[0]!.execution, { continuity });
+
+    const revalidated = validateContract(contract);
+    assert.equal(revalidated.ok, true);
+    if (!revalidated.ok) continue;
+    assert.deepEqual(revalidated.contract.execution, { continuity });
+
+    const loaded = loadContractJson(JSON.stringify(contract));
+    assert.deepEqual(loaded.execution, { continuity });
+  }
+});
+
+test("compilePlan: contracts without execution stay legacy fail-closed", () => {
+  const compiled = compileWithRuntime();
+  const contract = compiled.contracts[0]!;
+  assert.equal(Object.hasOwn(contract, "execution"), false);
+  assert.equal("execution" in contract, false);
+  assert.equal(executionContinuity(contract), "fail-closed");
+  assert.equal(executionContinuity(undefined), "fail-closed");
+  assert.equal(JSON.stringify(contract).includes('"execution"'), false);
+
+  const loaded = loadContractJson(JSON.stringify(contract));
+  assert.equal(Object.hasOwn(loaded, "execution"), false);
+  assert.equal(executionContinuity(loaded), "fail-closed");
+});
+
+test("compilePlan: invalid execution.continuity fails validation", () => {
+  const rejects = (execution: unknown, expected: RegExp): void => {
+    assert.throws(
+      () => compileWithExecution(execution),
+      (error: unknown) => {
+        assert.ok(error instanceof PlanValidationError);
+        assert.match(error.message, expected);
+        return true;
+      },
+    );
+  };
+
+  rejects("durable", /tasks\[0\]\.execution: must be an object/);
+  rejects([], /tasks\[0\]\.execution: must be an object/);
+  rejects({}, /tasks\[0\]\.execution\.continuity: is required/);
+  rejects(
+    { continuity: "eventual" },
+    /tasks\[0\]\.execution\.continuity: must be one of fail-closed, durable/,
+  );
+  rejects(
+    { continuity: 1 },
+    /tasks\[0\]\.execution\.continuity: must be one of fail-closed, durable/,
+  );
+  rejects(
+    { continuity: "durable " },
+    /tasks\[0\]\.execution\.continuity: must be one of fail-closed, durable/,
+  );
+});
+
+test("validateContract/loadContractJson: continuity is not plan-only", () => {
+  const ok = validateContract({
+    ...baseContractRaw(),
+    execution: { continuity: "durable" },
+  });
+  assert.equal(ok.ok, true);
+  if (!ok.ok) return;
+  assert.deepEqual(ok.contract.execution, { continuity: "durable" });
+
+  const invalid = validateContract({
+    ...baseContractRaw(),
+    execution: { continuity: "best-effort" },
+  });
+  assert.equal(invalid.ok, false);
+  if (invalid.ok) return;
+  assert.ok(
+    invalid.issues.some(
+      (issue) =>
+        issue.path === "execution.continuity" &&
+        /must be one of fail-closed, durable/.test(issue.message),
+    ),
+  );
+
+  assert.throws(
+    () =>
+      loadContractJson(
+        JSON.stringify({
+          ...baseContractRaw(),
+          execution: { continuity: "" },
+        }),
+      ),
+    /invalid TaskContract: execution\.continuity/,
+  );
+
+  // A legacy contract still resolves to fail-closed without being rewritten.
+  const legacy = validateContract(baseContractRaw());
+  assert.equal(legacy.ok, true);
+  if (!legacy.ok) return;
+  assert.equal(executionContinuity(legacy.contract), "fail-closed");
+  assert.equal(Object.hasOwn(legacy.contract, "execution"), false);
+});
+
+test("taskFileToContracts: continuity default is opt-in", () => {
+  const taskFile = {
+    repo: "target",
+    tasks: [
+      {
+        id: "imported",
+        prompt: "Implement the imported task",
+        paths: ["src/a.ts"],
+      },
+    ],
+  };
+
+  const [legacy] = taskFileToContracts(taskFile);
+  assert.equal(Object.hasOwn(legacy!, "execution"), false);
+  assert.equal(executionContinuity(legacy), "fail-closed");
+
+  const [durable] = taskFileToContracts(taskFile, { continuity: "durable" });
+  assert.deepEqual(durable!.execution, { continuity: "durable" });
+  assert.equal(executionContinuity(durable), "durable");
+
+  const [failClosed] = taskFileToContracts(taskFile, {
+    continuity: "fail-closed",
+  });
+  assert.deepEqual(failClosed!.execution, { continuity: "fail-closed" });
+
+  assert.throws(
+    () =>
+      taskFileToContracts(taskFile, {
+        continuity: "best-effort" as never,
+      }),
+    /execution\.continuity: must be one of fail-closed, durable/,
+  );
 });
 
 test("taskFileToContracts: verifyTimeoutMs default is opt-in", () => {

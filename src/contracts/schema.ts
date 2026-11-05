@@ -19,6 +19,56 @@ export const DEFAULT_VERIFY_TIMEOUT_MS = 30_000;
 export const MAX_VERIFY_TIMEOUT_MS = 600_000;
 
 /**
+ * How the supervisor treats a task's execution unit when the controller dies.
+ *
+ * - `fail-closed`: stop the exactly verified unit on lease expiry; the task is
+ *   interrupted and never auto-accepted (the legacy default).
+ * - `durable`: preserve and re-attach to the unit by `RuntimeHandle` after a
+ *   controller restart, bounded by hard time/resource limits.
+ */
+export const EXECUTION_CONTINUITY_POLICIES = [
+  "fail-closed",
+  "durable",
+] as const;
+
+export type ExecutionContinuityPolicy =
+  (typeof EXECUTION_CONTINUITY_POLICIES)[number];
+
+/** Legacy contracts omit `execution` and keep this policy. */
+export const DEFAULT_EXECUTION_CONTINUITY: ExecutionContinuityPolicy =
+  "fail-closed";
+
+/**
+ * Optional supervisor policy. Absent means fail-closed and is never serialized
+ * as a default, so a legacy contract keeps its exact previous shape.
+ */
+export interface ExecutionPolicy {
+  continuity: ExecutionContinuityPolicy;
+}
+
+export function isExecutionContinuityPolicy(
+  value: unknown,
+): value is ExecutionContinuityPolicy {
+  return (
+    typeof value === "string" &&
+    (EXECUTION_CONTINUITY_POLICIES as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * Effective continuity policy for a validated (or partially built) contract.
+ * An absent or malformed field can only fall back to fail-closed.
+ */
+export function executionContinuity(
+  contract: Pick<TaskContract, "execution"> | null | undefined,
+): ExecutionContinuityPolicy {
+  const policy = contract?.execution?.continuity;
+  return isExecutionContinuityPolicy(policy)
+    ? policy
+    : DEFAULT_EXECUTION_CONTINUITY;
+}
+
+/**
  * Frozen dispatch contract (Route C). Validated before mock or real workers run.
  * Aligns with docs/SCAFFOLD_FROM_OSS.md §4 and MVP_IMPLEMENTATION_PLAN §5.
  */
@@ -46,6 +96,11 @@ export interface TaskContract {
   maxRepairs: number;
   /** Optional RuntimeManager v0 services; absent means static verification only. */
   runtime?: RuntimeSpec;
+  /**
+   * Optional execution-continuity policy. Absent keeps the legacy fail-closed
+   * behavior and preserves the pre-existing contract shape.
+   */
+  execution?: ExecutionPolicy;
 }
 
 export type ContractIssue = { path: string; message: string };
@@ -123,6 +178,7 @@ export function validateContract(raw: unknown): {
   const deliverables = strArr("deliverables", false);
   const forbidden = strArr("forbidden", false);
   const runtime = readRuntimeSpec(o.runtime, issues);
+  const execution = readExecutionPolicy(o.execution, issues);
 
   if (goals && goals.length === 0) {
     issues.push({ path: "goals", message: "must have at least one goal" });
@@ -158,8 +214,41 @@ export function validateContract(raw: unknown): {
       forbidden: forbidden?.length ? forbidden : undefined,
       maxRepairs: maxRepairs!,
       ...(runtime === undefined ? {} : { runtime }),
+      ...(execution === undefined ? {} : { execution }),
     },
   };
+}
+
+/**
+ * Optional contract field: execution-continuity policy. `null` and `undefined`
+ * mean the legacy fail-closed behavior (and stay absent from the normalized
+ * contract). An explicit object must carry a documented policy value.
+ */
+function readExecutionPolicy(
+  value: unknown,
+  issues: ContractIssue[],
+): ExecutionPolicy | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isRecord(value)) {
+    issues.push({ path: "execution", message: "must be an object" });
+    return undefined;
+  }
+  if (value.continuity === undefined) {
+    issues.push({
+      path: "execution.continuity",
+      message: "is required when execution is present",
+    });
+    return undefined;
+  }
+  if (!isExecutionContinuityPolicy(value.continuity)) {
+    issues.push({
+      path: "execution.continuity",
+      message:
+        "must be one of " + EXECUTION_CONTINUITY_POLICIES.join(", "),
+    });
+    return undefined;
+  }
+  return { continuity: value.continuity };
 }
 
 /**
