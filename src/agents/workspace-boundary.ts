@@ -32,6 +32,10 @@ export const DEFAULT_MAX_DIAGNOSTIC_LENGTH = 2_048;
  * `hooks`, `refs`) is protected while objects, logs and per-worktree state
  * are not hashed. `.cliyard/ledger.json` is the default ledger path from
  * `src/persistence/ledger.ts`; a configured ledger path is added by policy.
+ *
+ * `dist` is the TypeScript build output (`npm run build`). Workers and
+ * verifiers may legitimately compile in their task worktree, so build output
+ * is never boundary evidence.
  */
 export const DEFAULT_EXCLUDED_CONTROL_PATHS: readonly string[] = Object.freeze([
   ".git",
@@ -42,6 +46,7 @@ export const DEFAULT_EXCLUDED_CONTROL_PATHS: readonly string[] = Object.freeze([
   ".cliyard/queue-events",
   ".cliyard/logs",
   ".cliyard/ledger.json",
+  "dist",
 ]);
 
 /** Important Git common-directory state protected despite the `.git` exclusion. */
@@ -233,6 +238,55 @@ export function resolveWorkspaceBoundaryPolicy(
   const caps = resolveCaps(policy.caps);
   const rootExclusions = resolveRootExclusions(policy, roots);
   return { roots, rootExclusions, caps };
+}
+
+export interface TaskWorkspaceBoundaryPolicyInput {
+  /** Absolute task worktree path; becomes the authority root. */
+  worktreePath: string;
+  /** Configured ledger path, when it lies inside the worktree. */
+  ledgerPath?: string;
+  /**
+   * Contract write paths owned by the worker. They are excluded by absolute
+   * path so legitimate task output is never reported as boundary evidence.
+   * Write-path auditing remains the authority for those paths.
+   */
+  writePaths?: readonly string[];
+}
+
+/**
+ * Build the authority policy for one task attempt
+ * (design/self-host-worker-isolation-v0.md invariant 2).
+ *
+ * The authority snapshot targets the exact task worktree rather than the
+ * repository root. The repository-root wave guard remains a separate
+ * defense-in-depth check for the authority checkout. Contract write paths are
+ * excluded per worktree, and build output under `dist/` is excluded by the
+ * default control-path set.
+ */
+export function taskWorkspaceBoundaryPolicy(
+  input: TaskWorkspaceBoundaryPolicyInput,
+): WorkspaceBoundaryPolicy {
+  const worktreePath = resolveRootPath(input.worktreePath, "worktreePath");
+  const excluded = new Set<string>();
+  for (const raw of input.writePaths ?? []) {
+    if (typeof raw !== "string") continue;
+    // A contract that owns the whole worktree has no path-level boundary
+    // evidence; the worker path audit still applies.
+    if (raw.replace(/[\\/]+$/, "") === ".") {
+      excluded.add(worktreePath);
+      continue;
+    }
+    const relativePath = normalizeEvidencePath(raw);
+    if (relativePath === undefined) continue;
+    excluded.add(join(worktreePath, relativePath));
+  }
+  return {
+    authorityRoot: worktreePath,
+    ...(input.ledgerPath !== undefined ? { ledgerPath: input.ledgerPath } : {}),
+    ...(excluded.size > 0
+      ? { excludedPaths: [...excluded].sort() }
+      : {}),
+  };
 }
 
 /**
