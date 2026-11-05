@@ -1,0 +1,56 @@
+{
+  "planId": "self-host-worker-isolation-v0",
+  "contracts": [
+    {
+      "taskId": "self-host-worker-isolation",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Fix the self-host execution-isolation defect where a worker attempt wrote into the main checkout instead of its task worktree, producing a workspace-boundary violation (observed run 4809f45a: src/execution/*.ts, tests/execution-interface.test.ts and dist/execution/* appeared in the repository root during attempt 0). Enforce three invariants with fail-fast guards: (1) the worker spawn cwd and the verifier cwd must be the absolute task worktree path, never the repository root; abort before spawn when cwd is missing, non-absolute, or resolves to the repository root, with a clear worker-cwd-guard error; (2) the WorkspaceBoundary authority snapshot for a task must target the task worktree, not the repository root; (3) add 'dist' to DEFAULT_EXCLUDED_CONTROL_PATHS so npm run build output is never reported as a protected-root change. Add regression tests proving a repository-root cwd aborts before any write, the boundary captures and compares the task worktree, and a newly added dist/ file does not trigger a violation. Preserve exact-identity process safety, write-path auditing and the .git selective re-inclusion. Do not add launchd, Windows or sandbox backends."
+      ],
+      "nonGoals": [
+        "Do not weaken exact-identity or write-path auditing.",
+        "Do not change TaskContract or EvidenceBundle semantics.",
+        "Do not add launchd, Windows or sandbox backends."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/KNOWN_GAPS_2026-10-28.md",
+        "design/self-host-worker-isolation-v0.md",
+        "design/workspace-boundary-v1.md",
+        "src/scheduler/codex-batch.ts",
+        "src/workspace/worktree.ts",
+        "src/agents/claude.ts",
+        "src/agents/codex.ts",
+        "src/verification/verifier.ts",
+        "src/agents/workspace-boundary.ts",
+        "tests/codex-paths.test.ts",
+        "tests/workspace-boundary.test.ts"
+      ],
+      "writePaths": [
+        "src/scheduler/codex-batch.ts",
+        "src/agents/workspace-boundary.ts",
+        "tests/codex-paths.test.ts",
+        "tests/workspace-boundary.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "f5c89dbcc8ecde1f1747b6ca4ad1c5df1c436900",
+      "verifyCommands": [
+        "npx tsx --test tests/codex-paths.test.ts tests/workspace-boundary.test.ts tests/workspace-boundary-integration.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "Fail-fast worker and verifier cwd guards.",
+        "WorkspaceBoundary authority aligned to the task worktree.",
+        "dist excluded and cwd-guard regression tests."
+      ],
+      "forbidden": [
+        "Do not let a repository-root cwd reach spawn.",
+        "Do not weaken write-path or process-identity safety.",
+        "Do not add launchd, Windows or sandbox backends."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
