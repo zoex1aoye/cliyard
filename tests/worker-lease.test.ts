@@ -26,6 +26,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   ProcessInspector,
+  compareProcessIdentity,
   type ProcessGroupMember,
   type ProcessTableEntry,
 } from "../src/runtime/process.js";
@@ -43,6 +44,8 @@ import {
   buildWorkerLeaseStatus,
   createWorkerLeaseAttacher,
   parseWorkerLease,
+  processGroupIdentityFromRuntimeHandle,
+  processGroupRuntimeHandle,
   readLeaseFile,
   readWorkerLeases,
   recoverWorkerLeases,
@@ -362,6 +365,20 @@ test("attacher persists exact identity and a cleanup update without rewriting it
   assert.equal(active.worker.pgid, workerIdentity.pgid);
   assert.equal(active.worker.osStartIdentity, workerIdentity.startedAt);
   assert.equal(active.worker.captureMode, "posix-group");
+  assert.equal(active.runtime?.backendType, "process-group");
+  assert.match(active.runtime?.handle ?? "", /^pg1:50001:[0-9a-f]+$/);
+  assert.equal(
+    compareProcessIdentity(
+      processGroupIdentityFromRuntimeHandle(active.runtime),
+      workerIdentity,
+    ),
+    "match",
+  );
+  assert.deepEqual(active.runtime?.diagnostics, {
+    pid: workerIdentity.pid,
+    pgid: workerIdentity.pgid,
+  });
+  // The handle, not the diagnostic start string, is the stable identity.
   assert.equal(active.controller.pid, 41_000);
   assert.equal(active.repoRoot, resolve(repo));
   // No prompts, commands, environment values or provider output belong here.
@@ -374,6 +391,7 @@ test("attacher persists exact identity and a cleanup update without rewriting it
     "leaseId",
     "repoRoot",
     "runId",
+    "runtime",
     "startedAt",
     "state",
     "taskId",
@@ -400,6 +418,7 @@ test("attacher persists exact identity and a cleanup update without rewriting it
     released.worker.osStartIdentity,
     active.worker.osStartIdentity,
   );
+  assert.deepEqual(released.runtime, active.runtime);
   assert.equal(released.startedAt, active.startedAt);
   assert.equal(released.cleanup?.processTreeState, "terminated");
   assert.equal(workerLeasesDir(repo), join(repo, ".cliyard", "worker-leases"));
@@ -484,6 +503,44 @@ test("a short-lived worker keeps an unknown lease instead of inventing identity"
   const final = readLeaseFile(handle.path);
   assert.equal(final?.state, "unknown");
   assert.equal(final?.worker.osStartIdentity, undefined);
+});
+
+test("cleanup does not release a lease from diagnostics alone", async () => {
+  const repo = tempDir("cleanup-no-handle");
+  // A non-leader capture cannot produce a runtime handle, even though exact
+  // diagnostics are persisted for operators.
+  const workerIdentity: RuntimeProcessIdentity = {
+    pid: 54_000,
+    pgid: 54_001,
+    startedAt: "Mon Jan  1 00:00:00 2024",
+  };
+  const { managed } = fakeManaged({
+    pid: workerIdentity.pid,
+    identity: workerIdentity,
+  });
+  const attach = createWorkerLeaseAttacher({
+    repoRoot: repo,
+    runId: "run-no-handle",
+    controller: {
+      pid: 43_001,
+      host: "host-a",
+      identity: identity(43_001),
+    },
+  });
+  const handle = await attach(attachInput(managed, "no-handle"));
+  const active = readLeaseFile(handle.path);
+  assert.equal(active?.state, "active");
+  assert.equal(active?.runtime, undefined);
+  assert.equal(active?.worker.osStartIdentity, workerIdentity.startedAt);
+  await handle.update(
+    cleanupOutcome("child-close", {
+      pid: workerIdentity.pid,
+      identity: workerIdentity,
+    }),
+  );
+  // Diagnostic pid/pgid/start match the cleanup record exactly, but without a
+  // stable handle the outcome stays unknown rather than a release claim.
+  assert.equal(readLeaseFile(handle.path)?.state, "unknown");
 });
 
 test("a lease write failure stops the managed worker and rejects", async () => {
@@ -724,12 +781,19 @@ function baseLease(overrides: Partial<WorkerLease> = {}): WorkerLease {
       osStartIdentity: workerIdentity.startedAt,
       captureMode: "posix-group",
     },
+    runtime: processGroupRuntimeHandle(workerIdentity),
     workspace: "/tmp/workspace",
     startedAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     state: "active",
     ...overrides,
   };
+}
+
+/** Legacy or not-yet-captured lease: diagnostics only, no recovery authority. */
+function withoutRuntime(lease: WorkerLease): WorkerLease {
+  const { runtime: _runtime, ...rest } = lease;
+  return rest;
 }
 
 function writeLease(repo: string, lease: WorkerLease): string {
@@ -825,11 +889,13 @@ test("recovery preserves processes on a mismatched or missing worker identity", 
   const mismatched = baseLease();
   fake.add(identity(61_000, "Tue Jan  2 00:00:00 2024"));
   const mismatchedPath = writeLease(repo, mismatched);
-  const missing = baseLease({
-    leaseId: "lease-missing-identity",
-    taskId: "task-b",
-    worker: { captureMode: "posix-group" },
-  });
+  const missing = withoutRuntime(
+    baseLease({
+      leaseId: "lease-missing-identity",
+      taskId: "task-b",
+      worker: { captureMode: "posix-group" },
+    }),
+  );
   const missingPath = writeLease(repo, missing);
   const { report, calls } = await recoverWith(repo, fake);
   assert.equal(calls.length, 0);
@@ -846,6 +912,135 @@ test("recovery preserves processes on a mismatched or missing worker identity", 
   // Recovery evidence is appended even when the process tree is preserved.
   assert.equal(readLeaseFile(mismatchedPath)?.recovery?.length, 1);
   assert.equal(readLeaseFile(mismatchedPath)?.recovery?.[0]?.outcome, "needs_human");
+});
+
+test("recovery derives its target from the runtime handle, not diagnostics", async () => {
+  const repo = tempDir("recover-handle-authority");
+  const fake = new FakeInspector();
+  const target = identity(61_000);
+  const decoy: RuntimeProcessIdentity = {
+    pid: 61_950,
+    pgid: 61_950,
+    startedAt: "Wed Jan  3 00:00:00 2024",
+  };
+  fake.add(target);
+  fake.add(decoy);
+  // Diagnostics name a different live process; only the handle is authority.
+  const lease = baseLease({
+    worker: {
+      pid: decoy.pid,
+      pgid: decoy.pgid,
+      osStartIdentity: decoy.startedAt,
+      captureMode: "posix-group",
+    },
+  });
+  const path = writeLease(repo, lease);
+  const { report, calls } = await recoverWith(repo, fake);
+  assert.equal(report.recovered, 1);
+  assert.equal(report.entries[0]?.action, "terminated");
+  assert.deepEqual(calls, [{ pgid: target.pgid, signal: "SIGTERM" }]);
+  assert.equal(fake.isAlive(target.pid), false);
+  assert.equal(fake.isAlive(decoy.pid), true);
+  assert.equal(readLeaseFile(path)?.state, "released");
+});
+
+test("a runtime handle alone authorizes recovery without diagnostics", async () => {
+  const repo = tempDir("recover-handle-only");
+  const fake = new FakeInspector();
+  const target = identity(61_000);
+  fake.add(target);
+  // No diagnostic pid/pgid/start identity at all: only the handle can decide.
+  const lease = baseLease({ worker: { captureMode: "posix-group" } });
+  const path = writeLease(repo, lease);
+  const { report, calls } = await recoverWith(repo, fake);
+  assert.equal(report.recovered, 1);
+  assert.equal(report.entries[0]?.action, "terminated");
+  assert.deepEqual(calls, [{ pgid: target.pgid, signal: "SIGTERM" }]);
+  assert.deepEqual(
+    report.resumeNeeded.map((need) => need.taskId),
+    ["task-a"],
+  );
+  assert.equal(readLeaseFile(path)?.state, "released");
+});
+
+test("diagnostic pid/pgid alone never authorize recovery", async () => {
+  const repo = tempDir("recover-no-handle");
+  const fake = new FakeInspector();
+  const diagnostics = identity(61_000);
+  fake.add(diagnostics);
+  const lease = withoutRuntime(baseLease());
+  const path = writeLease(repo, lease);
+  const { report, calls, pidCalls } = await recoverWith(repo, fake);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(pidCalls, []);
+  assert.equal(fake.isAlive(diagnostics.pid), true);
+  assert.equal(report.recovered, 0);
+  assert.equal(report.needsHuman, 1);
+  assert.match(report.entries[0]?.reason ?? "", /runtime handle is missing/i);
+  assert.equal(readLeaseFile(path)?.state, "active");
+});
+
+test("recovery fails closed on an unsupported runtime backend", async () => {
+  const repo = tempDir("recover-unsupported-backend");
+  const fake = new FakeInspector();
+  const diagnostics = identity(61_000);
+  fake.add(diagnostics);
+  const lease = baseLease({
+    // A structurally valid handle with no backend implementation in this
+    // slice never gains authority from the diagnostic pid/pgid.
+    runtime: {
+      backendType: "launchd",
+      handle: "com.cliyard.worker.fixture",
+      diagnostics: { pid: diagnostics.pid, pgid: diagnostics.pgid },
+    },
+  });
+  const path = writeLease(repo, lease);
+  const { report, calls, pidCalls } = await recoverWith(repo, fake);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(pidCalls, []);
+  assert.equal(fake.isAlive(diagnostics.pid), true);
+  assert.equal(report.needsHuman, 1);
+  assert.match(
+    report.entries[0]?.reason ?? "",
+    /no recoverable POSIX group/i,
+  );
+  assert.equal(readLeaseFile(path)?.state, "active");
+});
+
+test("an identity-reused runtime handle is never signalled or treated as authority", async () => {
+  const repo = tempDir("recover-handle-reused");
+  const fake = new FakeInspector();
+  const recorded: RuntimeProcessIdentity = {
+    pid: 61_300,
+    pgid: 61_300,
+    startedAt: "Mon Jan  1 00:00:00 2024",
+  };
+  const reused: RuntimeProcessIdentity = {
+    ...recorded,
+    startedAt: "Tue Jan  2 00:00:00 2024",
+  };
+  fake.add(reused);
+  const lease = baseLease({
+    runtime: processGroupRuntimeHandle(recorded),
+    // Diagnostics describe the process that reused the pid. If recovery read
+    // them instead of the handle, it would wrongly signal this live process.
+    worker: {
+      pid: reused.pid,
+      pgid: reused.pgid,
+      osStartIdentity: reused.startedAt,
+      captureMode: "posix-group",
+    },
+  });
+  const path = writeLease(repo, lease);
+  const { report, calls, pidCalls } = await recoverWith(repo, fake);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(pidCalls, []);
+  assert.equal(fake.isAlive(reused.pid), true);
+  assert.equal(report.recovered, 0);
+  assert.equal(report.needsHuman, 1);
+  assert.equal(report.resumeNeeded.length, 0);
+  assert.match(report.entries[0]?.reason ?? "", /reused or mismatched/i);
+  assert.equal(readLeaseFile(path)?.state, "active");
 });
 
 test("recovery escalates TERM to KILL only inside the verified group", async () => {
@@ -1023,6 +1218,7 @@ test("status projects counts, latest lease per task and controller state", async
   const taskA = status.tasks.find((task) => task.taskId === "task-a");
   assert.equal(taskA?.latest?.leaseId, "lease-new");
   assert.equal(taskA?.latest?.controller.state, "alive");
+  assert.equal(taskA?.latest?.runtime?.backendType, "process-group");
   const taskB = status.tasks.find((task) => task.taskId === "task-b");
   assert.equal(taskB?.latest?.state, "cleanup-failed");
   assert.equal(taskB?.latest?.controller.state, "dead");
@@ -1512,13 +1708,38 @@ setInterval(() => {}, 1000);
 // partially valid record.
 test("strict parser rejects missing or fabricated lease identity", () => {
   const valid = baseLease({ repoRoot: "/tmp/repo" });
-  assert.ok(parseWorkerLease(valid));
+  const parsed = parseWorkerLease(valid);
+  assert.ok(parsed);
+  // The runtime handle round-trips as the exact identity authority.
+  assert.deepEqual(parsed.runtime, valid.runtime);
+  assert.equal(
+    compareProcessIdentity(
+      processGroupIdentityFromRuntimeHandle(parsed.runtime),
+      identity(61_000),
+    ),
+    "match",
+  );
+  // Legacy diagnostics-only records stay readable for status; recovery
+  // refuses them because they carry no runtime authority.
+  assert.ok(parseWorkerLease(withoutRuntime(valid)));
+
+  const runtime = processGroupRuntimeHandle(identity(61_000));
+  const [prefix, pgid, hex] = runtime.handle.split(":");
+  const uppercaseHex = `${prefix}:${pgid}:${hex?.toUpperCase()}`;
   const bad: unknown[] = [
     { ...valid, version: 2 },
     { ...valid, leaseId: "../escape" },
     { ...valid, controller: { ...valid.controller, identity: undefined } },
     { ...valid, state: "running" },
     { ...valid, cleanupReason: "made-up" },
+    { ...valid, runtime: { ...runtime, backendType: "mock" } },
+    { ...valid, runtime: { ...runtime, handle: "pg1:61000:not-hex" } },
+    { ...valid, runtime: { ...runtime, handle: uppercaseHex } },
+    { ...valid, runtime: { ...runtime, handle: "" } },
+    {
+      ...valid,
+      runtime: { ...runtime, diagnostics: { pid: 0, pgid: 61_000 } },
+    },
     Object.fromEntries(
       Object.entries(valid).filter(([key]) => key !== "invocationId"),
     ),
@@ -1526,6 +1747,15 @@ test("strict parser rejects missing or fabricated lease identity", () => {
   for (const value of bad) {
     assert.equal(parseWorkerLease(value), undefined);
   }
+  // Only the process-group backend has a decoder in this slice.
+  assert.equal(
+    processGroupIdentityFromRuntimeHandle({
+      ...runtime,
+      backendType: "launchd",
+    }),
+    undefined,
+  );
+  assert.equal(processGroupIdentityFromRuntimeHandle(undefined), undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -2133,6 +2363,13 @@ test("recovery rejects a truncated nested registry without any signal", async ()
       truncated: true,
     },
   });
+  // The top-level handle is valid and the leader is live: without the
+  // truncated registry this lease would be recoverable. Incompleteness alone
+  // must keep it fail-closed.
+  assert.equal(
+    processGroupIdentityFromRuntimeHandle(lease.runtime)?.pid,
+    61_000,
+  );
   const path = writeLease(repo, lease);
   const { report, calls, pidCalls } = await recoverWith(repo, fake);
   assert.equal(report.needsHuman, 1);
@@ -2143,6 +2380,7 @@ test("recovery rejects a truncated nested registry without any signal", async ()
   assert.equal(fake.isAlive(61_000), true);
   assert.equal(report.entries[0]?.action, "preserved");
   assert.equal(report.entries[0]?.nested?.truncated, true);
+  assert.match(report.entries[0]?.reason ?? "", /truncated/i);
   const updated = readLeaseFile(path)!;
   assert.equal(updated.state, "active");
   assert.equal(updated.recovery?.[0]?.outcome, "needs_human");
