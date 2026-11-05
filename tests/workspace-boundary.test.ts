@@ -15,11 +15,13 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  DEFAULT_EXCLUDED_CONTROL_PATHS,
   captureWorkspaceBoundary,
   compareWorkspaceBoundary,
   normalizeEvidencePath,
   resolveWorkspaceBoundaryPolicy,
   sanitizeDiagnosticText,
+  taskWorkspaceBoundaryPolicy,
   WorkspaceBoundaryGuard,
   WorkspaceBoundaryInspectionError,
   WorkspaceBoundaryPolicyError,
@@ -738,4 +740,119 @@ test("snapshots and evidence retain digests only, never file contents", async (t
   assert.ok(!serializedChanges.includes("OTHER-SECRET-11aa"));
   assert.equal(result.changes[0].beforeDigest, sha256(secret));
   assert.equal(result.changes[0].afterDigest, sha256("OTHER-SECRET-11aa"));
+});
+
+test("dist build output never dirties the boundary", async (t) => {
+  assert.ok(
+    DEFAULT_EXCLUDED_CONTROL_PATHS.includes("dist"),
+    "dist must stay in the default excluded control paths",
+  );
+  const fx = fixture(t);
+  fx.write("src/app.ts", "source v1");
+  fx.write("dist/execution/supervisor.js", "build v1");
+  const before = await capture(fx);
+
+  // npm run build legitimately rewrites and adds files under dist/.
+  fx.write("dist/execution/supervisor.js", "build v2");
+  fx.write("dist/execution/added.js", "new build output");
+  assert.deepEqual(compareWorkspaceBoundary(before, await capture(fx)), {
+    status: "clean",
+    changes: [],
+  });
+
+  // Source changes remain protected boundary evidence.
+  fx.write("src/app.ts", "source v2");
+  const dirty = compareWorkspaceBoundary(before, await capture(fx));
+  assert.equal(dirty.status, "dirty");
+  if (dirty.status !== "dirty") return;
+  assert.deepEqual(changedPaths(dirty.changes), ["src/app.ts"]);
+});
+
+test("task boundary authority is the task worktree, not the repository root", async (t) => {
+  const fx = fixture(t);
+  const worktree = join(fx.root, ".cliyard", "worktrees", "task-1");
+  const writeIn = (base: string, rel: string, content = "x") => {
+    const abs = join(base, rel);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, content);
+  };
+  writeIn(worktree, "src/app.ts", "worktree v1");
+  writeIn(worktree, "src/execution/supervisor.ts", "worker output v1");
+  writeIn(fx.root, "README.md", "root v1");
+  writeIn(fx.root, "src/root-only.ts", "root v1");
+
+  const policy = taskWorkspaceBoundaryPolicy({
+    worktreePath: worktree,
+    writePaths: ["src/execution/supervisor.ts"],
+  });
+  assert.equal(policy.authorityRoot, worktree);
+  assert.deepEqual(policy.excludedPaths, [
+    join(worktree, "src/execution/supervisor.ts"),
+  ]);
+
+  const before = await captureWorkspaceBoundary(policy);
+
+  // Repository-root activity is outside this task's authority snapshot.
+  writeIn(fx.root, "README.md", "root v2");
+  writeIn(fx.root, "src/unrelated.ts", "new root file");
+  assert.deepEqual(
+    compareWorkspaceBoundary(before, await captureWorkspaceBoundary(policy)),
+    { status: "clean", changes: [] },
+  );
+
+  // A contract write path is audit-owned, not boundary evidence.
+  writeIn(worktree, "src/execution/supervisor.ts", "worker output v2");
+  assert.deepEqual(
+    compareWorkspaceBoundary(before, await captureWorkspaceBoundary(policy)),
+    { status: "clean", changes: [] },
+  );
+
+  // Any other worktree write is a task-boundary violation.
+  writeIn(worktree, "src/rogue.ts", "unexpected");
+  const dirty = compareWorkspaceBoundary(
+    before,
+    await captureWorkspaceBoundary(policy),
+  );
+  assert.equal(dirty.status, "dirty");
+  if (dirty.status !== "dirty") return;
+  assert.deepEqual(changedPaths(dirty.changes), ["src/rogue.ts"]);
+  assert.equal(dirty.changes[0]!.rootIndex, 0);
+});
+
+test("task boundary preserves .git selective re-inclusion", async (t) => {
+  const fx = fixture(t);
+  const worktree = join(fx.root, ".cliyard", "worktrees", "task-1");
+  const writeIn = (rel: string, content = "x") => {
+    const abs = join(worktree, rel);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, content);
+  };
+  writeIn(".git/HEAD", "ref: refs/heads/main\n");
+  writeIn(".git/index", "index-v1");
+  writeIn(".git/objects/ab/cdef0123", "object-blob");
+  writeIn("src/app.ts", "source");
+
+  const policy = taskWorkspaceBoundaryPolicy({ worktreePath: worktree });
+  const before = await captureWorkspaceBoundary(policy);
+  const entryPaths = [...before.entries.values()].map((entry) => entry.path);
+  assert.ok(entryPaths.includes(".git"));
+  assert.ok(entryPaths.includes(".git/index"));
+  assert.ok(!entryPaths.includes(".git/objects/ab/cdef0123"));
+
+  // Ordinary object churn stays excluded.
+  writeIn(".git/objects/ab/cdef0123", "another-object");
+  assert.deepEqual(
+    compareWorkspaceBoundary(before, await captureWorkspaceBoundary(policy)),
+    { status: "clean", changes: [] },
+  );
+
+  // Important common-directory state is still protected in a worktree.
+  writeIn(".git/index", "index-v2");
+  const dirty = compareWorkspaceBoundary(
+    before,
+    await captureWorkspaceBoundary(policy),
+  );
+  assert.equal(dirty.status, "dirty");
+  if (dirty.status !== "dirty") return;
+  assert.deepEqual(changedPaths(dirty.changes), [".git/index"]);
 });

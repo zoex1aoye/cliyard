@@ -38,6 +38,7 @@ import type { WorkerProcessRecord } from "../agents/process-tree.js";
 import { createWorkerLeaseAttacher } from "../agents/worker-lease.js";
 import {
   sanitizeDiagnosticText,
+  taskWorkspaceBoundaryPolicy,
   WorkspaceBoundaryGuard,
   type WorkspaceBoundaryComparison,
   type WorkspaceBoundaryPolicy,
@@ -50,6 +51,7 @@ import {
 import {
   createMockVerifier,
   createShellVerifier,
+  type Verifier,
 } from "../verification/verifier.js";
 import { defaultLedgerPath } from "../persistence/ledger.js";
 import { createFailureRecord, type FailureRecord } from "../failures.js";
@@ -615,6 +617,177 @@ function workspaceBoundaryPolicy(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Worker/verifier cwd guard (design/self-host-worker-isolation-v0.md)
+// ---------------------------------------------------------------------------
+
+/** Stable error class for a cwd that could corrupt the authority checkout. */
+export class WorkerCwdGuardError extends Error {
+  constructor(message: string) {
+    super(`worker-cwd-guard: ${message}`);
+    this.name = "WorkerCwdGuardError";
+  }
+}
+
+export type WorkerCwdRole = "worker" | "verifier";
+
+export interface TaskWorktreeCwdInput {
+  repoRoot: string;
+  taskId: string;
+  role: WorkerCwdRole;
+  /** Value that would be handed to the worker or verifier spawn. */
+  cwd: string | undefined;
+  /** Exact task worktree prepared for this dispatch. */
+  expectedWorktree?: string;
+}
+
+/**
+ * Fail-fast invariant 1: a worker or verifier may only run with the absolute
+ * path of its task worktree as cwd.
+ *
+ * Missing, relative and non-directory values are rejected, and the canonical
+ * path may never equal the repository root. The returned value is the
+ * resolved (not realpath-normalized) path so dispatch behavior is unchanged;
+ * comparisons use canonical paths so a symlinked root cannot slip through.
+ */
+export function assertTaskWorktreeCwd(input: TaskWorktreeCwdInput): string {
+  const label = `${input.role} cwd for task ${input.taskId}`;
+  if (typeof input.cwd !== "string" || input.cwd.trim() === "") {
+    throw new WorkerCwdGuardError(`${label} is missing`);
+  }
+  if (!isAbsolute(input.cwd)) {
+    throw new WorkerCwdGuardError(
+      `${label} must be an absolute task worktree path, ` +
+        `got ${JSON.stringify(input.cwd)}`,
+    );
+  }
+  const cwd = resolve(input.cwd);
+  let stats;
+  try {
+    stats = statSync(cwd);
+  } catch {
+    throw new WorkerCwdGuardError(`${label} does not exist: ${cwd}`);
+  }
+  if (!stats.isDirectory()) {
+    throw new WorkerCwdGuardError(`${label} is not a directory: ${cwd}`);
+  }
+  const repoRoot = canonicalPath(resolve(input.repoRoot));
+  if (canonicalPath(cwd) === repoRoot) {
+    throw new WorkerCwdGuardError(
+      `${label} resolves to the repository root ${repoRoot}; workers and ` +
+        "verifiers must run in their task worktree",
+    );
+  }
+  if (input.expectedWorktree !== undefined) {
+    const expected = resolve(input.expectedWorktree);
+    if (canonicalPath(expected) !== canonicalPath(cwd)) {
+      throw new WorkerCwdGuardError(
+        `${label} ${cwd} is not the prepared task worktree ${expected}`,
+      );
+    }
+  }
+  return cwd;
+}
+
+/**
+ * Per-task boundary observation. The authority snapshot is the task worktree
+ * (invariant 2); the repository-root wave guard stays independent.
+ */
+interface TaskWaveOutcome {
+  result: LoopResult;
+  comparison: WorkspaceBoundaryComparison;
+  capturedAt: string;
+  comparedAt: string;
+}
+
+interface TaskBoundaryState {
+  guard: WorkspaceBoundaryGuardLike;
+  capturedAt: string;
+  captureError?: string;
+  comparison?: WorkspaceBoundaryComparison;
+  comparedAt?: string;
+}
+
+/**
+ * Directory presence is not content: creating an owned write path's parent
+ * directories is legitimate task output, and removals are already reported
+ * through their child files. File-level evidence is still enforced.
+ */
+function contentOnlyTaskComparison(
+  comparison: WorkspaceBoundaryComparison,
+): WorkspaceBoundaryComparison {
+  if (comparison.status !== "dirty") return comparison;
+  const changes = comparison.changes.filter(
+    (change) => change.kind !== "directory",
+  );
+  return changes.length === 0
+    ? { status: "clean", changes: [] }
+    : { status: "dirty", changes };
+}
+
+/**
+ * Compare the task worktree against its dispatch-time snapshot.
+ *
+ * The first non-clean observation wins: a later repair attempt cannot erase a
+ * violation. A clean observation re-baselines immediately, so verifier output
+ * written between worker attempts is never attributed to the next attempt.
+ */
+async function compareTaskBoundary(state: TaskBoundaryState): Promise<void> {
+  if (state.captureError !== undefined) {
+    if (state.comparison === undefined || state.comparison.status === "clean") {
+      state.comparison = {
+        status: "inspection_failed",
+        error: state.captureError,
+        changes: [],
+      };
+      state.comparedAt = new Date().toISOString();
+    }
+    return;
+  }
+  const comparedAt = new Date().toISOString();
+  const comparison = contentOnlyTaskComparison(
+    await compareWorkspaceBoundaryGuard(state.guard),
+  );
+  if (state.comparison === undefined || state.comparison.status === "clean") {
+    state.comparison = comparison;
+    state.comparedAt = comparedAt;
+  }
+  if (comparison.status === "clean") {
+    const captureError = await captureWorkspaceBoundaryGuard(state.guard);
+    if (captureError !== undefined) state.captureError = captureError;
+  }
+}
+
+/** Advance the baseline past verifier activity without hiding a violation. */
+async function rebaselineTaskBoundary(state: TaskBoundaryState): Promise<void> {
+  if (state.captureError !== undefined) return;
+  if (state.comparison !== undefined && state.comparison.status !== "clean") {
+    return;
+  }
+  const captureError = await captureWorkspaceBoundaryGuard(state.guard);
+  if (captureError !== undefined) state.captureError = captureError;
+}
+
+/**
+ * Wave and task observations are independent and both fail closed. The wave
+ * status keeps precedence so the repository-root guard retains its existing
+ * evidence and failure codes; task evidence is appended when both are dirty.
+ */
+function combineBoundaryComparisons(
+  wave: WorkspaceBoundaryComparison,
+  task: WorkspaceBoundaryComparison,
+): WorkspaceBoundaryComparison {
+  if (wave.status === "dirty") {
+    return {
+      status: "dirty",
+      changes: [...wave.changes, ...task.changes],
+    };
+  }
+  if (wave.status === "inspection_failed") return wave;
+  if (task.status !== "clean") return task;
+  return { status: "clean", changes: [] };
+}
+
 /**
  * Fail closed: an unreadable root returns a bounded inspection error instead
  * of dispatching an unguarded wave. `undefined` means the snapshot captured.
@@ -984,6 +1157,7 @@ export async function runCodexBatch(
 
       const integrationBase = await gitHead(integration.worktreePath);
       waves.push([...ready]);
+      const taskBoundaries = new Map<string, TaskBoundaryState>();
       for (const id of ready) {
         const reuse = reusable.get(id);
         let handle: WorktreeHandle;
@@ -1050,6 +1224,50 @@ export async function runCodexBatch(
           });
         }
         await linkDependencies(repoRoot, handle.worktreePath, log);
+
+        // Invariant 1: both spawn cwds are validated before any worker is
+        // dispatched, so a bad path can never corrupt the authority checkout.
+        assertTaskWorktreeCwd({
+          repoRoot,
+          taskId: id,
+          role: "worker",
+          cwd: handle.worktreePath,
+          expectedWorktree: handle.worktreePath,
+        });
+        assertTaskWorktreeCwd({
+          repoRoot,
+          taskId: id,
+          role: "verifier",
+          cwd: handle.worktreePath,
+          expectedWorktree: handle.worktreePath,
+        });
+
+        // Invariant 2: the per-task authority snapshot targets the exact
+        // worktree. Contract write paths are excluded here because the
+        // write-path audit remains their authority; everything else in the
+        // worktree must stay untouched by the attempt.
+        const taskBoundaryGuard = new WorkspaceBoundaryGuard(
+          taskWorkspaceBoundaryPolicy({
+            worktreePath: handle.worktreePath,
+            writePaths: byId.get(id)!.writePaths,
+          }),
+        );
+        const taskCapturedAt = new Date().toISOString();
+        const taskCaptureError =
+          await captureWorkspaceBoundaryGuard(taskBoundaryGuard);
+        if (taskCaptureError !== undefined) {
+          log(
+            `[${workerKind}-batch] task worktree boundary capture failed for ` +
+              `${id}: ${taskCaptureError}`,
+          );
+        }
+        taskBoundaries.set(id, {
+          guard: taskBoundaryGuard,
+          capturedAt: taskCapturedAt,
+          ...(taskCaptureError !== undefined
+            ? { captureError: taskCaptureError }
+            : {}),
+        });
       }
 
       // WorkspaceBoundary v1: one authority snapshot per ready wave after
@@ -1071,17 +1289,60 @@ export async function runCodexBatch(
         );
       }
 
-      const dispatchWave = async (id: string): Promise<LoopResult> => {
+      const dispatchWave = async (id: string): Promise<TaskWaveOutcome> => {
           const contract = {
             ...byId.get(id)!,
             baseCommit: attemptRecords.get(id)!.baseCommit,
           };
           const wt = handles.get(id)!;
-          const worker =
-            opts.workerFactory?.(workerKind, wt.worktreePath) ??
+          const taskBoundary = taskBoundaries.get(id)!;
+
+          // Invariant 1: validate the exact cwds handed to spawn. The guard
+          // aborts before worker or verifier construction when either path is
+          // missing, relative, not a directory, or the repository root.
+          const workerCwd = assertTaskWorktreeCwd({
+            repoRoot,
+            taskId: id,
+            role: "worker",
+            cwd: wt.worktreePath,
+            expectedWorktree: wt.worktreePath,
+          });
+          const verifierCwd = assertTaskWorktreeCwd({
+            repoRoot,
+            taskId: id,
+            role: "verifier",
+            cwd: wt.worktreePath,
+            expectedWorktree: wt.worktreePath,
+          });
+
+          if (taskBoundary.captureError !== undefined) {
+            // Fail closed without dispatching: an uninspectable worktree
+            // cannot prove the attempt stayed inside its task boundary.
+            const comparedAt = new Date().toISOString();
+            taskBoundary.comparison = {
+              status: "inspection_failed",
+              error: taskBoundary.captureError,
+              changes: [],
+            };
+            taskBoundary.comparedAt = comparedAt;
+            return {
+              result: boundaryBlockedWithoutDispatch(
+                id,
+                ledgerPath,
+                taskBoundary.comparison,
+                comparedAt,
+              ),
+              comparison: taskBoundary.comparison,
+              capturedAt: taskBoundary.capturedAt,
+              comparedAt,
+            };
+          }
+
+          const baseWorker =
+            opts.workerFactory?.(workerKind, workerCwd) ??
             (workerKind === "claude"
               ? createClaudeAdapter({
-                  cwd: wt.worktreePath,
+                  cwd: workerCwd,
                   model: opts.model,
                   dryRun,
                   ...(maxBudgetUsd !== undefined ? { maxBudgetUsd } : {}),
@@ -1089,27 +1350,50 @@ export async function runCodexBatch(
                   ...(deadlinePolicy ? { deadlinePolicy } : {}),
                 })
               : createCodexAdapter({
-                  cwd: wt.worktreePath,
+                  cwd: workerCwd,
                   model: opts.model,
                   dryRun,
                   ...(deadlinePolicy
                     ? { timeoutMs: deadlinePolicy.baseTimeoutMs }
                     : {}),
                 }));
+          // Observe the task worktree as soon as the worker returns, before
+          // the verifier can add its own files to the same worktree.
+          const worker: AgentAdapter = {
+            id: baseWorker.id,
+            discover: () => baseWorker.discover(),
+            start: (input) => baseWorker.start(input),
+            collect: async (sessionId) => {
+              const result = await baseWorker.collect(sessionId);
+              await compareTaskBoundary(taskBoundary);
+              return result;
+            },
+            cancel: (sessionId) => baseWorker.cancel(sessionId),
+          };
           // Dry-run stays on the mock verifier, so it never starts a runtime.
           // Real verification gets both the control repository (manifest,
           // logs, leases) and the exact task worktree (service cwd).
-          const verifier = dryRun
+          const baseVerifier = dryRun
             ? createMockVerifier()
             : createShellVerifier({
-                cwd: wt.worktreePath,
+                cwd: verifierCwd,
                 repoRoot,
-                worktree: wt.worktreePath,
+                worktree: verifierCwd,
                 ...(requestedManifest !== undefined
                   ? { runtimeIdPrefix: requestedManifest.runId }
                   : {}),
               });
-          return runClosedLoop({
+          const verifier: Verifier = {
+            run: async (verifiedContract, agentResult) => {
+              const result = await baseVerifier.run(
+                verifiedContract,
+                agentResult,
+              );
+              await rebaselineTaskBoundary(taskBoundary);
+              return result;
+            },
+          };
+          const result = await runClosedLoop({
             contract,
             worker,
             verifier,
@@ -1156,8 +1440,17 @@ export async function runCodexBatch(
               : {}),
             ...(onWorkerLease ? { onWorkerLease } : {}),
           });
+          // Every dispatched task gets a final worktree comparison, even when
+          // the worker never collected.
+          await compareTaskBoundary(taskBoundary);
+          return {
+            result,
+            comparison: taskBoundary.comparison!,
+            capturedAt: taskBoundary.capturedAt,
+            comparedAt: taskBoundary.comparedAt!,
+          };
         };
-      const waveResults =
+      const waveResults: TaskWaveOutcome[] =
         boundaryPreError === undefined
           ? await Promise.all(ready.map(dispatchWave))
           : [];
@@ -1173,8 +1466,8 @@ export async function runCodexBatch(
               changes: [],
             } as const satisfies WorkspaceBoundaryComparison)
           : await compareWorkspaceBoundaryGuard(boundaryGuard);
-      const boundaryClean = boundaryComparison.status === "clean";
-      if (!boundaryClean) {
+      const waveBoundaryClean = boundaryComparison.status === "clean";
+      if (!waveBoundaryClean) {
         log(
           `[${workerKind}-batch] workspace boundary ` +
             `${boundaryComparison.status}: no task in this wave may be ` +
@@ -1182,33 +1475,59 @@ export async function runCodexBatch(
         );
       }
 
-      const boundaryRecord = buildWorkspaceBoundaryRecord(
-        boundaryCapturedAt,
-        boundaryComparedAt,
-        boundaryComparison,
-      );
-
       for (let i = 0; i < ready.length; i++) {
         const id = ready[i]!;
-        const rawResult = waveResults[i];
+        const outcome = waveResults[i];
+        const rawResult = outcome?.result;
+        // Invariant 2: combine the independent repository-root wave guard and
+        // the task-worktree guard. Either fails the task closed; the wave
+        // status keeps precedence for stable failure codes and evidence.
+        const taskComparison =
+          outcome?.comparison ??
+          ({
+            status: "inspection_failed",
+            error:
+              boundaryPreError ??
+              "workspace boundary was not captured before dispatch",
+            changes: [],
+          } as const satisfies WorkspaceBoundaryComparison);
+        const comparison = combineBoundaryComparisons(
+          boundaryComparison,
+          taskComparison,
+        );
+        const boundaryClean = comparison.status === "clean";
+        const recordCapturedAt =
+          waveBoundaryClean && outcome !== undefined
+            ? outcome.capturedAt
+            : boundaryCapturedAt;
+        const recordComparedAt =
+          waveBoundaryClean &&
+          outcome !== undefined &&
+          outcome.comparedAt > boundaryComparedAt
+            ? outcome.comparedAt
+            : boundaryComparedAt;
+        const boundaryRecord = buildWorkspaceBoundaryRecord(
+          recordCapturedAt,
+          recordComparedAt,
+          comparison,
+        );
         // Dirty or uninspectable boundary: an already-rejected worker keeps
         // its original structured failure; a successful result is converted
         // to a policy_blocked failure. No task in the wave is merged.
         const result =
-          boundaryClean || rawResult === undefined
-            ? (rawResult ??
-              boundaryBlockedWithoutDispatch(
+          rawResult === undefined
+            ? boundaryBlockedWithoutDispatch(
                 id,
                 ledgerPath,
-                boundaryComparison,
-                boundaryComparedAt,
-              ))
-            : rawResult.verdict === "rejected"
+                comparison,
+                recordComparedAt,
+              )
+            : boundaryClean || rawResult.verdict === "rejected"
               ? rawResult
               : convertToBoundaryRejection(
                   rawResult,
-                  boundaryComparison,
-                  boundaryComparedAt,
+                  comparison,
+                  recordComparedAt,
                 );
         results.push(result);
         pending.delete(id);
