@@ -28,7 +28,9 @@ import {
 } from "../agents/types.js";
 import {
   buildWorkerLeaseStatus,
+  readWorkerLeases,
   recoverWorkerLeases,
+  type WorkerLease,
   type WorkerLeaseRecoveryReport,
   type WorkerLeaseStatusReport,
 } from "../agents/worker-lease.js";
@@ -45,13 +47,28 @@ import {
   type BudgetContinuationPolicy,
   type DeadlineExtensionPolicy,
 } from "../agents/continuation.js";
-import type { TaskContract } from "../contracts/schema.js";
+import {
+  DEFAULT_EXECUTION_CONTINUITY,
+  executionContinuity,
+  type ExecutionContinuityPolicy,
+  type TaskContract,
+} from "../contracts/schema.js";
+import {
+  parseRuntimeHandle,
+  runtimeHandleKey,
+  type RuntimeHandle,
+} from "../execution/types.js";
 import {
   aggregateCostTruth,
   COST_STATES,
   type CostTruth,
   type FailureRecord,
 } from "../failures.js";
+import {
+  compareProcessIdentity,
+  ProcessInspector,
+} from "../runtime/process.js";
+import type { RuntimeProcessIdentity } from "../runtime/types.js";
 import { RUNTIME_MANIFEST_FILE } from "../runtime/manager.js";
 import { portAllocatorPaths } from "../runtime/ports.js";
 import {
@@ -118,6 +135,11 @@ export const WORKER_PROGRESS_STALE_MS = 60_000;
 export interface SupervisorCliOptions {
   /** Output sink; defaults to console.log. */
   log?: (line: string) => void;
+  /**
+   * Diagnostics sink for progress that is not part of the machine-readable
+   * summary. Defaults to stderr so `start`/`resume` stdout stays valid JSON.
+   */
+  diagnostics?: (line: string) => void;
   /** Test seam forwarded to the worker batch. */
   workerFactory?: CodexBatchOptions["workerFactory"];
   /**
@@ -126,6 +148,12 @@ export interface SupervisorCliOptions {
    * in-process can disable them.
    */
   signalHandling?: boolean;
+  /**
+   * Hard bound for holding a durable execution attachment at start/resume.
+   * A durable unit that is still running at the bound preserves its processes
+   * and fails the command closed instead of waiting forever.
+   */
+  durableAttachTimeoutMs?: number;
 }
 
 /** A recovery record already persisted in a runtime manifest. */
@@ -278,6 +306,8 @@ export async function runSupervisorCli(
   options: SupervisorCliOptions = {},
 ): Promise<number> {
   const log = options.log ?? ((line: string) => console.log(line));
+  const diagnostics =
+    options.diagnostics ?? ((line: string) => console.error(line));
   const [cmd, ...rest] = argv;
   if (!cmd) {
     printUsage(log);
@@ -290,13 +320,13 @@ export async function runSupervisorCli(
 
   switch (cmd) {
     case "start":
-      return startCommand(rest, options, log);
+      return startCommand(rest, options, log, diagnostics);
     case "status":
       return statusCommand(rest, options, log);
     case "evidence":
       return evidenceCommand(rest, options, log);
     case "resume":
-      return resumeCommand(rest, options, log);
+      return resumeCommand(rest, options, log, diagnostics);
     case "reap":
       return reapCommand(rest, options, log);
     case "recover-workers":
@@ -311,6 +341,558 @@ export async function runSupervisorCli(
 }
 
 // ---------------------------------------------------------------------------
+// execution.continuity
+// ---------------------------------------------------------------------------
+
+/**
+ * Legacy default: a task whose contract does not opt into durable execution is
+ * stopped on lease expiry. The bound keeps a durable re-attach from turning a
+ * resume into an unbounded wait.
+ */
+export const DEFAULT_DURABLE_ATTACH_TIMEOUT_MS = 30_000;
+export const MAX_DURABLE_ATTACH_TIMEOUT_MS = 600_000;
+const DURABLE_ATTACH_POLL_MS = 50;
+
+export class ExecutionContinuityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = new.target.name;
+  }
+}
+
+export interface DurableAttachment {
+  taskId: string;
+  leaseId: string;
+  /** Stable `(backendType, handle)` identity; pid/pgid are diagnostics only. */
+  handle: RuntimeHandle;
+}
+
+export interface ExecutionContinuityReport {
+  /** Durable units proven live and held until they exited or the bound hit. */
+  attached: DurableAttachment[];
+  /** Durable units whose exact identity was already gone. */
+  exited: DurableAttachment[];
+  /** Fail-closed task ids stopped by exact-identity lease recovery. */
+  stopped: string[];
+  /** Task ids whose effective policy was durable. */
+  durable: string[];
+  /** Task ids whose effective policy was fail-closed. */
+  failClosed: string[];
+}
+
+interface ContinuityReconcileOptions {
+  repoRoot: string;
+  runId: string;
+  contracts: readonly TaskContract[];
+  log: (line: string) => void;
+  durableAttachTimeoutMs?: number;
+}
+
+type DurableLeaseObservation =
+  | { state: "live"; handle: RuntimeHandle }
+  | { state: "exited"; handle: RuntimeHandle }
+  | { state: "live-owner" }
+  | { state: "blocked"; reason: string };
+
+/**
+ * Apply `execution.continuity` to the previous controller's active worker
+ * leases at start/resume.
+ *
+ * Controller death is the observed lease-expiry point. A fail-closed lease is
+ * stopped through the existing exact-identity recovery routine; a durable
+ * lease is re-attached by its stable process-group RuntimeHandle, never
+ * signalled, and held only until it exits or the hard bound is reached. A
+ * durable unit that outlives the bound preserves its processes and fails the
+ * command closed. Ambiguous identities always preserve processes and block the
+ * run. This function never edits the RunManifest and never changes task
+ * acceptance.
+ */
+async function reconcileExecutionContinuity(
+  options: ContinuityReconcileOptions,
+): Promise<ExecutionContinuityReport> {
+  const timeoutMs = durableAttachTimeout(options.durableAttachTimeoutMs);
+  const policyByTask = new Map<string, ExecutionContinuityPolicy>();
+  for (const contract of options.contracts) {
+    policyByTask.set(contract.taskId, executionContinuity(contract));
+  }
+  const policyFor = (taskId: string | undefined): ExecutionContinuityPolicy =>
+    taskId === undefined
+      ? DEFAULT_EXECUTION_CONTINUITY
+      : policyByTask.get(taskId) ?? DEFAULT_EXECUTION_CONTINUITY;
+
+  const read = readWorkerLeases(options.repoRoot, { runId: options.runId });
+  if (read.truncated) {
+    throw new ExecutionContinuityError(
+      `worker-lease scan for run ${options.runId} was truncated; ` +
+        "refusing to infer continuity for unread leases",
+    );
+  }
+  if (read.malformed.length > 0) {
+    throw new ExecutionContinuityError(
+      `worker-lease state for run ${options.runId} is ambiguous: ` +
+        read.malformed
+          .map((entry) => `${entry.taskId ?? entry.path}: ${entry.reason}`)
+          .join("; "),
+    );
+  }
+  const active = read.leases.filter((lease) => lease.state === "active");
+  const report: ExecutionContinuityReport = {
+    attached: [],
+    exited: [],
+    stopped: [],
+    durable: [],
+    failClosed: [],
+  };
+  if (active.length === 0) return report;
+
+  const durableLeases = active.filter(
+    (lease) => policyFor(lease.taskId) === "durable",
+  );
+  const failClosedLeases = active.filter(
+    (lease) => policyFor(lease.taskId) !== "durable",
+  );
+  report.durable = sortedTaskIds(durableLeases);
+  report.failClosed = sortedTaskIds(failClosedLeases);
+  if (failClosedLeases.length === 0) {
+    options.log(
+      `continuity: ${durableLeases.length} durable worker lease(s) found; ` +
+        "no fail-closed unit requires lease-expiry stop",
+    );
+  }
+
+  const inspector = new ProcessInspector();
+  const live = new Map<
+    string,
+    { lease: WorkerLease; handle: RuntimeHandle }
+  >();
+  for (const lease of durableLeases) {
+    const observation = await observeDurableLease(lease, inspector);
+    if (observation.state === "blocked") {
+      throw new ExecutionContinuityError(
+        `durable task ${lease.taskId}: ${observation.reason}; ` +
+          "processes and lease preserved, no task dispatched",
+      );
+    }
+    if (observation.state === "live-owner") {
+      throw new ExecutionContinuityError(
+        `durable task ${lease.taskId}: the controller recorded in lease ` +
+          `${lease.leaseId} is still alive; refusing to take over a live owner`,
+      );
+    }
+    if (observation.state === "exited") {
+      report.exited.push({
+        taskId: lease.taskId,
+        leaseId: lease.leaseId,
+        handle: observation.handle,
+      });
+      options.log(
+        `continuity: durable task ${lease.taskId} already exited; ` +
+          `RuntimeHandle ${runtimeHandleKey(observation.handle)} not re-attached`,
+      );
+      continue;
+    }
+    const attachment: DurableAttachment = {
+      taskId: lease.taskId,
+      leaseId: lease.leaseId,
+      handle: observation.handle,
+    };
+    report.attached.push(attachment);
+    live.set(lease.leaseId, { lease, handle: observation.handle });
+    options.log(
+      `continuity: durable task ${lease.taskId} re-attached by RuntimeHandle ` +
+        `${runtimeHandleKey(observation.handle)} (lease ${lease.leaseId})`,
+    );
+  }
+
+  await waitForDurableUnitsToExit(live, inspector, timeoutMs, options.log);
+
+  if (failClosedLeases.length > 0) {
+    // The recovery routine is run-scoped and would also inspect durable
+    // leases. Durable units were confirmed gone above; the guard is a final
+    // guarantee that no signal can reach an identity the contract preserved.
+    const guard = durableSignalTargets(durableLeases);
+    const refused: string[] = [];
+    const recovery = await recoverWorkerLeases({
+      repoRoot: options.repoRoot,
+      runId: options.runId,
+      inspector,
+      killGroup: (pgid, signal) => {
+        if (guard.pgids.has(pgid)) {
+          refused.push(`pgid ${pgid}`);
+          return;
+        }
+        process.kill(-pgid, signal);
+      },
+      killPid: (pid, signal) => {
+        if (guard.pids.has(pid)) {
+          refused.push(`pid ${pid}`);
+          return;
+        }
+        process.kill(pid, signal);
+      },
+    });
+    if (recovery.truncated) {
+      throw new ExecutionContinuityError(
+        `worker-lease recovery scan for run ${options.runId} was truncated; ` +
+          "refusing to dispatch with unread fail-closed leases",
+      );
+    }
+    if (refused.length > 0) {
+      throw new ExecutionContinuityError(
+        `worker-lease recovery attempted to signal durable execution ` +
+          `target(s) ${[...new Set(refused)].sort().join(", ")}; processes ` +
+          "preserved and no task dispatched",
+      );
+    }
+    for (const entry of recovery.entries) {
+      if (
+        entry.taskId !== undefined &&
+        policyFor(entry.taskId) === "durable"
+      ) {
+        // A durable lease whose unit already exited is preserved as
+        // needs_human evidence by the shared recovery routine. It never
+        // blocks dispatch and its processes are never signalled.
+        continue;
+      }
+      if (entry.outcome === "needs_human") {
+        throw new ExecutionContinuityError(
+          `fail-closed worker lease ${entry.taskId ?? entry.path} needs ` +
+            `human review: ${entry.reason}`,
+        );
+      }
+      if (entry.outcome === "recovered") {
+        const taskId = entry.taskId ?? entry.path;
+        report.stopped.push(taskId);
+        options.log(
+          `continuity: fail-closed task ${taskId} stopped on lease expiry ` +
+            `(${entry.action})`,
+        );
+        continue;
+      }
+      // A lease another process already released is safe to continue; a
+      // cleanup-failed or unknown lease may still own processes, so it must
+      // not be followed by a duplicate dispatch.
+      if (entry.reason === "lease is already released") continue;
+      throw new ExecutionContinuityError(
+        `fail-closed worker lease ${entry.taskId ?? entry.path} was not ` +
+          `recovered: ${entry.reason}`,
+      );
+    }
+    for (const lease of failClosedLeases) {
+      if (!recovery.entries.some((entry) => entry.leaseId === lease.leaseId)) {
+        throw new ExecutionContinuityError(
+          `fail-closed task ${lease.taskId}: lease ${lease.leaseId} has no ` +
+            "recovery decision",
+        );
+      }
+    }
+  }
+
+  // Lease files are read in directory order; keep the summary deterministic.
+  const byTaskAndLease = (left: DurableAttachment, right: DurableAttachment) =>
+    left.taskId.localeCompare(right.taskId) ||
+    left.leaseId.localeCompare(right.leaseId);
+  report.attached.sort(byTaskAndLease);
+  report.exited.sort(byTaskAndLease);
+  report.stopped = [...new Set(report.stopped)].sort();
+  return report;
+}
+
+function durableAttachTimeout(value: number | undefined): number {
+  const timeout = value ?? DEFAULT_DURABLE_ATTACH_TIMEOUT_MS;
+  if (
+    !Number.isSafeInteger(timeout) ||
+    timeout <= 0 ||
+    timeout > MAX_DURABLE_ATTACH_TIMEOUT_MS
+  ) {
+    throw new ExecutionContinuityError(
+      "durableAttachTimeoutMs must be a positive safe integer no greater " +
+        `than ${MAX_DURABLE_ATTACH_TIMEOUT_MS}`,
+    );
+  }
+  return timeout;
+}
+
+function sortedTaskIds(leases: readonly WorkerLease[]): string[] {
+  return [...new Set(leases.map((lease) => lease.taskId))].sort();
+}
+
+/**
+ * Derive the stable RuntimeHandle from already-persisted exact worker
+ * identity. The handle encodes the group id plus the OS start identity; pid and
+ * pgid remain diagnostics and never authorize a decision by themselves.
+ */
+function workerLeaseRuntimeHandle(
+  lease: WorkerLease,
+): RuntimeHandle | undefined {
+  const identity = exactWorkerIdentity(lease);
+  if (!identity) return undefined;
+  const normalized = identity.startedAt.trim().replace(/\s+/g, " ");
+  if (!normalized) return undefined;
+  const encoded = Buffer.from(normalized, "utf8").toString("base64url");
+  return parseRuntimeHandle({
+    backendType: "process-group",
+    handle: `${identity.pgid}:${encoded}`,
+    diagnostics: { pid: identity.pid, pgid: identity.pgid },
+  });
+}
+
+function exactWorkerIdentity(
+  lease: WorkerLease,
+): RuntimeProcessIdentity | undefined {
+  const { pid, pgid, osStartIdentity, captureMode } = lease.worker;
+  if (
+    captureMode !== "posix-group" ||
+    pid === undefined ||
+    pgid === undefined ||
+    osStartIdentity === undefined ||
+    pid !== pgid
+  ) {
+    return undefined;
+  }
+  return { pid, pgid, startedAt: osStartIdentity };
+}
+
+async function observeDurableLease(
+  lease: WorkerLease,
+  inspector: ProcessInspector,
+): Promise<DurableLeaseObservation> {
+  if (!sameHostname(lease.controller.host, inspector.host)) {
+    return {
+      state: "blocked",
+      reason:
+        `controller host ${lease.controller.host} is not this host ` +
+        `(${inspector.host}); cross-host recovery is not supported`,
+    };
+  }
+
+  if (inspector.isAlive(lease.controller.pid)) {
+    let observed: RuntimeProcessIdentity | undefined;
+    try {
+      observed = await inspector.capture(lease.controller.pid);
+    } catch {
+      return {
+        state: "blocked",
+        reason: "controller liveness could not be inspected exactly",
+      };
+    }
+    if (!observed) {
+      return { state: "blocked", reason: "controller liveness is ambiguous" };
+    }
+    const comparison = compareProcessIdentity(
+      lease.controller.identity,
+      observed,
+    );
+    if (comparison === "match") return { state: "live-owner" };
+    if (comparison === "unknown") {
+      return { state: "blocked", reason: "controller identity is ambiguous" };
+    }
+    // mismatch: the recorded pid was reused; the controller is gone.
+  }
+
+  const handle = workerLeaseRuntimeHandle(lease);
+  if (!handle) {
+    return {
+      state: "blocked",
+      reason:
+        "worker lease has no stable POSIX process-group RuntimeHandle",
+    };
+  }
+  const identity = exactWorkerIdentity(lease);
+  if (!identity) {
+    return {
+      state: "blocked",
+      reason: "worker lease has no exact worker identity",
+    };
+  }
+
+  let observedWorker: RuntimeProcessIdentity | undefined;
+  try {
+    observedWorker = await inspector.capture(identity.pid);
+  } catch {
+    return {
+      state: "blocked",
+      reason: "worker identity could not be inspected",
+    };
+  }
+  if (!observedWorker) {
+    const nested = await observeNestedTargets(lease, inspector);
+    if (nested === "unknown") {
+      return {
+        state: "blocked",
+        reason:
+          "worker leader identity is absent and nested targets are ambiguous",
+      };
+    }
+    if (nested === "live") return { state: "live", handle };
+    const members = await inspectGroupMembers(identity.pgid, inspector);
+    if (members === undefined) {
+      return { state: "blocked", reason: "worker group could not be inspected" };
+    }
+    if (members.length === 0) return { state: "exited", handle };
+    return {
+      state: "blocked",
+      reason: "worker leader identity is absent while group members remain",
+    };
+  }
+  if (compareProcessIdentity(identity, observedWorker) !== "match") {
+    return {
+      state: "blocked",
+      reason:
+        "worker exact identity does not match the RuntimeHandle; " +
+        "the handle was not signalled",
+    };
+  }
+
+  const members = await inspectGroupMembers(identity.pgid, inspector);
+  if (members === undefined) {
+    return { state: "blocked", reason: "worker group could not be inspected" };
+  }
+  const nested = await observeNestedTargets(lease, inspector);
+  if (nested === "unknown") {
+    return {
+      state: "blocked",
+      reason: "nested execution targets are ambiguous",
+    };
+  }
+  if (members.length === 0 && nested === "none") {
+    return { state: "exited", handle };
+  }
+  return { state: "live", handle };
+}
+
+async function inspectGroupMembers(
+  pgid: number,
+  inspector: ProcessInspector,
+): Promise<RuntimeProcessIdentity[] | undefined> {
+  try {
+    return await inspector.listGroupMembers(pgid);
+  } catch {
+    return undefined;
+  }
+}
+
+async function observeNestedTargets(
+  lease: WorkerLease,
+  inspector: ProcessInspector,
+): Promise<"none" | "live" | "unknown"> {
+  const nested = lease.nestedProcesses;
+  if (nested === undefined) return "none";
+  // A truncated registry cannot prove that an external descendant is gone.
+  if (nested.truncated) return "unknown";
+  if (!sameHostname(nested.host, inspector.host)) return "unknown";
+  for (const identity of nested.identities) {
+    const state = await observeExactIdentity(identity, inspector);
+    if (state === "unknown") return "unknown";
+    if (state === "live") return "live";
+  }
+  for (const group of nested.groups ?? []) {
+    const state = await observeExactIdentity(group.leader, inspector);
+    if (state === "unknown") return "unknown";
+    if (state === "live") {
+      const members = await inspectGroupMembers(group.pgid, inspector);
+      if (members === undefined) return "unknown";
+      if (members.length > 0) return "live";
+    }
+  }
+  return "none";
+}
+
+async function observeExactIdentity(
+  identity: RuntimeProcessIdentity,
+  inspector: ProcessInspector,
+): Promise<"live" | "gone" | "unknown"> {
+  let observed: RuntimeProcessIdentity | undefined;
+  try {
+    observed = await inspector.capture(identity.pid);
+  } catch {
+    return "unknown";
+  }
+  if (!observed) return "gone";
+  const comparison = compareProcessIdentity(identity, observed);
+  if (comparison === "match") return "live";
+  if (comparison === "mismatch") return "gone";
+  return "unknown";
+}
+
+function durableSignalTargets(leases: readonly WorkerLease[]): {
+  pgids: Set<number>;
+  pids: Set<number>;
+} {
+  const pgids = new Set<number>();
+  const pids = new Set<number>();
+  for (const lease of leases) {
+    if (lease.worker.pgid !== undefined) pgids.add(lease.worker.pgid);
+    if (lease.worker.pid !== undefined) pids.add(lease.worker.pid);
+    const nested = lease.nestedProcesses;
+    if (!nested) continue;
+    for (const identity of nested.identities) {
+      pids.add(identity.pid);
+      pgids.add(identity.pgid);
+    }
+    for (const group of nested.groups ?? []) {
+      pids.add(group.leader.pid);
+      pgids.add(group.leader.pgid);
+    }
+  }
+  return { pgids, pids };
+}
+
+async function waitForDurableUnitsToExit(
+  live: Map<string, { lease: WorkerLease; handle: RuntimeHandle }>,
+  inspector: ProcessInspector,
+  timeoutMs: number,
+  log: (line: string) => void,
+): Promise<void> {
+  if (live.size === 0) return;
+  const deadline = Date.now() + timeoutMs;
+  while (live.size > 0) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      const tasks = [...live.values()]
+        .map((entry) => entry.lease.taskId)
+        .sort()
+        .join(", ");
+      throw new ExecutionContinuityError(
+        `durable task ${tasks} is still running after ${timeoutMs}ms; ` +
+          "the RuntimeHandle was preserved and no task was dispatched",
+      );
+    }
+    await sleep(Math.min(DURABLE_ATTACH_POLL_MS, remaining));
+    for (const [leaseId, entry] of [...live]) {
+      const observation = await observeDurableLease(entry.lease, inspector);
+      if (observation.state === "blocked") {
+        throw new ExecutionContinuityError(
+          `durable task ${entry.lease.taskId}: ${observation.reason}; ` +
+            "processes and lease preserved, no task dispatched",
+        );
+      }
+      if (observation.state === "live-owner") {
+        throw new ExecutionContinuityError(
+          `durable task ${entry.lease.taskId}: the controller recorded in ` +
+            "the lease became live during attachment; no task dispatched",
+        );
+      }
+      if (observation.state === "exited") {
+        live.delete(leaseId);
+        log(
+          `continuity: durable task ${entry.lease.taskId} exited before ` +
+            `dispatch (RuntimeHandle ${runtimeHandleKey(entry.handle)})`,
+        );
+      }
+    }
+  }
+}
+
+function sameHostname(left: string, right: string): boolean {
+  return left.trim().toLowerCase() === right.trim().toLowerCase();
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+}
+
+// ---------------------------------------------------------------------------
 // start
 // ---------------------------------------------------------------------------
 
@@ -318,6 +900,7 @@ async function startCommand(
   rest: string[],
   options: SupervisorCliOptions,
   log: (line: string) => void,
+  diagnostics: (line: string) => void,
 ): Promise<number> {
   const repoRoot = repoFrom(rest);
   const contractsArg = positionalArg(rest);
@@ -341,10 +924,23 @@ async function startCommand(
   // half-started run behind.
   const lock = acquireSupervisorLock(repoRoot, runId);
   let manifest: RunManifest;
+  let continuity: ExecutionContinuityReport | undefined;
   try {
     // Reconcile orphaned runtimes only once this supervisor owns the repo. Any
     // runtime needing human review fails the start before a run is created.
     await reconcileOrphansBeforeRun(repoRoot, "start");
+    // A fresh run normally has no worker leases; a leftover lease directory
+    // under this run id is still reconciled by the new contract's policy before
+    // any manifest is created, so a failed re-attach leaves no running run.
+    continuity = await reconcileExecutionContinuity({
+      repoRoot,
+      runId,
+      contracts,
+      log: diagnostics,
+      ...(options.durableAttachTimeoutMs !== undefined
+        ? { durableAttachTimeoutMs: options.durableAttachTimeoutMs }
+        : {}),
+    });
     manifest = createRunManifest(repoRoot, {
       runId,
       planId,
@@ -366,6 +962,7 @@ async function startCommand(
     options,
     log,
     resumed: false,
+    ...(continuity === undefined ? {} : { continuity }),
     deadlinePolicy,
     ...(budget.maxBudgetUsd !== undefined
       ? { maxBudgetUsd: budget.maxBudgetUsd }
@@ -386,6 +983,7 @@ async function resumeCommand(
   rest: string[],
   options: SupervisorCliOptions,
   log: (line: string) => void,
+  diagnostics: (line: string) => void,
 ): Promise<number> {
   const deadlinePolicy = deadlinePolicyFromArgs(rest);
   const budget = budgetSettingsFromArgs(rest, workerFrom(rest));
@@ -442,10 +1040,23 @@ async function resumeCommand(
 
   const lock = acquireResumeLock(repoRoot, manifest, has("--force", rest));
   let resumed: RunManifest;
+  let continuity: ExecutionContinuityReport | undefined;
   try {
     // Reconcile before marking the run running so unsafe orphan evidence can
     // never coexist with a newly dispatched batch.
     await reconcileOrphansBeforeRun(repoRoot, "resume");
+    // Apply execution.continuity before resetting unfinished tasks. A durable
+    // unit is preserved and observed until it exits (bounded); a fail-closed
+    // unit is stopped on lease expiry through exact-identity recovery.
+    continuity = await reconcileExecutionContinuity({
+      repoRoot,
+      runId: manifest.runId,
+      contracts,
+      log: diagnostics,
+      ...(options.durableAttachTimeoutMs !== undefined
+        ? { durableAttachTimeoutMs: options.durableAttachTimeoutMs }
+        : {}),
+    });
     setActiveRun(repoRoot, manifest.runId);
     resumed = updateRunManifest(repoRoot, manifest.runId, (current) => {
       current.status = "running";
@@ -485,6 +1096,7 @@ async function resumeCommand(
     options,
     log,
     resumed: true,
+    ...(continuity === undefined ? {} : { continuity }),
     deadlinePolicy,
     ...(budget.maxBudgetUsd !== undefined
       ? { maxBudgetUsd: budget.maxBudgetUsd }
@@ -1865,6 +2477,8 @@ interface ExecuteRunInput {
   options: SupervisorCliOptions;
   log: (line: string) => void;
   resumed: boolean;
+  /** Outcome of the pre-dispatch execution.continuity reconciliation. */
+  continuity?: ExecutionContinuityReport;
   /** Reuse validated rejected attempt worktrees instead of fresh ones. */
   reuseAttempts: boolean;
   deadlinePolicy?: DeadlineExtensionPolicy;
@@ -1881,6 +2495,7 @@ async function executeRun(input: ExecuteRunInput): Promise<number> {
     options,
     log,
     resumed,
+    continuity,
     deadlinePolicy,
     budgetPolicy,
     maxBudgetUsd,
@@ -1926,7 +2541,7 @@ async function executeRun(input: ExecuteRunInput): Promise<number> {
     const evidence = generateRunEvidence(repoRoot, finalManifest);
     log(
       JSON.stringify(
-        summarizeRun(finalManifest, result, resumed, evidence),
+        summarizeRun(finalManifest, result, resumed, evidence, continuity),
         null,
         2,
       ),
@@ -1997,6 +2612,7 @@ function summarizeRun(
   result: CodexBatchResult,
   resumed: boolean,
   evidence: SupervisorEvidenceStatus,
+  continuity?: ExecutionContinuityReport,
 ): Record<string, unknown> {
   const counts = taskCounts(manifest);
   return {
@@ -2017,7 +2633,21 @@ function summarizeRun(
     tasks: Object.values(manifest.tasks).map((task) => ({ ...task })),
     ledgerPath: result.ledgerPath,
     evidence,
+    ...(continuity && hasContinuityActivity(continuity)
+      ? { continuity }
+      : {}),
   };
+}
+
+/** Keep the summary shape unchanged when no prior worker lease was observed. */
+function hasContinuityActivity(report: ExecutionContinuityReport): boolean {
+  return (
+    report.attached.length > 0 ||
+    report.exited.length > 0 ||
+    report.stopped.length > 0 ||
+    report.durable.length > 0 ||
+    report.failClosed.length > 0
+  );
 }
 
 function taskCounts(manifest: RunManifest): {
