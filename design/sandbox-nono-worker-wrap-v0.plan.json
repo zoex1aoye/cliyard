@@ -3,7 +3,7 @@
   "tasks": [
     {
       "taskId": "sandbox-nono-worker-wrap",
-      "goal": "Land P3b: add src/sandbox/wrap.ts (buildNonoWrapCommand for `nono wrap -s -a workspace [--read repo] --allow-cwd -- <cmd>…`) and src/sandbox/measure.ts (measureNonoFilesystemEnforcement: allow-inside write ok + outside write must not persist; returns enforced boolean + detail). Teach NonoSandboxAdapter.create / selectSandboxAdapter to run measurement after a successful pin probe and set filesystemIsolation to partial only when enforced, else unsupported with honest notes (Landlock/missing). Add applySandboxWrapToSpawn(command, args, prepareResult) helper that returns wrapped argv only when report.status==='prepared'. Optionally thread SandboxSpawnOptions through WorkerProcessTreeManager.spawn without changing default behavior. Tests in tests/sandbox-wrap.test.ts cover argv, measurement fail-closed with stub/non-enforcing binary, and capability gate after measured unsupported. Write docs/evidence/SANDBOX_NONO_WORKER_WRAP.md. Update CURRENT_STATE/ROADMAP P3b residual. Do not force-enable wrap for all codex-batch runs.",
+      "goal": "Land P3b: add src/sandbox/wrap.ts (buildNonoWrapCommand for `nono wrap -s -a workspace [--read repo] --allow-cwd -- <cmd>\u2026`) and src/sandbox/measure.ts (measureNonoFilesystemEnforcement: allow-inside write ok + outside write must not persist; returns enforced boolean + detail). Teach NonoSandboxAdapter.create / selectSandboxAdapter to run measurement after a successful pin probe and set filesystemIsolation to partial only when enforced, else unsupported with honest notes (Landlock/missing). Add applySandboxWrapToSpawn(command, args, prepareResult) helper that returns wrapped argv only when report.status==='prepared'. Optionally thread SandboxSpawnOptions through WorkerProcessTreeManager.spawn without changing default behavior. Tests in tests/sandbox-wrap.test.ts cover argv, measurement fail-closed with stub/non-enforcing binary, and capability gate after measured unsupported. Write docs/evidence/SANDBOX_NONO_WORKER_WRAP.md. Update CURRENT_STATE/ROADMAP P3b residual. Do not force-enable wrap for all codex-batch runs.",
       "nonGoals": [
         "Do not claim filesystem isolation on hosts without measured enforcement.",
         "Do not enable wrap by default for every worker batch.",
@@ -20,6 +20,7 @@
         "docs/CURRENT_STATE.md"
       ],
       "writePaths": [
+        "src/sandbox/pin.ts",
         "src/sandbox/wrap.ts",
         "src/sandbox/measure.ts",
         "src/sandbox/nono.ts",
@@ -27,6 +28,7 @@
         "src/sandbox/types.ts",
         "src/agents/process-tree.ts",
         "tests/sandbox-wrap.test.ts",
+        "tests/sandbox-adapter.test.ts",
         "docs/evidence/SANDBOX_NONO_WORKER_WRAP.md",
         "docs/CURRENT_STATE.md",
         "docs/ROADMAP.md"
