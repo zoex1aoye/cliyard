@@ -296,18 +296,22 @@ function queueEventBinding(
   return queueEventStateStores.get(resolve(repoRoot));
 }
 
+/** Migrate API required by the sync journal cutover (avoids TDZ cycles). */
+export interface QueueEventMigrateApi {
+  createLegacyJsonGuard: (typeof import("../statestore/migrate.js"))["createLegacyJsonGuard"];
+  findCoveringMarker: (typeof import("../statestore/migrate.js"))["findCoveringMarker"];
+  migrateLegacyJson: (typeof import("../statestore/migrate.js"))["migrateLegacyJson"];
+}
+
 /**
- * Cut the journal write path over to SQLite.
- *
- * - the current `events.jsonl` is imported once, in file order, with its
- *   source/content/import hashes verified by `migrateLegacyJson`;
- * - a covering marker makes a later process skip the one-shot import without
- *   re-verifying stale snapshot content against newer appended events;
- * - a fail-closed drift guard is installed before the binding is registered.
+ * Sync cutover when the caller already holds the migrate module. Production
+ * ensure uses this so journal attach does not need an async dynamic import on
+ * the hot path (and avoids the write ↔ event-journal ↔ migrate TDZ cycle).
  */
-export async function attachQueueEventStateStore(
+export function attachQueueEventStateStoreWithMigrate(
   options: QueueEventStateStoreBindingOptions,
-): Promise<QueueEventStateStoreBinding> {
+  migrate: QueueEventMigrateApi,
+): QueueEventStateStoreBinding {
   if (
     typeof options !== "object" ||
     options === null ||
@@ -325,6 +329,18 @@ export async function attachQueueEventStateStore(
       "options.repoRoot",
     );
   }
+  if (
+    typeof migrate !== "object" ||
+    migrate === null ||
+    typeof migrate.createLegacyJsonGuard !== "function" ||
+    typeof migrate.findCoveringMarker !== "function" ||
+    typeof migrate.migrateLegacyJson !== "function"
+  ) {
+    throw new StateStoreWriteValidationError(
+      "event-journal cutover requires a migrate API",
+      "migrate",
+    );
+  }
   const repoRoot = resolve(options.repoRoot);
   if (queueEventStateStores.has(repoRoot)) {
     throw new StateStoreWriteValidationError(
@@ -335,11 +351,8 @@ export async function attachQueueEventStateStore(
   }
 
   const clock = options.clock ?? (() => new Date().toISOString());
-  const {
-    createLegacyJsonGuard,
-    findCoveringMarker,
-    migrateLegacyJson,
-  } = await loadMigrateModule();
+  const { createLegacyJsonGuard, findCoveringMarker, migrateLegacyJson } =
+    migrate;
   const writer = new StateStoreDomainWriter({
     store: options.store,
     evidence: options.evidence,
@@ -395,6 +408,31 @@ export async function attachQueueEventStateStore(
   };
   queueEventStateStores.set(repoRoot, binding);
   return binding;
+}
+
+/**
+ * Cut the journal write path over to SQLite.
+ *
+ * - the current `events.jsonl` is imported once, in file order, with its
+ *   source/content/import hashes verified by `migrateLegacyJson`;
+ * - a covering marker makes a later process skip the one-shot import without
+ *   re-verifying stale snapshot content against newer appended events;
+ * - a fail-closed drift guard is installed before the binding is registered.
+ */
+export async function attachQueueEventStateStore(
+  options: QueueEventStateStoreBindingOptions,
+): Promise<QueueEventStateStoreBinding> {
+  return attachQueueEventStateStoreWithMigrate(
+    options,
+    await loadMigrateModule(),
+  );
+}
+
+/** True when this process already installed a journal cutover for `repoRoot`. */
+export function isQueueEventStateStoreAttached(
+  repoRoot: string = process.cwd(),
+): boolean {
+  return queueEventStateStores.has(resolve(repoRoot));
 }
 
 /** Remove the cutover binding (tests and explicit rollback to the JSONL path). */

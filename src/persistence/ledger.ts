@@ -220,6 +220,13 @@ export function detachLedgerStateStore(
   ledgerStateStores.delete(resolve(ledgerPath));
 }
 
+/** True when this process already installed a ledger cutover for `ledgerPath`. */
+export function isLedgerStateStoreAttached(
+  ledgerPath: string = defaultLedgerPath(),
+): boolean {
+  return ledgerStateStores.has(resolve(ledgerPath));
+}
+
 function readLedgerFromStateStore(
   binding: LedgerStateStoreBinding,
   path: string,
@@ -366,6 +373,20 @@ export async function updateLedger<T>(
   path: string,
   mutator: (ledger: Ledger) => T,
 ): Promise<T> {
+  // Production cutover: when the path is `<repo>/.cliyard/ledger.json`, attach
+  // ledger (+ journal) before the first write so saveLedger uses StateStore
+  // facts instead of rewriting ledger.json. Non-repo fixture paths keep the
+  // legacy JSON writer. Lazy import avoids a static cycle through migrate.
+  try {
+    const { ensureLedgerJournalCutoverSync, repoRootFromLedgerPath } =
+      await import("../orchestration/control-domain-cutover.js");
+    ensureLedgerJournalCutoverSync(repoRootFromLedgerPath(path));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes("cannot derive repoRoot from ledger path")) {
+      throw error;
+    }
+  }
   return withLedgerLock(path, () => {
     const ledger = loadLedger(path);
     const out = mutator(ledger);

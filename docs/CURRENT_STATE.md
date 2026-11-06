@@ -74,8 +74,8 @@ self-host controller loaded the new code.
   timeout reclaim.
 
 These facts do not imply parallel queue operation, dynamic routing, OS sandbox,
-24-hour unattended operation, launchd/Job Object parity, or that ledger /
-event-journal production writers are fully attached to StateStore.
+24-hour unattended operation, launchd/Job Object parity, or that supervisor and
+queue StateStores have been unified into one database file.
 
 ## Accepted but not integrated
 
@@ -159,10 +159,12 @@ list is its summary. New slices start only after a human-approved Plan.
 2. **P1 / P1b StateStore** — **complete on mainline** (`cdde392`, `1fd737f`).
    SQLite driver declared and measured
    ([STATESTORE_SQLITE_AUTHORITY.md](evidence/STATESTORE_SQLITE_AUTHORITY.md)).
-   Residual: ledger + event-journal **production attach** (APIs exist; not all
-   entrypoints cut over); honor
+   Ledger + event-journal **production attach** wired
+   ([LEDGER_JOURNAL_PRODUCTION_CUTOVER.md](evidence/LEDGER_JOURNAL_PRODUCTION_CUTOVER.md));
+   honor
    [COST_TRUTH_HISTORICAL_MISSING.md](evidence/COST_TRUTH_HISTORICAL_MISSING.md)
-   on any remaining import.
+   on any remaining import. Residual: non-repo fixture ledger paths still use
+   JSON; supervisor run store remains a separate file from queue `state.db`.
 
 3. **P2a daemon + Control API** — **complete on mainline** (`1f4be2d`).
    Residual: authenticated write/action endpoints; daemon does not yet own
