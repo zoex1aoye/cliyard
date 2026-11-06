@@ -26,6 +26,8 @@
         "src/orchestration/control-domain-cutover.ts",
         "src/daemon/core.ts",
         "tests/statestore-path-unify.test.ts",
+        "tests/supervisor-store.test.ts",
+        "tests/supervisor-resume.test.ts",
         "docs/evidence/STATESTORE_PATH_UNIFY.md",
         "docs/CURRENT_STATE.md",
         "docs/ROADMAP.md"
