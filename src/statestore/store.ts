@@ -777,6 +777,12 @@ export function createBetterSqlite3Driver(
   const Database = loadBetterSqlite3();
   const databasePath =
     options.path === ":memory:" ? options.path : resolve(options.path);
+  // Fresh repos open `.cliyard/state.db` (and peer paths) before any other
+  // writer has created the parent. Match the JsonFile fallback / supervisor
+  // open paths: create the directory, never rely on a prior mkdir elsewhere.
+  if (databasePath !== ":memory:") {
+    mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 });
+  }
   const db = new Database(databasePath);
   let initialized = false;
   let closed = false;
