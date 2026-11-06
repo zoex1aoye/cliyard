@@ -10,6 +10,7 @@ import type { TaskStatus } from "../core/status.js";
 import type { CostTruth, FailureRecord } from "../failures.js";
 import type { TaskExtensionRecord } from "../agents/continuation.js";
 import type { WorkerProcessRecord } from "../agents/process-tree.js";
+import type { SandboxReport } from "../sandbox/types.js";
 
 export const RUN_MANIFEST_VERSION = 1 as const;
 export const ACTIVE_RUN_VERSION = 1 as const;
@@ -149,6 +150,12 @@ export interface RunTaskState {
    * may omit this field.
    */
   workspaceBoundary?: WorkspaceBoundaryRecord;
+  /**
+   * SandboxAdapter report for the latest prepare/release attempt on this
+   * task. Observational only: never grants acceptance or replaces
+   * WorkspaceBoundary detection. Older manifests omit this field.
+   */
+  sandbox?: SandboxReport;
 }
 
 /** A rejected attempt whose worktree still validates for reuse. */

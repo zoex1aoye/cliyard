@@ -1,0 +1,54 @@
+{
+  "planId": "sandbox-adapter-nono-v0",
+  "tasks": [
+    {
+      "taskId": "sandbox-adapter-nono-v0",
+      "goal": "Land P3 SandboxAdapter v0: add src/sandbox/{types,adapter,gate,report,unavailable,nono,index}.ts with provider-neutral SandboxAdapter, SandboxCapabilities/Requirements, sandboxCapabilityGaps (never silent downgrade), bounded SandboxReport, UnavailableSandboxAdapter, and NonoSandboxAdapter pinned to nono v0.81.0 (probe --version; missing/mismatch => unavailable). Export helpers to select an adapter and build a report. Add optional observational sandbox?: SandboxReport on RunTaskState (supervisor/types + store parse) and project it into EvidenceTask in evidence-bundle without granting acceptance. Add tests/sandbox-adapter.test.ts covering gate ranks, pin probe with fake binary, unavailable path, and report schema. Write docs/evidence/SANDBOX_ADAPTER_NONO_V0.md. Update docs/CURRENT_STATE.md and docs/ROADMAP.md so P3 adapter v0 is implemented with P3b worker-wrap residual called out. Do not wrap codex-batch workers through nono run in this task.",
+      "nonGoals": [
+        "Do not wrap worker CLIs through `nono run` yet (P3b).",
+        "Do not add MXC or microVM backends.",
+        "Do not claim measured write prevention from version probe alone.",
+        "Do not remove or weaken WorkspaceBoundary."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/delivery-control-plane-v2.md",
+        "design/sandbox-adapter-nono-v0.md",
+        "src/execution/types.ts",
+        "src/supervisor/types.ts",
+        "src/supervisor/evidence-bundle.ts",
+        "docs/CURRENT_STATE.md"
+      ],
+      "writePaths": [
+        "src/sandbox/types.ts",
+        "src/sandbox/adapter.ts",
+        "src/sandbox/gate.ts",
+        "src/sandbox/report.ts",
+        "src/sandbox/unavailable.ts",
+        "src/sandbox/nono.ts",
+        "src/sandbox/index.ts",
+        "src/supervisor/types.ts",
+        "src/supervisor/store.ts",
+        "src/supervisor/evidence-bundle.ts",
+        "tests/sandbox-adapter.test.ts",
+        "docs/evidence/SANDBOX_ADAPTER_NONO_V0.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/sandbox-adapter.test.ts tests/evidence-bundle.test.ts"
+      ],
+      "deliverables": [
+        "SandboxAdapter + nono pin + capability gate.",
+        "Optional sandbox report on task / EvidenceBundle.",
+        "Evidence + status update with P3b residual."
+      ],
+      "forbidden": [
+        "Do not silently downgrade required isolation to host.",
+        "Do not treat version probe as write-prevention proof."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}

@@ -178,11 +178,14 @@ list is its summary. New slices start only after a human-approved Plan.
    POSIX process-group capability label; controller-death nested-group recovery
    still open.
 
-5. **P3 SandboxAdapter + nono (native-first)** — **next major product slice**
-   after DCP v2 review. P1b residuals (ledger/journal attach + path unify) are
-   closed. Wrap a fixed nono version behind `SandboxAdapter` with a capability
-   gate: refuse or require explicit approval when a task's requirements exceed
-   the backend; never silently downgrade. Sandbox reports enter EvidenceBundle.
+5. **P3 SandboxAdapter + nono (native-first)** — **v0 adapter landed** (this
+   branch / PR): provider-neutral `SandboxAdapter`, capability gate (no silent
+   downgrade), nono pin **`v0.81.0`**, observational `SandboxReport` on
+   RunManifest / EvidenceBundle. Evidence:
+   [SANDBOX_ADAPTER_NONO_V0.md](evidence/SANDBOX_ADAPTER_NONO_V0.md).
+   Residual **P3b**: wrap worker CLIs through `nono run` and measure write
+   prevention conformance (version probe alone is not that proof).
+   WorkspaceBoundary remains the independent post-run detection fallback.
 
 6. **Background VerificationTask**
    Decouple long verification from Worker lifecycle.
