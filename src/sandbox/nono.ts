@@ -8,12 +8,13 @@
  */
 import { spawnSync } from "node:child_process";
 import type { SandboxAdapter, SandboxPrepareRequest, SandboxPrepareResult } from "./adapter.js";
+import { measureNonoFilesystemEnforcement } from "./measure.js";
+import { NONO_PINNED_VERSION } from "./pin.js";
 import { prepareSandboxReport } from "./report.js";
 import type { SandboxCapabilities, SandboxReport } from "./types.js";
 import { UnavailableSandboxAdapter } from "./unavailable.js";
 
-/** Pinned nono CLI release (nolabs-ai/nono). Re-evaluate before bumping. */
-export const NONO_PINNED_VERSION = "0.81.0" as const;
+export { NONO_PINNED_VERSION } from "./pin.js";
 export const NONO_SANDBOX_ID = "sandbox.nono" as const;
 
 export interface NonoProbeResult {
@@ -33,6 +34,19 @@ export interface NonoSandboxAdapterOptions {
    * instead of claiming nono capabilities.
    */
   allowMismatchedVersion?: boolean;
+  /**
+   * Injected filesystem-enforcement measurement (tests). When omitted, runs
+   * {@link measureNonoFilesystemEnforcement} against the probed binary.
+   */
+  measureFilesystem?: () => {
+    enforced: boolean;
+    detail: string;
+  };
+  /**
+   * Skip the live enforcement probe (tests that only care about pin). Prefer
+   * leaving this unset in production so capabilities stay honest.
+   */
+  skipFilesystemMeasurement?: boolean;
 }
 
 function parseNonoVersion(stdout: string): string | null {
@@ -101,19 +115,30 @@ export function probeNonoBinary(
 
 export function nonoSandboxCapabilities(
   version: string,
+  options: {
+    filesystemEnforced: boolean;
+    enforcementDetail?: string;
+  } = { filesystemEnforced: false },
 ): SandboxCapabilities {
+  const filesystemIsolation = options.filesystemEnforced
+    ? "partial"
+    : "unsupported";
+  const notes = [
+    `pinned nono ${NONO_PINNED_VERSION}`,
+    options.filesystemEnforced
+      ? "filesystem enforcement measured on this host (partial; not full descendant proof)"
+      : options.enforcementDetail ??
+        "filesystem enforcement not measured/failed; isolation unsupported",
+    "opt-in worker wrap via buildNonoWrapCommand / applySandboxWrapToSpawn",
+  ];
   return {
     backendType: "nono",
     backendVersion: version,
-    // Honest: pin match proves the binary, not measured write prevention of
-    // every descendant. Declare partial until P3b conformance wrap lands.
-    filesystemIsolation: "partial",
-    networkIsolation: "partial",
-    credentialIsolation: "partial",
-    notes: [
-      `pinned nono ${NONO_PINNED_VERSION}; version probe is not write-prevention proof`,
-      "worker CLI wrap through `nono run` is deferred to P3b",
-    ],
+    filesystemIsolation,
+    // Network/credential mediation is not measured in P3b; stay unsupported.
+    networkIsolation: "unsupported",
+    credentialIsolation: "unsupported",
+    notes,
   };
 }
 
@@ -121,22 +146,28 @@ export class NonoSandboxAdapter implements SandboxAdapter {
   readonly id = NONO_SANDBOX_ID;
   private readonly caps: SandboxCapabilities;
   private readonly probe: NonoProbeResult;
+  private readonly filesystemEnforced: boolean;
 
-  private constructor(caps: SandboxCapabilities, probe: NonoProbeResult) {
+  private constructor(
+    caps: SandboxCapabilities,
+    probe: NonoProbeResult,
+    filesystemEnforced: boolean,
+  ) {
     this.caps = caps;
     this.probe = probe;
+    this.filesystemEnforced = filesystemEnforced;
   }
 
   /**
    * Create a nono adapter when the pinned binary is present; otherwise return
-   * an UnavailableSandboxAdapter with the probe detail.
+   * an UnavailableSandboxAdapter with the probe detail. Filesystem isolation
+   * is `partial` only after a passing enforcement measurement.
    */
   static create(
     options: NonoSandboxAdapterOptions = {},
   ): SandboxAdapter {
-    const probe =
-      options.probe?.() ??
-      probeNonoBinary(options.binaryPath ?? "nono");
+    const binaryPath = options.binaryPath ?? "nono";
+    const probe = options.probe?.() ?? probeNonoBinary(binaryPath);
     if (!probe.available || probe.version === null) {
       return new UnavailableSandboxAdapter(probe.detail);
     }
@@ -149,9 +180,31 @@ export class NonoSandboxAdapter implements SandboxAdapter {
           `${NONO_PINNED_VERSION}; refusing to claim sandbox capabilities`,
       );
     }
+
+    let filesystemEnforced = false;
+    let enforcementDetail =
+      "filesystem enforcement measurement skipped";
+    if (options.skipFilesystemMeasurement === true) {
+      filesystemEnforced = false;
+    } else if (options.measureFilesystem) {
+      const measured = options.measureFilesystem();
+      filesystemEnforced = measured.enforced;
+      enforcementDetail = measured.detail;
+    } else {
+      const measured = measureNonoFilesystemEnforcement({
+        binaryPath: probe.binaryPath ?? binaryPath,
+      });
+      filesystemEnforced = measured.enforced;
+      enforcementDetail = measured.detail;
+    }
+
     return new NonoSandboxAdapter(
-      nonoSandboxCapabilities(probe.version),
+      nonoSandboxCapabilities(probe.version, {
+        filesystemEnforced,
+        enforcementDetail,
+      }),
       probe,
+      filesystemEnforced,
     );
   }
 
@@ -162,6 +215,11 @@ export class NonoSandboxAdapter implements SandboxAdapter {
   /** Expose the last probe for diagnostics / tests. */
   lastProbe(): NonoProbeResult {
     return this.probe;
+  }
+
+  /** Whether the last create() measurement reported enforcement. */
+  filesystemEnforcementMeasured(): boolean {
+    return this.filesystemEnforced;
   }
 
   async prepare(request: SandboxPrepareRequest): Promise<SandboxPrepareResult> {

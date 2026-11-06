@@ -47,6 +47,8 @@ import {
   type ChildProcess,
   type SpawnOptions,
 } from "node:child_process";
+import { applySandboxWrapToSpawn } from "../sandbox/wrap.js";
+import type { SandboxReport } from "../sandbox/types.js";
 import {
   MAX_PROCESS_TABLE_ROWS,
   ProcessInspector,
@@ -526,17 +528,36 @@ export class WorkerProcessTreeManager {
   /**
    * Spawn a worker CLI detached on POSIX so it leads a dedicated group. The
    * Windows spawn stays in the caller's console; no group is claimed.
+   *
+   * When `options.sandboxWrap` is set and its prepare report is `prepared`
+   * for the nono backend, the spawn is rewritten through `nono wrap` (opt-in
+   * only; default callers pass nothing and stay unwrapped).
    */
   spawn(
     command: string,
     args: readonly string[] = [],
-    options: SpawnOptions = {},
+    options: SpawnOptions & {
+      sandboxWrap?: {
+        report: SandboxReport;
+        workspaceRoot: string;
+        repoRoot?: string;
+        nonoBinary?: string;
+      };
+    } = {},
   ): ManagedWorkerProcess {
     if (typeof command !== "string" || command.trim() === "") {
       throw new Error("worker command must be a non-empty string");
     }
-    const child = spawn(command, [...args], {
-      ...options,
+    const { sandboxWrap, ...spawnOptions } = options;
+    let finalCommand = command;
+    let finalArgs = [...args];
+    if (sandboxWrap !== undefined) {
+      const wrapped = applySandboxWrapToSpawn(command, args, sandboxWrap);
+      finalCommand = wrapped.command;
+      finalArgs = wrapped.args;
+    }
+    const child = spawn(finalCommand, finalArgs, {
+      ...spawnOptions,
       detached: this.platform !== "win32",
     });
     return this.manage(child);

@@ -61,13 +61,17 @@ test("nono pin mismatch yields unavailable adapter", () => {
   );
 });
 
-test("pinned nono probe declares partial isolation and prepares when requirements fit", async () => {
+test("pinned nono with measured enforcement declares partial isolation", async () => {
   const adapter = NonoSandboxAdapter.create({
     probe: () => ({
       available: true,
       version: NONO_PINNED_VERSION,
       binaryPath: "/tmp/fake-nono",
       detail: "pinned",
+    }),
+    measureFilesystem: () => ({
+      enforced: true,
+      detail: "test measured ok",
     }),
   });
   assert.equal(adapter.capabilities().backendType, "nono");
@@ -91,6 +95,33 @@ test("pinned nono probe declares partial isolation and prepares when requirement
   assert.equal(prepared.ok, true);
   assert.equal(prepared.report.status, "prepared");
   assert.match(prepared.report.policyHash ?? "", /^[0-9a-f]{64}$/);
+});
+
+test("pinned nono without enforcement declares filesystem unsupported", async () => {
+  const adapter = NonoSandboxAdapter.create({
+    probe: () => ({
+      available: true,
+      version: NONO_PINNED_VERSION,
+      binaryPath: "/tmp/fake-nono",
+      detail: "pinned",
+    }),
+    measureFilesystem: () => ({
+      enforced: false,
+      detail: "no Landlock",
+    }),
+  });
+  assert.equal(adapter.capabilities().filesystemIsolation, "unsupported");
+  assert.equal(
+    sandboxAdapterSatisfies(adapter, { filesystemIsolation: "partial" }),
+    false,
+  );
+  const prepared = await adapter.prepare({
+    workspaceRoot: "/tmp/ws",
+    repoRoot: "/tmp/repo",
+    requirements: { filesystemIsolation: "partial" },
+  });
+  assert.equal(prepared.ok, false);
+  assert.equal(prepared.report.status, "refused");
 });
 
 test("selectSandboxAdapter can force unavailable", () => {

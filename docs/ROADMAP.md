@@ -28,7 +28,7 @@ The endpoint has three inseparable parts:
 | P1b write cutover | **complete** (`1fd737f` + production ledger/journal attach + path unify) | Run + queue + ledger + journal single-writer on `.cliyard/state.db` | — |
 | P2a daemon + Control API | **complete** (`1f4be2d`) | `cliyardd` + read-only `/v1/status|events|runs` | Write/auth + daemon-owned dispatch deferred to P5 |
 | P2b ExecutionSupervisor | **complete** (`6f9e550`) | RuntimeHandle authority + continuity + conformance | launchd / systemd-run / Job Object backends |
-| P3 沙箱 + 独立验收 + 干净裁决 | **P3 adapter v0 in flight; P3b wrap + VerificationTask next** | SandboxAdapter + nono pin + gate + report | `nono run` worker wrap; microVM tier |
+| P3 沙箱 + 独立验收 + 干净裁决 | **P3 v0+P3b wrap/measure; VerificationTask next** | SandboxAdapter + nono pin + gate + report + wrap/measure | default-on batch wrap; microVM tier |
 | P4 路由 + 分层并行 | pending | ProfileCatalog activation + routing A/B + hierarchical admission | — |
 | P5 人机面 | pending | Web console over Control API; DSH thin client | desktop packaging |
 | P6 终点验收 | pending | Vue + Liquid Glass TDesign through the tool itself | — |
@@ -62,11 +62,12 @@ authority; launchd-class backends and nested controller-death recovery remain.
 
 ### P3 — sandbox, verification, review
 
-P3 adapter v0: SandboxAdapter + nono `v0.81.0` pin + capability gate +
-observational SandboxReport
-([SANDBOX_ADAPTER_NONO_V0.md](./evidence/SANDBOX_ADAPTER_NONO_V0.md)).
-P3b residual: worker wrap through `nono run` + measured write-prevention
-conformance. Then: background VerificationTask; clean-context Reviewer.
+P3 adapter v0 + P3b wrap/measure: SandboxAdapter + nono `v0.81.0` pin +
+capability gate + observational SandboxReport + `nono wrap` helper +
+filesystem enforcement measurement
+([SANDBOX_ADAPTER_NONO_V0.md](./evidence/SANDBOX_ADAPTER_NONO_V0.md),
+[SANDBOX_NONO_WORKER_WRAP.md](./evidence/SANDBOX_NONO_WORKER_WRAP.md)).
+Next: background VerificationTask; clean-context Reviewer.
 
 ### P4 — routing and hierarchical parallelism
 

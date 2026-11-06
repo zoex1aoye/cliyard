@@ -12,8 +12,8 @@ export {
   hashSandboxPolicy,
   prepareSandboxReport,
 } from "./report.js";
+export { NONO_PINNED_VERSION } from "./pin.js";
 export {
-  NONO_PINNED_VERSION,
   NONO_SANDBOX_ID,
   NonoSandboxAdapter,
   nonoSandboxCapabilities,
@@ -21,6 +21,18 @@ export {
   type NonoProbeResult,
   type NonoSandboxAdapterOptions,
 } from "./nono.js";
+export {
+  measureNonoFilesystemEnforcement,
+  writeNonEnforcingNonoStub,
+  type MeasureNonoFilesystemEnforcementOptions,
+  type NonoFilesystemEnforcementMeasurement,
+} from "./measure.js";
+export {
+  applySandboxWrapToSpawn,
+  buildNonoWrapCommand,
+  type NonoWrapCommand,
+  type NonoWrapCommandInput,
+} from "./wrap.js";
 export {
   UNAVAILABLE_SANDBOX_ID,
   UnavailableSandboxAdapter,
