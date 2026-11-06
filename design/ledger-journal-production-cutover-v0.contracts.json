@@ -6,7 +6,7 @@
       "version": 1,
       "frozen": true,
       "goals": [
-        "Wire production ledger and queue event-journal writes onto the StateStore cutover APIs. Add src/orchestration/control-domain-cutover.ts with a process-scoped open of the queue durable store (.cliyard/state.db or JSON-file fallback), ensureLedgerJournalCutoverSync(repoRoot) that idempotently attachLedgerStateStore + attachQueueEventStateStore (sync journal attach via migrate API parameter to avoid the write↔event-journal↔migrate TDZ cycle), and keep the store open for the process. Refactor event-journal to export attachQueueEventStateStoreWithMigrate; keep async attachQueueEventStateStore as a thin wrapper. Call ensure from updateLedger (derive repoRoot from ledger path) and from mutateQueueDocument / queue-runner dispatch paths before tryAppendQueueEvent. Add focused tests proving production ensure imports once, subsequent saveLedger/appendQueueEvent do not rewrite legacy JSON, and drift still fails closed. Write docs/evidence/LEDGER_JOURNAL_PRODUCTION_CUTOVER.md. Update docs/CURRENT_STATE.md residual note so ledger/journal production attach is complete with any honest residual called out."
+        "Wire production ledger and queue event-journal writes onto the StateStore cutover APIs. Add src/orchestration/control-domain-cutover.ts with a process-scoped open of the queue durable store (.cliyard/state.db or JSON-file fallback), ensureLedgerJournalCutoverSync(repoRoot) that idempotently attachLedgerStateStore + attachQueueEventStateStore (sync journal attach via migrate API parameter to avoid the write\u2194event-journal\u2194migrate TDZ cycle), and keep the store open for the process. Refactor event-journal to export attachQueueEventStateStoreWithMigrate; keep async attachQueueEventStateStore as a thin wrapper. Call ensure from updateLedger (derive repoRoot from ledger path) and from mutateQueueDocument / queue-runner dispatch paths before tryAppendQueueEvent. Add focused tests proving production ensure imports once, subsequent saveLedger/appendQueueEvent do not rewrite legacy JSON, and drift still fails closed. Write docs/evidence/LEDGER_JOURNAL_PRODUCTION_CUTOVER.md. Update docs/CURRENT_STATE.md residual note so ledger/journal production attach is complete with any honest residual called out."
       ],
       "nonGoals": [
         "Do not unify supervisor runtime/statestore with queue state.db.",
@@ -29,6 +29,7 @@
         "src/persistence/ledger.ts",
         "src/orchestration/queue-store.ts",
         "src/orchestration/queue-runner.ts",
+        "src/orchestration/cli.ts",
         "tests/ledger-lock.test.ts",
         "docs/evidence/LEDGER_JOURNAL_PRODUCTION_CUTOVER.md",
         "docs/CURRENT_STATE.md"
