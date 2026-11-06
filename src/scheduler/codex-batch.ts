@@ -1829,6 +1829,26 @@ async function maybeRunIntegrationGate(input: {
     };
   }
 
+  // Default npm suite/build only applies to Node integration trees. Fixture
+  // repos without package.json skip explicitly; callers that inject commands
+  // or a runner still run them.
+  if (
+    opts.integrationGateRunner === undefined &&
+    opts.integrationGateCommands === undefined &&
+    !existsSync(join(cwd, "package.json"))
+  ) {
+    const skipped: IntegrationGateResult = {
+      ok: true,
+      cwd,
+      commands: [],
+      skipped: true,
+      reason:
+        "default integration gate skipped: no package.json in integration worktree",
+    };
+    log(`[batch] ${skipped.reason}`);
+    return skipped;
+  }
+
   const timeoutMs =
     opts.integrationGateTimeoutMs ?? DEFAULT_INTEGRATION_GATE_TIMEOUT_MS;
   if (

@@ -440,7 +440,31 @@ posixTest("bounds residual evidence while reporting the true count", async () =>
     ignoreTerm: true,
     childIgnoreTerm: true,
   });
+  // Wait until every helper pid is durable in the pid file before cleanup so
+  // residual counts cannot under-report a still-spawning tree on slower hosts.
+  await waitFor(
+    () => {
+      try {
+        const pids = JSON.parse(readFileSync(pidFile, "utf8")) as unknown;
+        return Array.isArray(pids) && pids.length >= helperCount;
+      } catch {
+        return false;
+      }
+    },
+    `${helperCount} residual helpers`,
+    10_000,
+  );
   const helperPids = await readHelperPids(pidFile);
+  assert.ok(helperPids.length >= helperCount);
+  const leader = await managed.captureIdentity();
+  assert.ok(leader.identity);
+  await waitFor(
+    async () =>
+      (await inspector.listGroupMembers(leader.identity!.pgid)).length >=
+      helperCount + 1,
+    "residual helper group membership",
+    10_000,
+  );
   const outcome = await managed.cleanup("cancel");
   const record = outcome.record;
   assert.equal(record.cleanupState, "terminated");
@@ -719,6 +743,14 @@ posixTest(
         20_000,
       );
       const largePid = groupPids[0]!;
+      // Helper pid appearance does not mean all 512 nested sleeps are visible
+      // in ps yet; wait for the full group before asserting the bound.
+      await waitFor(
+        async () =>
+          (await inspector.listGroupMembers(largePid)).length >= 513,
+        "512-member nested group membership",
+        30_000,
+      );
       const largeMembers = await inspector.listGroupMembers(largePid);
       assert.ok(largeMembers.length >= 513);
       for (const member of largeMembers) trackFixture(member);

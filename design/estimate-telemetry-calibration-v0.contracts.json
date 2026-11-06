@@ -1,0 +1,56 @@
+{
+  "planId": "estimate-telemetry-calibration-v0",
+  "contracts": [
+    {
+      "taskId": "estimate-telemetry-calibration",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Calibrate estimate-plan guard budgets from curated non-authoritative CLI cost telemetry. Add src/planner/estimate-telemetry.ts with a versioned sample catalog (documented cli-estimated USD amounts plus evidencePath provenance, labeled S/M/L/XL), percentile helper (P75), and calibrateGuardUsd(size) that returns ceil_to_cent(P75 * 1.25) when sampleSize >= 3 for that size, otherwise the existing static floor with confidence low. Update src/planner/estimate.ts so estimateTask/estimatePlan use the calibrated guard, keep heuristic size/turns/wall/token and public-price CNY ranges, and expose calibration metadata (basis, sampleSize, confidence, p75Usd, margin, usedStaticFloor) on each task plus a plan-level calibration summary/notes. Never mark samples authoritative; never invent provider balance/quota/invoice. Extend tests/estimate.test.ts to prove P75+margin calibration for a well-sampled size, static-floor fallback for an under-sampled size, and that pricingReference stays non-binding."
+      ],
+      "nonGoals": [
+        "Do not add Plan complexity-signal schema.",
+        "Do not ingest live .cliyard/runs in this slice.",
+        "Do not claim provider-reported price, balance or quota.",
+        "Do not wire estimates into automatic admission or budget approval."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/TASK_ESTIMATION.md",
+        "design/task-estimation-v1.md",
+        "design/estimate-telemetry-calibration-v0.md",
+        "docs/evidence/FAILURE_COST_TRUTH.md",
+        "docs/evidence/STATESTORE_WRITE_CUTOVER.md",
+        "docs/evidence/NESTED_REGISTRY_LIVE_CLEANUP_V1_2.md",
+        "docs/evidence/QUEUE_EXECUTION_PROFILE.md",
+        "docs/evidence/PILOT_FOUNDATION_RELIABILITY.md",
+        "src/planner/estimate.ts",
+        "src/planner/estimate-cli.ts",
+        "tests/estimate.test.ts"
+      ],
+      "writePaths": [
+        "src/planner/estimate-telemetry.ts",
+        "src/planner/estimate.ts",
+        "tests/estimate.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "80c68ddd6e09127cca5e1eb32e7e63829269fdad",
+      "verifyCommands": [
+        "npx tsx --test tests/estimate.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "Curated CLI cost telemetry catalog with evidence provenance.",
+        "P75+margin guard calibration with cold-start static floor.",
+        "Estimate output exposes calibration metadata without claiming authority."
+      ],
+      "forbidden": [
+        "Do not mark cli-estimated samples as authoritative.",
+        "Do not invent provider balance, quota or invoice totals.",
+        "Do not change CostTruth or acceptance authority."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}

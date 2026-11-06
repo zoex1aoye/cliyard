@@ -1,0 +1,48 @@
+{
+  "planId": "linux-posix-verifier-hardening-v0",
+  "tasks": [
+    {
+      "taskId": "linux-posix-verifier-hardening",
+      "goal": "Make shell verifier timeouts kill the whole POSIX process group on Linux and harden process-tree stress fixtures against spawn races. In src/verification/verifier.ts, spawn non-Windows verifyCommands with a dedicated process group and on timeout signal -pid with SIGTERM then a short SIGKILL escalation; Windows keeps direct pid kill. Preserve exit 124 TIMEOUT semantics and legacy 30s default when verifyTimeoutMs is absent. In tests/worker-process-tree.test.ts, before residual-bound and 512-member nested-group assertions, wait until the expected helper/group membership is observable via the ProcessInspector (fail on timeout rather than under-count). Keep exact-identity cleanup and fail-closed behavior unchanged. Add docs/evidence/LINUX_POSIX_VERIFIER_HARDENING.md recording host kernel/Node, focused commands, and pass counts for verifier-shell timeout override plus the two process-tree stress tests. Extend tests/verifier-shell.test.ts if needed to keep the contract-timeout wall-clock assertion meaningful.",
+      "nonGoals": [
+        "Do not add systemd-run, launchd or daemon packaging.",
+        "Do not change DEFAULT_VERIFY_TIMEOUT_MS for legacy contracts.",
+        "Do not lower process-tree durable bounds or weaken fail-closed cleanup.",
+        "Do not claim pilot readiness or OS sandboxing."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/CURRENT_STATE.md",
+        "design/linux-posix-verifier-hardening-v0.md",
+        "design/pilot-safety-reliability-v1.md",
+        "src/verification/verifier.ts",
+        "src/runtime/process.ts",
+        "src/agents/process-tree.ts",
+        "tests/verifier-shell.test.ts",
+        "tests/worker-process-tree.test.ts"
+      ],
+      "writePaths": [
+        "src/verification/verifier.ts",
+        "tests/verifier-shell.test.ts",
+        "tests/worker-process-tree.test.ts",
+        "docs/evidence/LINUX_POSIX_VERIFIER_HARDENING.md"
+      ],
+      "verifyCommands": [
+        "npx tsx --test --test-timeout=180000 --test-concurrency=1 --test-name-pattern='contract timeout overrides|option timeout is the fallback|bounds residual evidence|cleans more than 16 external groups with a 512-member' tests/verifier-shell.test.ts tests/worker-process-tree.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "POSIX process-group kill for shell verifier timeouts.",
+        "Race-free process-tree stress waits on Linux.",
+        "Linux evidence document with exact commands and results."
+      ],
+      "forbidden": [
+        "Do not leave shell grandchildren running after a verifier timeout on Linux.",
+        "Do not use process-name or broad kill for cleanup.",
+        "Do not skip the stress tests silently without a failing wait timeout."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
