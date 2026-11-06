@@ -61,6 +61,10 @@ import {
 } from "./types.js";
 import { normalizeEvidencePath } from "../agents/workspace-boundary.js";
 import {
+  isSandboxReport,
+  type SandboxReport,
+} from "../sandbox/types.js";
+import {
   FileEvidenceStore,
   META_PROJECTION_FORMAT,
   META_PROJECTION_SEQ,
@@ -1779,9 +1783,26 @@ function parseRunManifest(raw: unknown, source: string): RunManifest {
         `${source}: task ${key}.workspaceBoundary`,
       );
     }
+    // Sandbox reports are optional observational evidence. A present record
+    // must validate; malformed bytes fail closed instead of being guessed.
+    if (task.sandbox !== undefined) {
+      task.sandbox = parseSandboxReport(
+        task.sandbox,
+        `${source}: task ${key}.sandbox`,
+      );
+    }
   }
 
   return raw as unknown as RunManifest;
+}
+
+function parseSandboxReport(raw: unknown, source: string): SandboxReport {
+  if (!isSandboxReport(raw)) {
+    throw new RunManifestError(
+      `${source} is not a valid SandboxReport (observational; fail closed)`,
+    );
+  }
+  return raw;
 }
 
 function parseWorkspaceBoundaryRecord(

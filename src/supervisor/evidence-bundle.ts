@@ -56,6 +56,10 @@ import {
 } from "../agents/process-tree.js";
 import { normalizeEvidencePath } from "../agents/workspace-boundary.js";
 import {
+  isSandboxReport,
+  type SandboxReport,
+} from "../sandbox/types.js";
+import {
   MAX_PATH_AUDITS,
   MAX_PATH_AUDIT_ERROR_LENGTH,
   MAX_PATH_AUDIT_PATHS,
@@ -207,6 +211,8 @@ export interface EvidenceTask {
   pathAudits: PathAuditRecord[];
   processTrees: WorkerProcessRecord[];
   workspaceBoundary: WorkspaceBoundaryRecord | null;
+  /** Observational sandbox report; null when the manifest omitted it. */
+  sandbox: SandboxReport | null;
 }
 
 export interface EvidenceBundle {
@@ -752,6 +758,7 @@ function projectTask(
     value.workspaceBoundary,
     `${label}.workspaceBoundary`,
   );
+  const sandbox = projectSandboxReport(value.sandbox, `${label}.sandbox`);
 
   const verdict: EvidenceTaskVerdict = accepted
     ? "accepted"
@@ -775,6 +782,8 @@ function projectTask(
     if (processTrees.length === 0) missing.add(`${label}.processTrees`);
     if (workspaceBoundary === null) missing.add(`${label}.workspaceBoundary`);
     if (cost === null) missing.add(`${label}.cost`);
+    // sandbox is optional observational evidence for v0; absence is not
+    // treated as a missing required observation.
   } else if (
     (verdict === "blocked" || verdict === "rejected") &&
     failure === null &&
@@ -796,7 +805,21 @@ function projectTask(
     pathAudits,
     processTrees,
     workspaceBoundary,
+    sandbox,
   };
+}
+
+function projectSandboxReport(
+  value: unknown,
+  label: string,
+): SandboxReport | null {
+  if (value === undefined) return null;
+  if (!isSandboxReport(value)) {
+    throw new EvidenceBundleManifestError(
+      `${label} is not a valid SandboxReport`,
+    );
+  }
+  return value;
 }
 
 function projectFailure(value: unknown, label: string): FailureRecord | null {
