@@ -1,0 +1,50 @@
+{
+  "planId": "p2b-regression-fix-v0",
+  "tasks": [
+    {
+      "taskId": "p2b-regression-fix",
+      "goal": "Fix the four full-suite regressions observed after the P2b merge and the integration-gate cutover: (1) update tests/supervisor-resume.test.ts writeActiveLease so fixture leases persist a canonical processGroupRuntimeHandle matching production, restoring the two fail-closed continuity tests without weakening RuntimeHandle authority; (2) rewrite the legacy-profile case in tests/queue-execution-profile.test.ts to append the legacy-shaped queue document through saveQueue instead of hand-editing .cliyard/queue.json, preserving readable legacy items without StateStore drift; (3) in src/scheduler/codex-batch.ts, when the default integration gate is enabled and the integration worktree has no package.json, skip the gate with an explicit skipped integrationGate record so fixture Supervisor runs stay deterministic while real Node projects still run npm test then npm run build. Add or adjust focused assertions for the three areas. Do not weaken drift fail-closed or RuntimeHandle authority for leases that truly lack runtime.",
+      "nonGoals": [
+        "Do not weaken StateStore queue drift fail-closed behavior.",
+        "Do not invent recovery authority from pid/pgid diagnostics when lease.runtime is absent in production recovery.",
+        "Do not calibrate estimate-plan telemetry in this slice."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "design/p2b-regression-fix-v0.md",
+        "design/integration-suite-gate-v0.md",
+        "src/scheduler/codex-batch.ts",
+        "src/agents/worker-lease.ts",
+        "src/orchestration/queue-store.ts",
+        "src/supervisor/cli.ts",
+        "tests/supervisor-resume.test.ts",
+        "tests/queue-execution-profile.test.ts",
+        "tests/deadline-extension.test.ts",
+        "tests/integration-gate.test.ts"
+      ],
+      "writePaths": [
+        "src/scheduler/codex-batch.ts",
+        "tests/supervisor-resume.test.ts",
+        "tests/queue-execution-profile.test.ts",
+        "tests/integration-gate.test.ts"
+      ],
+      "verifyCommands": [
+        "npx tsx --test --test-timeout=120000 --test-name-pattern='fail-closed worker lease|durable unit while stopping a legacy fail-closed|new items always freeze a deterministic profile|accepted tasks plus a green integration gate|accepted tasks plus a red integration gate|dependency skip yields|batch checkpoint precedes worker completion' tests/supervisor-resume.test.ts tests/queue-execution-profile.test.ts tests/integration-gate.test.ts tests/deadline-extension.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "Fail-closed continuity fixtures carry RuntimeHandle authority.",
+        "Legacy profile queue test mutates through saveQueue.",
+        "Default integration gate skips cleanly when package.json is absent.",
+        "Focused regressions for the four observed failures are green."
+      ],
+      "forbidden": [
+        "Do not treat hand-edited queue.json as writable authority.",
+        "Do not recover fail-closed leases from pid/pgid diagnostics alone.",
+        "Do not disable the integration gate for real Node integration worktrees."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
