@@ -1,0 +1,52 @@
+{
+  "planId": "sandbox-batch-wire-v0",
+  "tasks": [
+    {
+      "taskId": "sandbox-batch-wire",
+      "goal": "P3c: wire SandboxAdapter into production worker spawn. Add src/sandbox/worker-wire.ts with prepareWorkerSandbox({ workspaceRoot, repoRoot, requirements?, nonoBinary?, enabled? }) returning { ok, report, wrap? } and createSandboxRefusalFailure(). Extend CodexWorkerOptions/ClaudeWorkerOptions with sandbox?: { enabled?: boolean; requirements?: SandboxRequirements; nonoBinary?: string; repoRoot?: string }; when enabled (or CLIYARD_SANDBOX=1), prepare before spawn, fail closed on !ok, pass sandboxWrap to processTree.spawn, put SandboxReport on AgentResult. Thread sandbox through LoopResult in repair/loop.ts. WorkerBatchOptions.sandbox + pass through createCodex/ClaudeAdapter in codex-batch; checkpoint task.sandbox on accepted/rejected manifests. Add tests/sandbox-batch-wire.test.ts (refuse on gaps; wrap argv used when prepared). Add scripts/sandbox-p3c-smoke.ts live smoke using pinned nono (optional CURSOR_CLI/CLIYARD_WORKER_BINARY). Evidence SANDBOX_BATCH_WIRE.md + CURRENT_STATE/ROADMAP update.",
+      "nonGoals": [
+        "Do not enable sandbox for dryRun by default.",
+        "Do not measure network/credential isolation.",
+        "Do not remove WorkspaceBoundary."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/sandbox-batch-wire-v0.md",
+        "src/sandbox/wrap.ts",
+        "src/sandbox/nono.ts",
+        "src/agents/codex.ts",
+        "src/agents/claude.ts",
+        "src/repair/loop.ts",
+        "src/scheduler/codex-batch.ts"
+      ],
+      "writePaths": [
+        "src/sandbox/worker-wire.ts",
+        "src/sandbox/index.ts",
+        "src/agents/types.ts",
+        "src/agents/codex.ts",
+        "src/agents/claude.ts",
+        "src/repair/loop.ts",
+        "src/scheduler/codex-batch.ts",
+        "tests/sandbox-batch-wire.test.ts",
+        "scripts/sandbox-p3c-smoke.ts",
+        "docs/evidence/SANDBOX_BATCH_WIRE.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/sandbox-batch-wire.test.ts tests/sandbox-wrap.test.ts",
+        "npx tsx scripts/sandbox-p3c-smoke.ts"
+      ],
+      "deliverables": [
+        "Batch/adapters prepare+wrap+report.",
+        "Focused tests + live smoke evidence."
+      ],
+      "forbidden": [
+        "Do not silently downgrade when sandbox is enabled and prepare fails.",
+        "Do not wrap dryRun mock workers."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}
