@@ -186,7 +186,8 @@ list is its summary. New slices start only after a human-approved Plan.
    [SANDBOX_ADAPTER_NONO_V0.md](evidence/SANDBOX_ADAPTER_NONO_V0.md),
    [SANDBOX_NONO_WORKER_WRAP.md](evidence/SANDBOX_NONO_WORKER_WRAP.md).
    Filesystem isolation is `partial` only when measurement passes; otherwise
-   `unsupported` (this cloud image lacks Landlock). Residual: default-on
+   `unsupported`. This host has Landlock active; an early `/tmp`-based probe
+   was a false negative (fixed to home-scoped measure). Residual: default-on
    wrap for production batches; network/credential measurement; microVM tier.
    WorkspaceBoundary remains the independent post-run detection fallback.
 
