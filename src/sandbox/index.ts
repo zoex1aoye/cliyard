@@ -34,6 +34,16 @@ export {
   type NonoWrapCommandInput,
 } from "./wrap.js";
 export {
+  DEFAULT_WORKER_SANDBOX_REQUIREMENTS,
+  createSandboxRefusalFailure,
+  createUnavailableWorkerAdapter,
+  isWorkerSandboxEnabled,
+  prepareWorkerSandbox,
+  wrapWorkerCommand,
+  type PreparedWorkerSandbox,
+  type WorkerSandboxOptions,
+} from "./worker-wire.js";
+export {
   UNAVAILABLE_SANDBOX_ID,
   UnavailableSandboxAdapter,
   unavailableSandboxCapabilities,

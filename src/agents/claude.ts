@@ -104,6 +104,12 @@ export interface ClaudeWorkerOptions {
    */
   heartbeatMs?: number;
   dryRun?: boolean;
+  /**
+   * Opt-in OS sandbox (P3c). When enabled (or CLIYARD_SANDBOX=1), prepare
+   * nono before spawn; refuse on capability gaps; wrap via `nono wrap`.
+   * Ignored for dryRun.
+   */
+  sandbox?: import("../sandbox/worker-wire.js").WorkerSandboxOptions;
 }
 
 interface Session {
@@ -326,6 +332,40 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
           };
         }
 
+        const {
+          createSandboxRefusalFailure,
+          prepareWorkerSandbox,
+        } = await import("../sandbox/worker-wire.js");
+        const preparedSandbox = await prepareWorkerSandbox({
+          workspaceRoot: opts.cwd,
+          options: opts.sandbox,
+        });
+        if (preparedSandbox !== null && !preparedSandbox.ok) {
+          emit({
+            type: "error",
+            phase: "ending",
+            message: "sandbox refused",
+            detail: preparedSandbox.report.gaps.join("; ") || preparedSandbox.report.status,
+          });
+          return {
+            sessionId,
+            exitCode: 1,
+            touchedPaths: [],
+            logTail: `[claude] sandbox refused: ${preparedSandbox.report.gaps.join("; ") || preparedSandbox.report.status}`,
+            failure: createSandboxRefusalFailure(preparedSandbox.report),
+            sandbox: preparedSandbox.report,
+            ...(budgetPolicy && parsedTaskBudget
+              ? { taskBudget: { ...parsedTaskBudget } }
+              : {}),
+            cost: unavailableCostTruth({
+              sessionId,
+              guardBudgetUsd:
+                parsedTaskBudget?.cumulativeGuardUsd ?? maxBudgetUsd,
+              note: "sandbox refused",
+            }),
+          };
+        }
+
         /**
          * Allocate this attempt's invocation guard from the task envelope. A
          * repair receives only what the overshoot reserve leaves available,
@@ -443,6 +483,9 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
                   prompt,
                   emit,
                   processTree,
+                  ...(preparedSandbox?.wrap !== undefined
+                    ? { sandboxWrap: preparedSandbox.wrap }
+                    : {}),
                   ...(input.onWorkerLease
                     ? {
                         lease: {
@@ -685,6 +728,9 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
               observations,
               guardBudgetUsd: sessionGuardUsd,
             }),
+            ...(preparedSandbox?.report !== undefined
+              ? { sandbox: preparedSandbox.report }
+              : {}),
           };
         } catch (e) {
           const message = e instanceof Error ? e.message : String(e);
@@ -748,6 +794,9 @@ export function createClaudeAdapter(opts: ClaudeWorkerOptions): AgentAdapter {
                     guardBudgetUsd: sessionGuardUsd,
                     note: "worker failed to start",
                   }),
+            ...(preparedSandbox?.report !== undefined
+              ? { sandbox: preparedSandbox.report }
+              : {}),
           };
         }
       })();
@@ -1174,6 +1223,12 @@ function runClaude(opts: {
   processTree: WorkerProcessTreeManager;
   onSpawn: (child: ChildProcess, managed: ManagedWorkerProcess) => void;
   lease?: LeaseInvocation;
+  sandboxWrap?: {
+    report: import("../sandbox/types.js").SandboxReport;
+    workspaceRoot: string;
+    repoRoot?: string;
+    nonoBinary?: string;
+  };
 }): Promise<ClaudeRunResult> {
   return new Promise((resolvePromise, reject) => {
     const args = [
@@ -1202,6 +1257,9 @@ function runClaude(opts: {
       cwd: opts.cwd,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
+      ...(opts.sandboxWrap !== undefined
+        ? { sandboxWrap: opts.sandboxWrap }
+        : {}),
     });
     const child = managed.child;
     opts.onSpawn(child, managed);

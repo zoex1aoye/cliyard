@@ -1,7 +1,7 @@
 # cliyard Current State
 
-> Verified: 2026-11-06 (Asia/Shanghai) — realigned after discovering P1–P2b
-> were already on mainline while this page still listed P1 as next.
+> Verified: 2026-11-07 (Asia/Shanghai) — P3c sandbox batch wire measured;
+> earlier realignment noted P1–P2b already on mainline.
 >
 > This page is the single current-status authority for implementation order,
 > known gaps and the next executable slice. Product rationale remains in
@@ -178,18 +178,23 @@ list is its summary. New slices start only after a human-approved Plan.
    POSIX process-group capability label; controller-death nested-group recovery
    still open.
 
-5. **P3 SandboxAdapter + nono (native-first)** — **v0 + P3b wrap/measure
+5. **P3 SandboxAdapter + nono (native-first)** — **v0 + P3b + P3c batch wire
    landed**: provider-neutral `SandboxAdapter`, capability gate, nono pin
    **`v0.81.0`**, observational `SandboxReport`, `nono wrap` argv builder,
    filesystem-enforcement measurement (Landlock-honest), opt-in
-   `processTree.spawn({ sandboxWrap })`. Evidence:
+   `processTree.spawn({ sandboxWrap })`, and production wire
+   (`prepareWorkerSandbox` → codex/claude spawn → `LoopResult.sandbox` →
+   RunManifest `task.sandbox`) behind `sandbox.enabled` /
+   `CLIYARD_SANDBOX=1`. Evidence:
    [SANDBOX_ADAPTER_NONO_V0.md](evidence/SANDBOX_ADAPTER_NONO_V0.md),
-   [SANDBOX_NONO_WORKER_WRAP.md](evidence/SANDBOX_NONO_WORKER_WRAP.md).
+   [SANDBOX_NONO_WORKER_WRAP.md](evidence/SANDBOX_NONO_WORKER_WRAP.md),
+   [SANDBOX_BATCH_WIRE.md](evidence/SANDBOX_BATCH_WIRE.md).
    Filesystem isolation is `partial` only when measurement passes; otherwise
    `unsupported`. This host has Landlock active; an early `/tmp`-based probe
    was a false negative (fixed to home-scoped measure). Residual: default-on
-   wrap for production batches; network/credential measurement; microVM tier.
-   WorkspaceBoundary remains the independent post-run detection fallback.
+   wrap for every production batch (still opt-in); network/credential
+   measurement; microVM tier. WorkspaceBoundary remains the independent
+   post-run detection fallback.
 
 6. **Background VerificationTask**
    Decouple long verification from Worker lifecycle.

@@ -194,6 +194,11 @@ export interface AgentResult {
    * cleanly (or the platform could not prove it did).
    */
   cleanupFailure?: FailureRecord;
+  /**
+   * Observational sandbox prepare/wrap report for this attempt. Never grants
+   * acceptance; absence means sandbox was not enabled for the spawn.
+   */
+  sandbox?: import("../sandbox/types.js").SandboxReport;
 }
 
 export interface AgentAdapter {
