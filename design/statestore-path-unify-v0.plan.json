@@ -1,0 +1,49 @@
+{
+  "planId": "statestore-path-unify-v0",
+  "tasks": [
+    {
+      "taskId": "statestore-path-unify",
+      "goal": "Unify control-plane StateStore paths onto `.cliyard/state.db` (+ state-evidence / state-fallback). Add src/statestore/paths.ts with canonical path constants, controlStatePaths(repoRoot), and resolveControlStatePaths(repoRoot) that (a) one-shot relocates legacy `.cliyard/runtime/statestore/{state.sqlite,facts.json,evidence}` into the canonical layout when only legacy has durable bytes, writing RELOCATED.json under the legacy dir, and (b) throws a fail-closed needsHuman/corruption error when both canonical and legacy authorities exist. Point supervisorStatePaths, queueStatePaths, daemonStatePaths, and control-domain-cutover at the shared helper (keep exported supervisor/queue path function names for callers). Update daemon open path comments. Add focused tests for relocate-once, dual-authority refuse, and that supervisor + queue open the same sqlite path. Write docs/evidence/STATESTORE_PATH_UNIFY.md. Update docs/CURRENT_STATE.md and docs/ROADMAP.md: clear the dual-store residual; reclassify Control API write/auth as deferred (not a blocking pre-P3 residual).",
+      "nonGoals": [
+        "Do not add Control API write or auth endpoints.",
+        "Do not implement P3 sandbox.",
+        "Do not delete legacy JSON domain exports.",
+        "Do not auto-merge dual-authority stores."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "src/supervisor/store.ts",
+        "src/orchestration/queue-store.ts",
+        "src/orchestration/control-domain-cutover.ts",
+        "src/daemon/core.ts",
+        "docs/CURRENT_STATE.md",
+        "design/statestore-path-unify-v0.md"
+      ],
+      "writePaths": [
+        "src/statestore/paths.ts",
+        "src/supervisor/store.ts",
+        "src/orchestration/queue-store.ts",
+        "src/orchestration/control-domain-cutover.ts",
+        "src/daemon/core.ts",
+        "tests/statestore-path-unify.test.ts",
+        "docs/evidence/STATESTORE_PATH_UNIFY.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/statestore-path-unify.test.ts tests/supervisor-store.test.ts tests/orchestration-queue.test.ts tests/ledger-lock.test.ts"
+      ],
+      "deliverables": [
+        "Shared canonical StateStore paths.",
+        "Legacy relocate + dual-authority fail-closed.",
+        "Evidence and status residual clear."
+      ],
+      "forbidden": [
+        "Do not silently prefer one of two live authorities.",
+        "Do not write outside listed paths."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}
