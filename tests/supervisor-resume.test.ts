@@ -18,6 +18,7 @@ import type {
   AgentStartInput,
 } from "../src/agents/types.js";
 import {
+  processGroupRuntimeHandle,
   workerLeasePath,
   type WorkerLease,
 } from "../src/agents/worker-lease.js";
@@ -306,6 +307,13 @@ function writeActiveLease(
   leaseId: string,
 ): string {
   const startedAt = new Date().toISOString();
+  // Production leases persist RuntimeHandle as the only recovery authority.
+  // Fixture leases must do the same; pid/pgid remain diagnostics only.
+  const runtime = processGroupRuntimeHandle({
+    pid: unit.pid,
+    pgid: unit.pid,
+    startedAt: unit.startedAt,
+  });
   const lease: WorkerLease = {
     version: 1,
     leaseId,
@@ -321,6 +329,7 @@ function writeActiveLease(
       osStartIdentity: unit.startedAt,
       captureMode: "posix-group",
     },
+    runtime,
     workspace: repo,
     startedAt,
     updatedAt: startedAt,

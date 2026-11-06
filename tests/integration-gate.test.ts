@@ -227,6 +227,49 @@ test("accepted tasks plus a red integration gate block without rewriting verdict
   }
 });
 
+test("default gate skips when the integration worktree has no package.json", async () => {
+  const repo = initRepo();
+  try {
+    const base = runGit(repo, ["rev-parse", "HEAD"]);
+    const contractsPath = writeContracts(repo, [
+      contract("task", "task.txt", base, ["test -f task.txt"]),
+    ]);
+    const manifest = createRunManifest(repo, {
+      planId: "gate-no-package",
+      contractsPath,
+      baseCommit: base,
+      integrationBranch: "cliyard/integration/gate-no-package",
+      tasks: ["task"],
+    });
+
+    const result = await runCodexBatch({
+      contractsPath,
+      repoRoot: repo,
+      ledgerPath: join(repo, ".cliyard", "ledger.json"),
+      worker: "claude",
+      keepWorktrees: false,
+      runManifest: manifest,
+      // Force the production gate path on; fixture trees have no package.json.
+      enableIntegrationGate: true,
+      workerFactory: (_worker, cwd) => acceptingWorker(cwd),
+    });
+
+    assert.equal(result.allAccepted, true);
+    assert.equal(result.integrationGate?.ok, true);
+    assert.equal(result.integrationGate?.skipped, true);
+    assert.match(
+      result.integrationGate?.reason ?? "",
+      /no package\.json in integration worktree/,
+    );
+
+    const saved = loadRunManifest(repo, manifest.runId);
+    assert.equal(saved.status, "completed");
+    assert.equal(saved.tasks["task"]?.accepted, true);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("dependency skip yields allAccepted false without invoking the gate", async () => {
   const repo = initRepo();
   let gateCalls = 0;

@@ -15,6 +15,7 @@ import {
   loadQueue,
   queuePaths,
   retryQueueItem,
+  saveQueue,
   type QueueItem,
 } from "../src/orchestration/queue-store.js";
 import {
@@ -499,11 +500,14 @@ test("new items always freeze a deterministic profile and legacy records remain 
     assert.equal(added.model, "deepseek-flash");
     assert.equal(added.executionProfile.providerId, "deepseek");
 
-    const raw = rawQueueDocument(repo);
-    const legacy = raw.items[0] as Record<string, unknown>;
-    delete legacy.executionProfile;
-    delete legacy.model;
-    writeRawQueue(repo, raw);
+    // Legacy items predate executionProfile. Append that shape through the
+    // StateStore so queue.json stays the exported projection; hand-editing the
+    // export is correctly rejected as drift.
+    const legacyDocument = loadQueue(repo);
+    const legacyItem = legacyDocument.items[0]!;
+    delete legacyItem.executionProfile;
+    delete legacyItem.model;
+    saveQueue(repo, legacyDocument);
 
     const loaded = itemById(repo, "new-profile");
     assert.equal(loaded.executionProfile, undefined);
