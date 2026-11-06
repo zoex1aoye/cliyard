@@ -178,13 +178,16 @@ list is its summary. New slices start only after a human-approved Plan.
    POSIX process-group capability label; controller-death nested-group recovery
    still open.
 
-5. **P3 SandboxAdapter + nono (native-first)** — **v0 adapter landed** (this
-   branch / PR): provider-neutral `SandboxAdapter`, capability gate (no silent
-   downgrade), nono pin **`v0.81.0`**, observational `SandboxReport` on
-   RunManifest / EvidenceBundle. Evidence:
-   [SANDBOX_ADAPTER_NONO_V0.md](evidence/SANDBOX_ADAPTER_NONO_V0.md).
-   Residual **P3b**: wrap worker CLIs through `nono run` and measure write
-   prevention conformance (version probe alone is not that proof).
+5. **P3 SandboxAdapter + nono (native-first)** — **v0 + P3b wrap/measure
+   landed**: provider-neutral `SandboxAdapter`, capability gate, nono pin
+   **`v0.81.0`**, observational `SandboxReport`, `nono wrap` argv builder,
+   filesystem-enforcement measurement (Landlock-honest), opt-in
+   `processTree.spawn({ sandboxWrap })`. Evidence:
+   [SANDBOX_ADAPTER_NONO_V0.md](evidence/SANDBOX_ADAPTER_NONO_V0.md),
+   [SANDBOX_NONO_WORKER_WRAP.md](evidence/SANDBOX_NONO_WORKER_WRAP.md).
+   Filesystem isolation is `partial` only when measurement passes; otherwise
+   `unsupported` (this cloud image lacks Landlock). Residual: default-on
+   wrap for production batches; network/credential measurement; microVM tier.
    WorkspaceBoundary remains the independent post-run detection fallback.
 
 6. **Background VerificationTask**
