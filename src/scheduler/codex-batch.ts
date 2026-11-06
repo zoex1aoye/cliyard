@@ -136,7 +136,62 @@ export interface CodexBatchOptions {
    * recorded draft and start a new worktree.
    */
   reuseAttempts?: boolean;
+  /**
+   * Deterministic integration full-suite gate (design/integration-suite-gate-v0.md).
+   * Defaults to on for production batches; off for dry-run and test
+   * `workerFactory` seams so fixture repos without a suite stay green.
+   * Explicit true/false always wins.
+   */
+  enableIntegrationGate?: boolean;
+  /**
+   * Bounded shell commands run in the integration worktree after every task is
+   * accepted. Defaults to {@link DEFAULT_INTEGRATION_GATE_COMMANDS}.
+   */
+  integrationGateCommands?: string[];
+  /** Per-command wall-clock bound for the default shell gate runner. */
+  integrationGateTimeoutMs?: number;
+  /**
+   * Test/integration seam: replace the real shell gate. Production never sets
+   * this; the gate remains a plain shell command and is never routed through a
+   * model.
+   */
+  integrationGateRunner?: IntegrationGateRunner;
 }
+
+/** Safe default gate: full suite then build, never a model. */
+export const DEFAULT_INTEGRATION_GATE_COMMANDS = [
+  "npm test",
+  "npm run build",
+] as const;
+
+/** Default per-command bound; full suite currently sits near the 30s verifier. */
+export const DEFAULT_INTEGRATION_GATE_TIMEOUT_MS = 180_000;
+
+/** Bounded log tail retained for one gate command. */
+export const MAX_INTEGRATION_GATE_LOG_CHARS = 4_000;
+
+export interface IntegrationGateCommandResult {
+  command: string;
+  exitCode: number;
+  /** Bounded combined stdout/stderr tail; never unbounded. */
+  logTail: string;
+  timedOut?: boolean;
+}
+
+export interface IntegrationGateResult {
+  ok: boolean;
+  cwd: string;
+  commands: IntegrationGateCommandResult[];
+  /** Present when the gate did not run (dependency skip / disabled). */
+  skipped?: boolean;
+  reason?: string;
+}
+
+export type IntegrationGateRunner = (input: {
+  cwd: string;
+  commands: string[];
+  timeoutMs: number;
+}) => Promise<IntegrationGateResult>;
 
 export interface CodexBatchResult {
   results: LoopResult[];
@@ -153,6 +208,11 @@ export interface CodexBatchResult {
   };
   /** Final checkpoint, when the batch ran with `runManifest`. */
   manifest?: RunManifest;
+  /**
+   * Deterministic integration gate evidence. Absent when the gate was not
+   * eligible (tasks not all accepted). Failure never rewrites task verdicts.
+   */
+  integrationGate?: IntegrationGateResult;
 }
 
 /** Minimal guard contract; the real `WorkspaceBoundaryGuard` satisfies it. */
@@ -1638,8 +1698,26 @@ export async function runCodexBatch(
     }
 
     const finalHead = await gitHead(integration.worktreePath);
-    const allAccepted =
+    const tasksAccepted =
       skipped.length === 0 && results.every((r) => r.verdict === "accepted");
+    // Dependency skips (and any rejected task) already fail the run; the
+    // integration gate must not run and must not rewrite those task verdicts.
+    const integrationGate = tasksAccepted
+      ? await maybeRunIntegrationGate({
+          opts,
+          dryRun,
+          cwd: integration.worktreePath,
+          log,
+        })
+      : undefined;
+    const gateBlocked = integrationGate !== undefined && !integrationGate.ok;
+    const allAccepted = tasksAccepted && !gateBlocked;
+    if (gateBlocked) {
+      log(
+        `[${workerKind}-batch] integration gate blocked: ` +
+          formatIntegrationGateFailure(integrationGate),
+      );
+    }
     if (checkpoint) {
       checkpoint = checkpointManifest(repoRoot, checkpoint, (manifest) => {
         manifest.integrationHead = finalHead;
@@ -1666,6 +1744,8 @@ export async function runCodexBatch(
           delete task.workspaceBoundary;
           manifest.tasks[item.taskId] = task;
         }
+        // Gate failure blocks the run only. Accepted task verdicts stay
+        // accepted; the structured gate record lives on the batch result.
         manifest.status = allAccepted ? "completed" : "blocked";
       });
     }
@@ -1688,6 +1768,7 @@ export async function runCodexBatch(
         head: finalHead,
       },
       ...(checkpoint ? { manifest: checkpoint } : {}),
+      ...(integrationGate ? { integrationGate } : {}),
     };
   } finally {
     if (!opts.keepWorktrees) {
@@ -1714,6 +1795,188 @@ function mergePathAudits(
   observed: PathAuditRecord[],
 ): PathAuditRecord[] {
   return [...(existing ?? []), ...observed].slice(-MAX_PATH_AUDITS);
+}
+
+/**
+ * Decide whether the deterministic integration gate runs, then execute it as
+ * a bounded shell (or an injected test runner). Never routes through a model.
+ */
+async function maybeRunIntegrationGate(input: {
+  opts: CodexBatchOptions;
+  dryRun: boolean;
+  cwd: string;
+  log: (message: string) => void;
+}): Promise<IntegrationGateResult> {
+  const { opts, dryRun, cwd, log } = input;
+  const enabled =
+    opts.enableIntegrationGate ??
+    (dryRun !== true && opts.workerFactory === undefined);
+  const commands = normalizeIntegrationGateCommands(
+    opts.integrationGateCommands,
+  );
+  if (!enabled) {
+    return {
+      ok: true,
+      cwd,
+      commands: [],
+      skipped: true,
+      reason:
+        opts.enableIntegrationGate === false
+          ? "integration gate disabled"
+          : dryRun
+            ? "dry-run skips integration gate"
+            : "test workerFactory seam skips default integration gate",
+    };
+  }
+
+  const timeoutMs =
+    opts.integrationGateTimeoutMs ?? DEFAULT_INTEGRATION_GATE_TIMEOUT_MS;
+  if (
+    !Number.isFinite(timeoutMs) ||
+    timeoutMs <= 0 ||
+    timeoutMs > 60 * 60 * 1000
+  ) {
+    throw new Error(
+      `integration gate: timeoutMs must be in (0, 3600000], got ${timeoutMs}`,
+    );
+  }
+
+  log(
+    `[batch] integration gate starting in ${cwd}: ${commands.join(" && ")}`,
+  );
+  const runner = opts.integrationGateRunner ?? runDefaultIntegrationGate;
+  const result = await runner({ cwd, commands, timeoutMs });
+  if (result.ok) {
+    log(`[batch] integration gate passed (${result.commands.length} commands)`);
+  }
+  return result;
+}
+
+function normalizeIntegrationGateCommands(
+  commands: string[] | undefined,
+): string[] {
+  const raw =
+    commands === undefined
+      ? [...DEFAULT_INTEGRATION_GATE_COMMANDS]
+      : commands;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error("integration gate: commands must be a non-empty array");
+  }
+  const normalized = raw.map((command, index) => {
+    if (typeof command !== "string" || command.trim() === "") {
+      throw new Error(
+        `integration gate: command[${index}] must be a non-empty string`,
+      );
+    }
+    if (command.length > 2_000) {
+      throw new Error(
+        `integration gate: command[${index}] exceeds 2000 characters`,
+      );
+    }
+    return command;
+  });
+  return normalized;
+}
+
+async function runDefaultIntegrationGate(input: {
+  cwd: string;
+  commands: string[];
+  timeoutMs: number;
+}): Promise<IntegrationGateResult> {
+  const commandResults: IntegrationGateCommandResult[] = [];
+  for (const command of input.commands) {
+    const ran = await runBoundedGateShell(command, {
+      cwd: input.cwd,
+      timeoutMs: input.timeoutMs,
+    });
+    const combined = [ran.stdout, ran.stderr].filter(Boolean).join("\n").trim();
+    const prefix = ran.timedOut
+      ? `[integration-gate] TIMEOUT (${input.timeoutMs}ms): ${command}`
+      : `[integration-gate] exit=${ran.exitCode}: ${command}`;
+    commandResults.push({
+      command,
+      exitCode: ran.timedOut ? 124 : ran.exitCode,
+      logTail: boundGateLog(
+        combined ? `${prefix}\n${combined}` : prefix,
+      ),
+      ...(ran.timedOut ? { timedOut: true } : {}),
+    });
+    if (ran.timedOut || ran.exitCode !== 0) {
+      return { ok: false, cwd: input.cwd, commands: commandResults };
+    }
+  }
+  return { ok: true, cwd: input.cwd, commands: commandResults };
+}
+
+function runBoundedGateShell(
+  command: string,
+  opts: { cwd: string; timeoutMs: number },
+): Promise<{
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+}> {
+  return new Promise((resolvePromise) => {
+    const child = spawn(command, {
+      shell: true,
+      cwd: opts.cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: process.env,
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+    }, opts.timeoutMs);
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+      if (stdout.length > MAX_INTEGRATION_GATE_LOG_CHARS * 2) {
+        stdout = stdout.slice(-MAX_INTEGRATION_GATE_LOG_CHARS * 2);
+      }
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+      if (stderr.length > MAX_INTEGRATION_GATE_LOG_CHARS * 2) {
+        stderr = stderr.slice(-MAX_INTEGRATION_GATE_LOG_CHARS * 2);
+      }
+    });
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolvePromise({
+        exitCode: 1,
+        stdout,
+        stderr: stderr || String(err),
+        timedOut: false,
+      });
+    });
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolvePromise({
+        exitCode: code ?? 1,
+        stdout,
+        stderr,
+        timedOut,
+      });
+    });
+  });
+}
+
+function boundGateLog(text: string): string {
+  if (text.length <= MAX_INTEGRATION_GATE_LOG_CHARS) return text;
+  return text.slice(text.length - MAX_INTEGRATION_GATE_LOG_CHARS);
+}
+
+function formatIntegrationGateFailure(gate: IntegrationGateResult): string {
+  const failed = [...gate.commands].reverse().find((item) => item.exitCode !== 0);
+  if (!failed) return gate.reason ?? "unknown gate failure";
+  return `${failed.command} exit=${failed.exitCode}`;
 }
 
 /** Bounded cumulative process-tree evidence, newest last. */
@@ -2354,6 +2617,9 @@ async function runWorkerBatchCli(
         })),
         skipped: result.skipped,
         ledgerPath: result.ledgerPath,
+        ...(result.integrationGate
+          ? { integrationGate: result.integrationGate }
+          : {}),
       },
       null,
       2,
