@@ -21,8 +21,9 @@
  *
  * Backend selection mirrors the supervisor: `better-sqlite3` when the optional
  * native module is installed, otherwise the durable JSON fact-log fallback at
- * `.cliyard/runtime/statestore/facts.json`. The fallback driver below is a
- * local copy of the supervisor's private `JsonFileStateStoreDriver` with the
+ * `.cliyard/state-fallback/facts.json` (canonical control StateStore layout;
+ * legacy `runtime/statestore` is relocated once). The fallback driver below is
+ * a local copy of the supervisor's private `JsonFileStateStoreDriver` with the
  * same on-disk shape; it differs in one required way: meta writes are durable
  * on their own, because the daemon lease is meta-only.
  *
@@ -53,13 +54,11 @@ import { createServer, type Server, type Socket } from "node:net";
 import { hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import {
-  STATE_DIR,
-  STATE_FACTS_FILE,
-  STATE_SQLITE_FILE,
   SUPERVISOR_DIR,
   isProcessAlive,
   isSameHost,
 } from "../supervisor/store.js";
+import { resolveControlStatePaths } from "../statestore/paths.js";
 import {
   META_PROJECTION_FORMAT,
   META_PROJECTION_SEQ,
@@ -136,7 +135,7 @@ export interface DaemonStatePaths {
   repoRoot: string;
   cliyardDir: string;
   stateDir: string;
-  /** SQLite authority (preferred). */
+  /** SQLite authority (preferred) — `.cliyard/state.db`. */
   sqlitePath: string;
   /** Durable JSON fallback authority. */
   factsPath: string;
@@ -144,16 +143,16 @@ export interface DaemonStatePaths {
 }
 
 export function daemonStatePaths(repoRoot: string): DaemonStatePaths {
-  const root = resolve(repoRoot);
-  const cliyardDir = join(root, SUPERVISOR_DIR);
-  const stateDir = join(cliyardDir, STATE_DIR);
+  const { paths } = resolveControlStatePaths(repoRoot);
   return {
-    repoRoot: root,
-    cliyardDir,
-    stateDir,
-    sqlitePath: join(stateDir, STATE_SQLITE_FILE),
-    factsPath: join(stateDir, STATE_FACTS_FILE),
-    leaseLockPath: join(stateDir, DAEMON_LEASE_LOCK_FILE),
+    repoRoot: paths.repoRoot,
+    cliyardDir: paths.cliyardDir,
+    stateDir: paths.stateDir,
+    sqlitePath: paths.dbPath,
+    factsPath: paths.fallbackFactsPath,
+    // Keep the lease lock beside the fallback directory so SQLite and
+    // JSON-file backends share one serialization point under `.cliyard`.
+    leaseLockPath: join(paths.fallbackDir, DAEMON_LEASE_LOCK_FILE),
   };
 }
 

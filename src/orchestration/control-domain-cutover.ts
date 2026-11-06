@@ -1,23 +1,24 @@
 /**
- * Production cutover for ledger + queue event-journal onto the shared queue
- * durable StateStore (design/ledger-journal-production-cutover-v0.md).
+ * Production cutover for ledger + queue event-journal onto the shared control
+ * StateStore (design/ledger-journal-production-cutover-v0.md,
+ * design/statestore-path-unify-v0.md).
  *
- * Supervisor run manifests stay in `.cliyard/runtime/statestore/`. Queue,
- * ledger and audit-event domains share `.cliyard/state.db`. This module keeps
- * one process-scoped handle open so `saveLedger` / `appendQueueEvent` bindings
- * remain valid across calls.
+ * Run, queue, ledger and audit-event domains share `.cliyard/state.db`. This
+ * module keeps one process-scoped handle open so `saveLedger` /
+ * `appendQueueEvent` bindings remain valid across calls.
  *
  * Intentionally does not import `queue-store.ts` (avoids a load cycle with
- * mutateQueueDocument). Paths match `QUEUE_STATE_DB_FILE` /
- * `QUEUE_STATE_EVIDENCE_DIR`. `better-sqlite3` is a declared dependency; the
- * JSON-file fallback remains available to queue-store's own open path.
+ * mutateQueueDocument). Paths come from `statestore/paths`.
  */
-import { join, dirname, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import {
   createLegacyJsonGuard,
   findCoveringMarker,
   migrateLegacyJson,
 } from "../statestore/migrate.js";
+import {
+  resolveControlStatePaths,
+} from "../statestore/paths.js";
 import {
   FileEvidenceStore,
   openFileStateStore,
@@ -43,10 +44,6 @@ const MIGRATE_API = {
   migrateLegacyJson,
 } as const;
 
-/** Keep in sync with queue-store `QUEUE_STATE_DB_FILE` / evidence dir. */
-const CONTROL_STATE_DB_FILE = "state.db";
-const CONTROL_STATE_EVIDENCE_DIR = "state-evidence";
-
 interface ControlDomainHandles {
   repoRoot: string;
   store: StateStore;
@@ -59,12 +56,12 @@ function getOrOpenControlHandles(repoRoot: string): ControlDomainHandles {
   const root = resolve(repoRoot);
   const existing = controlHandles.get(root);
   if (existing !== undefined) return existing;
-  const cliyardDir = join(root, ".cliyard");
+  const { paths } = resolveControlStatePaths(root);
   const evidence = new FileEvidenceStore({
-    directory: join(cliyardDir, CONTROL_STATE_EVIDENCE_DIR),
+    directory: paths.evidenceDir,
   });
   const store = openFileStateStore({
-    path: join(cliyardDir, CONTROL_STATE_DB_FILE),
+    path: paths.dbPath,
   });
   const handles: ControlDomainHandles = {
     repoRoot: root,

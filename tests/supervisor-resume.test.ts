@@ -37,6 +37,7 @@ import {
 import { runCodexBatch } from "../src/scheduler/codex-batch.js";
 import { runSupervisorCli } from "../src/supervisor/cli.js";
 import {
+  clearSupervisorStateStoreFiles,
   ContractsHashMismatchError,
   createRunManifest,
   inspectSupervisorStateStore,
@@ -808,10 +809,7 @@ test("a resumed legacy run checkpoints through the StateStore", async () => {
     const { runId } = seedInterruptedRun(repo, abandonedCost);
 
     // Simulate a run directory written before the cutover: no StateStore yet.
-    rmSync(supervisorStatePaths(repo).stateDir, {
-      recursive: true,
-      force: true,
-    });
+    clearSupervisorStateStoreFiles(repo);
     assert.equal(inspectSupervisorStateStore(repo), undefined);
 
     assert.equal(await resumeWithCost(repo, runId, "new-session", 0.02), 0);
