@@ -416,24 +416,36 @@ interface ShellRunResult {
   timedOut: boolean;
 }
 
+/** Grace before escalating a timed-out shell tree from SIGTERM to SIGKILL. */
+const SHELL_TIMEOUT_KILL_ESCALATION_MS = 200;
+
 function runLocalShell(
   command: string,
   opts: { cwd?: string; timeoutMs: number; env: NodeJS.ProcessEnv },
 ): Promise<ShellRunResult> {
   return new Promise((resolvePromise) => {
+    // On POSIX, put the shell in its own process group so a timeout can signal
+    // the whole tree (shell + grandchildren such as `sleep`). Killing only the
+    // shell leaves Linux grandchildren running for the full command duration.
+    const posix = process.platform !== "win32";
     const child = spawn(command, {
       shell: true,
       cwd: opts.cwd,
       stdio: ["ignore", "pipe", "pipe"],
       env: opts.env,
+      ...(posix ? { detached: true } : {}),
     });
 
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let escalateTimer: NodeJS.Timeout | undefined;
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      killVerifyCommandTree(child.pid, posix);
+      escalateTimer = setTimeout(() => {
+        killVerifyCommandTree(child.pid, posix, "SIGKILL");
+      }, SHELL_TIMEOUT_KILL_ESCALATION_MS);
     }, opts.timeoutMs);
 
     child.stdout.on("data", (d: Buffer) => {
@@ -445,6 +457,7 @@ function runLocalShell(
 
     child.on("error", (err) => {
       clearTimeout(timer);
+      if (escalateTimer) clearTimeout(escalateTimer);
       resolvePromise({
         exitCode: 1,
         stdout,
@@ -455,6 +468,7 @@ function runLocalShell(
 
     child.on("close", (code) => {
       clearTimeout(timer);
+      if (escalateTimer) clearTimeout(escalateTimer);
       resolvePromise({
         exitCode: code ?? 1,
         stdout,
@@ -463,4 +477,33 @@ function runLocalShell(
       });
     });
   });
+}
+
+/**
+ * Stop a verifyCommand tree. POSIX uses the negative-pgid form so shell
+ * grandchildren cannot outlive the timeout; Windows keeps a direct pid kill.
+ */
+function killVerifyCommandTree(
+  pid: number | undefined,
+  posix: boolean,
+  signal: NodeJS.Signals = "SIGTERM",
+): void {
+  if (pid === undefined || !Number.isInteger(pid) || pid <= 0) return;
+  if (!posix) {
+    try {
+      process.kill(pid, signal);
+    } catch {
+      // Already gone.
+    }
+    return;
+  }
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    try {
+      process.kill(pid, signal);
+    } catch {
+      // Already gone.
+    }
+  }
 }
