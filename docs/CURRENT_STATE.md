@@ -1,12 +1,14 @@
 # cliyard Current State
 
-> Verified: 2026-10-29
+> Verified: 2026-11-06 (Asia/Shanghai)
 >
 > This page is the single current-status authority for implementation order,
 > known gaps and the next executable slice. Product rationale remains in
 > `KEY_MIND.md`, `PRODUCT_STRATEGY_V2.md` and
 > `design/continuous-harness-v2.md`; those documents must not maintain a second
-> competing "current next step".
+> competing "current next step". Architecture direction for the rewrite is
+> `design/delivery-control-plane-v2.md` (reviewed draft; human approval still
+> required before P1 Plans are frozen for dispatch).
 
 Git history, frozen contracts, RunManifest and evidence remain the authorities
 for exact code and run facts. This page summarizes their current relationship.
@@ -27,9 +29,21 @@ self-host controller loaded the new code.
 
 ## Lineage at this checkpoint
 
-- Mainline branch: `codex/supervisor-v0-baseline`.
-- v1.2 Plan commit: `36dd985`; implementation contracts commit: `ddfde41`.
-- v1.2 cutover Plan commit: `90b516e`; cutover contracts commit: `74b54b9`.
+- Mainline branch: `codex/supervisor-v0-baseline` (tip at sediment `b9fcfff`
+  before the open PR stack). Open stacked PRs #1–#4 and this P0 authority
+  closeout are **not** merged; human merge is required.
+- Pilot safety reliability closeout run
+  `6919db6d-9948-42f4-b5d6-04111f5d0dba` is accepted and merged: closeout merge
+  `c1d0dbb`, integration head includes `fb665ab` (`task-budget-ledger`). Evidence:
+  [PILOT_FOUNDATION_RELIABILITY.md](evidence/PILOT_FOUNDATION_RELIABILITY.md).
+- Cost-truth Supervisor resume retention is accepted and merged at `c5714db`.
+  The historical missing first attempt of that pilot run is recorded as an
+  import constraint in
+  [COST_TRUTH_HISTORICAL_MISSING.md](evidence/COST_TRUTH_HISTORICAL_MISSING.md);
+  the RunManifest is not rewritten.
+- Intended legacy-seam freeze:
+  [P0_LEGACY_SEAM_FREEZE.md](P0_LEGACY_SEAM_FREEZE.md) (binding after human
+  merge of the pending stack).
 - WorkspaceBoundary v1 is accepted at `c04bb96` but is not an ancestor of all
   current governance commits.
 - WorkerProcessTree v1.1 is accepted at `9a38174` but is not merged into the
@@ -43,39 +57,18 @@ self-host controller loaded the new code.
   history. Both root drafts completed full 473/473 locally, but the outer
   manager reused a vanished nested-group leader PID and rejected cleanup with
   `residualCount=0`.
-- The reviewed continuation base `1294869` contained draft `a026345`
-  (EvidenceBundle), draft `91369d4` (Eval core), and a focused pid-reuse cleanup
-  fix. It passed focused 29/29, build and full 483/483.
 - Continuation run `cd40095a-8b11-4f11-8856-76d1d9f01d2f` is blocked overall.
   Its EvidenceBundle integration and Harness Eval CLI tasks are accepted at
   `b1fb9ac` and `f546a54`; the integration head is `3abbc79`. Its evidence task
-  is rejected, with a retained draft worktree.
-- The accepted Harness Eval CLI exposed an npm wrapper bug: injected snapshot
-  and strict scenario-failure exits prevented `run -> compare` evidence
-  collection. The closeout Plan addresses only that wrapper and records the
-  observed deadline flake rather than rerunning until green.
-- Closeout run `c4d786ec-2dbe-449f-a65e-a23c6a6d673e` is blocked. Its wrapper
-  task is rejected because the outer Worker cleanup could not prove one
-  vanished external group after a 5-second `ps` timeout. The dependent evidence
-  task is policy-blocked. Independent review of the retained candidate passed
-  focused 33/33, build and full 513/513 in 28.01 seconds, but neither the run
-  nor the candidate is accepted.
-- Current mainline build passes and the complete suite passes **464/464** in
-  **26.45 seconds**. This is close to the verifier's fixed 30-second command
-  timeout and does not remove the observed flake risk.
-- Post-merge build passed. The first complete-suite run was **463/464** because
-  the deadline-extension in-flight checkpoint timed out once; that file then
-  passed **13/13**, and a second complete run passed **464/464**. This is an
-  observed flake, not a stable-green claim.
-- No active Supervisor lock or queue lock remained after the latest closeout.
-  Historic leases include released and cleanup-failed records; they must not be
-  erased or rewritten.
+  is rejected, with a retained draft worktree. That head is not the current
+  mainline tip.
+- Closeout run `c4d786ec-2dbe-449f-a65e-a23c6a6d673e` remains blocked history;
+  the later pilot foundation run supersedes its open reliability items for
+  process-table batch cleanup, verifier timeout policy, budget ledger, DSH
+  monitor hardening and Harness Eval wrapper/evidence closeout.
 - Node baseline remains 20. Node 22, SRT and OS permission experiments require a
   separate decision.
-- DSH is still a replaceable cockpit, not a control-plane dependency. The local
-  app is `0.2.1-rc.3`; upstream adds a low-risk `0.2.1-rc.4` and the
-  compatibility-heavy `0.2.2-alpha.2`. The plugin has not been tested against
-  either newer release. See
+- DSH is still a replaceable cockpit, not a control-plane dependency. See
   [DSH_0_2_2_ALPHA_2_REVIEW.md](evidence/DSH_0_2_2_ALPHA_2_REVIEW.md).
 
 ## Implemented and measured on the mainline
@@ -84,8 +77,13 @@ self-host controller loaded the new code.
 - Plan compiler, frozen TaskContract, write/path audit and Worktree isolation;
 - Plan-backed queue, manual adoption and run-id binding;
 - read-only queue status, event journal and resource/provider snapshots;
-- structured failure taxonomy and explicit cost truth;
-- health-gated deadline extension and opted-in budget continuation;
+- structured failure taxonomy and explicit cost truth, including Supervisor
+  resume retention of abandoned-attempt observations (`c5714db`);
+- health-gated deadline extension and opted-in budget continuation with a
+  cumulative task-level budget ledger (`fb665ab` / pilot closeout);
+- bounded process-table cleanup projection, explicit verifier command timeout
+  policy, DSH monitor CSP / non-string HTML path, and Harness Eval wrapper
+  semantics from the pilot foundation closeout (`c1d0dbb`);
 - WorkerLease v1 for same-host top-level POSIX group recovery;
 - RuntimeManager with leased loopback ports, readiness and cleanup records;
 - Task Architect that only produces a human-reviewable Plan.
@@ -164,33 +162,37 @@ neither earlier RunManifest is retroactively accepted.
 The order is a dependency order, not a promise of parallel delivery. The
 full rationale and open decisions live in
 [delivery-control-plane-v2.md](../design/delivery-control-plane-v2.md); this
-list is its summary. Steps 2-8 each start only after a human-approved Plan.
+list is its summary. Steps 2+ each start only after a human-approved Plan.
 
 0. **Human review of Delivery Control Plane v2** — approve or amend the
-   native-first execution design before any Plan is compiled.
+   native-first execution design before any P1 Plan is frozen for dispatch.
+   Still open.
 
-1. **Pilot safety and reliability closeout**
-   - Replace the per-external-group full `ps -A` cleanup scans with bounded
-     process-table snapshots and exact pgid projection. The latest failure
-     observed 1,302 external groups and one inspection timeout after its leader
-     disappeared.
-   - Add an explicit verifier command timeout policy. A 26-second current suite
-     against a fixed 30-second boundary is not enough headroom.
-   - Make the cumulative budget envelope span repairs and continuation
-     invocations, not reset with every new worker attempt.
-   - Finish the Harness Eval wrapper/evidence closeout and preserve all failed
-     repetitions. Infrastructure failures must remain visible.
-   - Remove ledger-string HTML injection from the development monitor, add CSP,
-     and add a tested DSH/Node compatibility lane with explicit `engines.dsh`.
-   - Repair the attempt cost-truth aggregate and mark the historical missing
-     attempt before any StateStore migration, so the wrong total is not
-     carried into SQLite.
+1. **P0 legacy-seam closeout (authority)** — code implemented on mainline;
+   docs/freeze in this checkpoint; **human merge of open stack still required**.
+   - Pilot foundation reliability: **implemented / merged** (`c1d0dbb`,
+     integration includes `fb665ab`). Bounded process-table cleanup, verifier
+     timeout policy, cumulative budget ledger, DSH monitor hardening and
+     Harness Eval wrapper/evidence closeout are on the ancestry. See
+     [PILOT_FOUNDATION_RELIABILITY.md](evidence/PILOT_FOUNDATION_RELIABILITY.md).
+   - Cost-truth resume retention: **implemented / merged** (`c5714db`).
+   - Historical missing attempt: **marked** in
+     [COST_TRUTH_HISTORICAL_MISSING.md](evidence/COST_TRUTH_HISTORICAL_MISSING.md)
+     for StateStore import; RunManifest not rewritten.
+   - Freeze list: **declared** in
+     [P0_LEGACY_SEAM_FREEZE.md](P0_LEGACY_SEAM_FREEZE.md); binding after human
+     merge of PRs #1–#4 (integration-suite-gate, P2b regressions,
+     estimate-telemetry calibration, Linux POSIX verifier hardening).
+   - Remaining P0 action is human: merge the open stack, then treat the freeze
+     as binding. No further P0 implementation slice is queued.
 
-2. **StateStore SQLite boundary**
+2. **P1 StateStore SQLite boundary** — **next executable implementation slice**
+   after human merge of the pending stack and DCP v2 review.
    Move task/attempt/event state from JSON files to SQLite behind one store
    interface, using the ExecutionHandle schema (runtime handle authority,
    PID diagnostic only) from delivery-control-plane-v2. Keep design, plans
-   and contracts in Git and evidence in run/attempt directories.
+   and contracts in Git and evidence in run/attempt directories. Import must
+   honor the historical missing-attempt constraint above.
 
 3. **Daemon boundary and Control API**
    Split the foreground-only Supervisor into `cliyardd` (Node 20) plus an
@@ -241,7 +243,7 @@ These are capability gates, not date estimates or a percentage score.
 
 | Use mode | Current assessment | Gate before use |
 |---|---|---|
-| Supervised single-repository pilot | Near, but not yet recommended | Close process inspection/cleanup races, test full suites with explicit timeouts, enforce a task-level budget envelope, and remove the monitor's HTML injection path |
+| Supervised single-repository pilot | Near, but not yet recommended | Human-merge the open PR stack, bind the legacy-seam freeze, complete DCP v2 review, and keep human Plan/diff gates; do not claim readiness from P0 code alone |
 | Small-team real project | Not ready | Add background verification, OS-level write isolation, authenticated Control API/event replay, stable DSH compatibility, and intervention history |
 | Parallel multi-module delivery | Not ready | Background verifier, per-run ownership, provider/runtime admission, deterministic integration lineage and measured DSH/UI lifecycle behavior |
 | Overnight or 24-hour unattended operation | Far | Durable controller/daemon recovery, complete process ownership, provider quota/balance handling, bounded soak, incident recovery and an auditable human-escalation path |
@@ -255,8 +257,9 @@ Candidate pilot envelope after the reliability and monitor-security gates:
 - human Plan approval, human diff review and no automatic merge or push;
 - no claim of OS sandboxing, unlimited parallel work or unattended operation.
 
-The first credible supervised pilot should start only after priority item 1 is
-accepted. Team use additionally requires the background verifier, sandbox,
+The first credible supervised pilot should start only after priority item 1's
+human merge/freeze gate is complete and item 0 (DCP v2 review) has a human
+decision. Team use additionally requires the background verifier, sandbox,
 clean-context review and authenticated event/action API gates.
 
 ## Release gates

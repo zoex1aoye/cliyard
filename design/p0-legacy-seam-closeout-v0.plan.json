@@ -1,0 +1,49 @@
+{
+  "planId": "p0-legacy-seam-closeout-v0",
+  "tasks": [
+    {
+      "taskId": "p0-legacy-seam-closeout",
+      "goal": "Close the P0 authority gap without rewriting history or implementing StateStore. Update docs/CURRENT_STATE.md so the verified date and priority item 1 accurately classify pilot-closeout and cost-truth resume retention as implemented on mainline (cite commits c5714db and fb665ab and related task SHAs), list open PR stack #1–#4 as human-merge gated, and state that the next executable implementation slice after human merge + DCP v2 review is P1 StateStore. Add docs/evidence/COST_TRUTH_HISTORICAL_MISSING.md recording run 6919db6d-9948-42f4-b5d6-04111f5d0dba task task-budget-ledger attempt 0 as unavailable/must-be-missing on StateStore import, without rewriting any RunManifest. Add docs/P0_LEGACY_SEAM_FREEZE.md declaring the operative freeze list from delivery-control-plane-v2 §7.1 (JSON stores, foreground Supervisor features, PID-as-authority registry, DSH monitor features) as intended now and binding after human merge of the pending stack. Update docs/ROADMAP.md P0 section to awaiting human merge and freeze declaration. Do not merge PRs, do not change src/, and do not claim pilot readiness.",
+      "nonGoals": [
+        "Do not merge or push open PRs.",
+        "Do not implement StateStore SQLite.",
+        "Do not rewrite historical RunManifests.",
+        "Do not approve Delivery Control Plane v2 on behalf of a human."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md",
+        "design/delivery-control-plane-v2.md",
+        "design/p0-legacy-seam-closeout-v0.md",
+        "design/cost-truth-resume-retention-v0.md",
+        "docs/evidence/PILOT_FOUNDATION_RELIABILITY.md",
+        "docs/evidence/FAILURE_COST_TRUTH.md"
+      ],
+      "writePaths": [
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md",
+        "docs/P0_LEGACY_SEAM_FREEZE.md",
+        "docs/evidence/COST_TRUTH_HISTORICAL_MISSING.md"
+      ],
+      "verifyCommands": [
+        "test -f docs/P0_LEGACY_SEAM_FREEZE.md",
+        "test -f docs/evidence/COST_TRUTH_HISTORICAL_MISSING.md",
+        "rg -n \"P1 StateStore|c5714db|6919db6d|freeze\" docs/CURRENT_STATE.md docs/ROADMAP.md docs/P0_LEGACY_SEAM_FREEZE.md docs/evidence/COST_TRUTH_HISTORICAL_MISSING.md"
+      ],
+      "deliverables": [
+        "Current-state authority refresh for P0.",
+        "Historical missing-attempt import constraint.",
+        "Operative freeze-list document.",
+        "Roadmap P0 status aligned with reality."
+      ],
+      "forbidden": [
+        "Do not edit src/ or tests/.",
+        "Do not claim open PRs are merged.",
+        "Do not claim supervised pilot is ready."
+      ],
+      "maxRepairs": 0
+    }
+  ]
+}
