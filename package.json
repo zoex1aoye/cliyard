@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Thin orchestrator: Windows entry → WSL CLI workers (capability-based, no Docker required)",
+  "description": "Design-to-Evidence Delivery Control Plane: Plan → frozen contracts → isolated workers → independent evidence",
   "bin": {
     "cliyard": "./dist/cli.js"
   },
@@ -38,5 +38,8 @@
     "@types/node": "^22.13.10",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0"
   }
 }

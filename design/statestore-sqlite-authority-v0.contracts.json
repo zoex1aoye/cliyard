@@ -1,0 +1,93 @@
+{
+  "planId": "statestore-sqlite-authority-v0",
+  "contracts": [
+    {
+      "taskId": "sqlite-runtime-enable",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Make better-sqlite3 the declared durable StateStore backend and fix fresh-repo open. Add better-sqlite3 to package.json dependencies (and lockfile). In createBetterSqlite3Driver, mkdirSync the parent directory of a non-memory database path with mode 0o700 before new Database(...), matching the JsonFile fallback and supervisor/daemon open paths. Keep StateStoreDriverUnavailableError fallback behavior when the native module is missing. Verify with focused StateStore tests that exercise the SQLite driver (no skip for better-sqlite3 installed). Write docs/evidence/STATESTORE_SQLITE_AUTHORITY.md with Node/OS, package version, focused pass counts, and explicit non-claims (ledger/journal still not production-attached; pilot not ready)."
+      ],
+      "nonGoals": [
+        "Do not attach ledger or event journal production writers in this task.",
+        "Do not remove the JsonFile/fallback driver.",
+        "Do not change StateStore schema or fact log format."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "src/statestore/store.ts",
+        "src/supervisor/store.ts",
+        "src/orchestration/queue-store.ts",
+        "docs/evidence/STATESTORE_WRITE_CUTOVER.md",
+        "design/statestore-sqlite-authority-v0.md"
+      ],
+      "writePaths": [
+        "package.json",
+        "package-lock.json",
+        "src/statestore/store.ts",
+        "docs/evidence/STATESTORE_SQLITE_AUTHORITY.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "f116ff4d87d166ba024766abd265d9640f368b7d",
+      "verifyCommands": [
+        "node -e \"require('better-sqlite3'); console.log('ok')\"",
+        "npx tsx --test tests/statestore.test.ts tests/statestore-read.test.ts tests/statestore-write.test.ts"
+      ],
+      "deliverables": [
+        "Declared better-sqlite3 dependency.",
+        "Parent-directory creation before SQLite open.",
+        "SQLite evidence document."
+      ],
+      "forbidden": [
+        "Do not claim ledger/journal are cut over.",
+        "Do not claim OS sandbox or daemon ownership of dispatch."
+      ],
+      "maxRepairs": 1
+    },
+    {
+      "taskId": "authority-docs-realign",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Realign status authority with code already on mainline. Update docs/CURRENT_STATE.md verified date and lineage so StateStore v0 (cdde392), write cutover P1b (1fd737f), daemon+Control API P2a (1f4be2d), and ExecutionSupervisor P2b (6f9e550) are implemented/merged; note better-sqlite3 is now declared and SQLite is the intended durable backend when available, with JSON-file fallback remaining; state that ledger/event-journal production attach and P3 sandbox/background verification remain open; keep DCP v2 human review as item 0. Update docs/ROADMAP.md so P1/P2 are complete-on-mainline with residual gaps called out, and next plan points at P3 (or ledger/journal attach) after DCP v2 review. Update README.md and README.zh-CN.md so they no longer say P1 StateStore is next, and briefly reflect StateStore/SQLite + daemon/ExecutionSupervisor presence without encyclopedic changelog."
+      ],
+      "nonGoals": [
+        "Do not rewrite historical evidence documents.",
+        "Do not approve DCP v2.",
+        "Do not implement P3."
+      ],
+      "dependsOn": [
+        "sqlite-runtime-enable"
+      ],
+      "readPaths": [
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md",
+        "README.md",
+        "README.zh-CN.md",
+        "docs/evidence/STATESTORE_SQLITE_AUTHORITY.md",
+        "docs/evidence/STATESTORE_WRITE_CUTOVER.md",
+        "design/statestore-sqlite-authority-v0.md"
+      ],
+      "writePaths": [
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md",
+        "README.md",
+        "README.zh-CN.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "f116ff4d87d166ba024766abd265d9640f368b7d",
+      "verifyCommands": [
+        "rg -n \"cdde392|1fd737f|1f4be2d|6f9e550|better-sqlite3|P3\" docs/CURRENT_STATE.md docs/ROADMAP.md README.md README.zh-CN.md",
+        "rg -n \"next executable implementation slice|P1 StateStore\" docs/CURRENT_STATE.md README.md README.zh-CN.md docs/ROADMAP.md"
+      ],
+      "deliverables": [
+        "CURRENT_STATE / ROADMAP / README pair match mainline reality."
+      ],
+      "forbidden": [
+        "Do not claim supervised pilot is recommended.",
+        "Do not leave P1 listed as the next implementation slice."
+      ],
+      "maxRepairs": 0
+    }
+  ]
+}

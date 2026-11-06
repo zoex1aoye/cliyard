@@ -1,6 +1,6 @@
 # Development Roadmap
 
-> Draft 2026-11-04. Sequencing map only; the current implementation order
+> Updated 2026-11-06. Sequencing map only; the current implementation order
 > remains the authority in [CURRENT_STATE.md](./CURRENT_STATE.md). The
 > architecture this map follows is
 > [delivery-control-plane-v2.md](../design/delivery-control-plane-v2.md).
@@ -21,52 +21,43 @@ The endpoint has three inseparable parts:
 
 ## Phases
 
-| Phase | Deliverable | Unblocks | Deferred |
+| Phase | Status on mainline | Deliverable | Deferred / residual |
 |---|---|---|---|
-| P0 封刀 | Cost-truth + pilot closeout + stack #1–#5 on mainline; freeze binding | Reliable self-host loop during the rewrite | — |
-| P1 StateStore 地基 | SQLite event-sourced store + read projection + CLI status/events | Observability and recovery stop depending on JSON files | JSON write-path migration |
-| P2 daemon + 执行层 | `cliyardd` + Control API + ExecutionSupervisor (macOS) + RuntimeHandle authority + conformance suite | Restart-safe tasks, OS-owned process trees | — |
-| P3 沙箱 + 独立验收 + 干净裁决 | nono SandboxAdapter + background VerificationTask + clean-context Reviewer | Falsifiable acceptance and OS write isolation | microVM tier |
-| P4 路由 + 分层并行 | ProfileCatalog activation + routing A/B + hierarchical admission | Dynamic CLI/model selection; intra-branch parallelism | — |
-| P5 人机面 | Web console (React + Vite) over Control API; DSH demoted to thin client | The endpoint's human-machine interface | desktop packaging |
-| P6 终点验收 | Open a real Vue project; build Liquid Glass TDesign components (foundation → parallel P0 components → same-viewport screenshot + a11y + reduce-motion → human review) | Full loop proven on a real project | — |
+| P0 封刀 | **complete** | Cost-truth + pilot closeout + stack land; freeze binding | — |
+| P1 StateStore | **complete** (`cdde392`) | SQLite event-sourced store + read projection | — |
+| P1b write cutover | **complete** (`1fd737f`) | Run + queue single-writer; JSON derived exports | Ledger / journal production attach |
+| P2a daemon + Control API | **complete** (`1f4be2d`) | `cliyardd` + read-only `/v1/status|events|runs` | Authenticated actions; daemon-owned dispatch |
+| P2b ExecutionSupervisor | **complete** (`6f9e550`) | RuntimeHandle authority + continuity + conformance | launchd / systemd-run / Job Object backends |
+| P3 沙箱 + 独立验收 + 干净裁决 | **next** | nono SandboxAdapter + background VerificationTask + clean-context Reviewer | microVM tier |
+| P4 路由 + 分层并行 | pending | ProfileCatalog activation + routing A/B + hierarchical admission | — |
+| P5 人机面 | pending | Web console over Control API; DSH thin client | desktop packaging |
+| P6 终点验收 | pending | Vue + Liquid Glass TDesign through the tool itself | — |
 
 ## Phase detail
 
-### P0 — close the legacy seam (complete on mainline)
+### P0 — close the legacy seam (complete)
 
-Cost-truth resume retention (`c5714db`), pilot safety reliability closeout
-(`c1d0dbb` / `fb665ab`), and PR stack #1–#5 are on
-`codex/supervisor-v0-baseline` (land `a0609e8`). The historical missing attempt
-is recorded in
-[evidence/COST_TRUTH_HISTORICAL_MISSING.md](./evidence/COST_TRUTH_HISTORICAL_MISSING.md).
-The freeze list in [P0_LEGACY_SEAM_FREEZE.md](./P0_LEGACY_SEAM_FREEZE.md) is
-**binding**. No further P0 implementation work is queued.
+See [P0_LEGACY_SEAM_FREEZE.md](./P0_LEGACY_SEAM_FREEZE.md). Binding on mainline.
 
-### P1 — StateStore foundation (next plan after DCP v2 review)
+### P1 / P1b — StateStore (complete; residual attach)
 
-SQLite append-only facts log + projection, deterministic kernel (clock/random
-injected), optimistic concurrency, rebuild without migrations. A read-only
-projection seeds from the existing JSON truth and exposes `status --json` /
-`events`; JSON write-path migration is the following slice, only after read
-parity is proven.
+Merged: `cdde392`, `1fd737f`. `better-sqlite3` is the declared durable driver;
+JSON-file fallback remains when the native module is missing. Evidence:
+[STATESTORE_WRITE_CUTOVER.md](./evidence/STATESTORE_WRITE_CUTOVER.md),
+[STATESTORE_SQLITE_AUTHORITY.md](./evidence/STATESTORE_SQLITE_AUTHORITY.md).
 
-P1 decisions (recorded in `design/statestore-v0.md`):
+Residual before treating JSON as fully demoted everywhere: attach ledger and
+event-journal production writers; honor
+[COST_TRUTH_HISTORICAL_MISSING.md](./evidence/COST_TRUTH_HISTORICAL_MISSING.md)
+on import.
 
-- driver: minimal `StateStoreDriver` interface, `better-sqlite3` default on
-  Node 20; `node:sqlite` is deferred (Node 22+ only), keeping Node coupling
-  weak through the interface;
-- surface: CLI-only read commands in P1, HTTP Control API in P2 (`cliyardd`);
-- parity gate: semantic equivalence (canonicalized deep-equal with float
-  tolerance); byte-identical comparison is diagnostic only, never the gate.
+### P2a / P2b — daemon and execution layer (complete; residual backends)
 
-### P2 — daemon and execution layer
+Merged: `1f4be2d`, `6f9e550`. Foreground Supervisor may still dispatch; daemon
+owns read API and state lease. ExecutionSupervisor establishes RuntimeHandle
+authority; launchd-class backends and nested controller-death recovery remain.
 
-`cliyardd` owns state; the ExecutionSupervisor owns execution units via
-RuntimeHandle (launchd label / systemd unit / Job Object), with PID diagnostic
-only. A per-backend conformance suite proves cancel and restart semantics.
-
-### P3 — sandbox, verification, review
+### P3 — sandbox, verification, review (next after DCP v2 review)
 
 nono behind SandboxAdapter with a capability gate (no silent downgrade);
 verification decoupled from worker lifecycle (background VerificationTask,
@@ -93,8 +84,9 @@ components, verified by build, unit tests, same-viewport screenshots, axe and
 
 ## Non-goals until the endpoint
 
-- SQLite write-path migration before read parity (P1b, after P1).
-- OS sandbox before the ExecutionSupervisor/conformance slice (P3 after P2).
+- OS sandbox before a human-reviewed P3 Plan (after DCP v2 review).
 - dynamic routing before background verification and clean review.
 - desktop packaging or multi-user UI before the web console proves the read
   model.
+- Claiming SQLite write authority for ledger/journal before those entrypoints
+  attach.

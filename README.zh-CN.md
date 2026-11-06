@@ -60,10 +60,12 @@ English: [README.md](README.md)
 - 失败分类与成本真相（含 resume 保留 abandoned attempt；历史 missing 有导入约束）
 - Task Architect：只产出供人审的 Plan，不自动冻结或派发
 - 确定性 integration full-suite gate、estimate-plan telemetry 校准、Linux verifier 进程组超时回收
+- **StateStore**（`cdde392` / `1fd737f`）：事件溯源 facts + projection；run/queue 写权威；耐久后端在已安装时为 **`better-sqlite3` SQLite**（否则 JSON-file 回退）
+- **`cliyardd` + 只读 Control API**（`1f4be2d`）与 **ExecutionSupervisor / RuntimeHandle**（`6f9e550`）
 
-**P0 已封刀。** 遗留 JSON store / 前台 Supervisor / PID-as-authority / DSH monitor
-功能面已冻结，见 [docs/P0_LEGACY_SEAM_FREEZE.md](docs/P0_LEGACY_SEAM_FREEZE.md)。  
-下一执行切片：人工审完 Delivery Control Plane v2 后做 **P1 StateStore**。
+**P0 已封刀**（[docs/P0_LEGACY_SEAM_FREEZE.md](docs/P0_LEGACY_SEAM_FREEZE.md)）。  
+**P1 / P1b / P2a / P2b 已在主线。** 残留：ledger/journal 生产挂接；launchd 级后端；controller-death 嵌套恢复。  
+DCP v2 人工审阅后的下一主切片：**P3 SandboxAdapter + background VerificationTask**（见 [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md)）。
 
 ## 今天还不能宣称什么
 
@@ -71,7 +73,8 @@ English: [README.md](README.md)
 - 不是 daemon、跨宿主恢复、Windows Job Object 对等、24 小时无人值守
 - 不是自动批准 Plan、自动合入 `main`、无限并行
 - 不是已完成的动态路由 / ProfileCatalog 实装 / 分层 admission 生产就绪
-- 不是 supervised pilot「已推荐」——仍差 DCP v2 人工决策与后续门禁
+- 不是「SQLite 已接管所有 JSON」——ledger/journal 入口仍可能直写 JSON
+- 不是 supervised pilot「已推荐」——仍差 DCP v2 人工决策与 P3 门禁
 
 对照表与相邻产品见 [docs/OSS_LANDSCAPE.md](docs/OSS_LANDSCAPE.md)。  
 与 ThinkRail 一类「围绕单一 coding engine 的 agentic IDE」不同：cliyard 做的是 **engine-agnostic 的交付控制面**，人机面可替换。
@@ -143,7 +146,10 @@ Windows + WSL 入口（`doctor` / `run` / `batch`）仍可用，但 **已不是�
 | 任务权威 | RunManifest | accepted/rejected 只写这里 |
 | 协调 | foreground queue | 显式批准；当前顺序派发 |
 | 人机面 | DSH 插件（可替换） | 不持有契约/证据唯一真相 |
-| 安全边界 | WorkspaceBoundary → 未来 SandboxAdapter | 今日检测，明日 OS 写隔离 |
+| 耐久状态 | StateStore（`better-sqlite3`） | run/queue 权威；JSON 导出为派生 |
+| Daemon / 读 API | `cliyardd` | 只读 Control API；尚未拥有派发 |
+| 执行身份 | ExecutionSupervisor / RuntimeHandle | PID/PGID 仅诊断 |
+| 安全边界 | WorkspaceBoundary → 未来 SandboxAdapter | 今日检测；P3 才做 OS 写隔离 |
 
 ## License
 
