@@ -59,9 +59,12 @@ On mainline today (foreground Supervisor, single-repo lock, sequential queue —
 - Failure taxonomy and cost truth (resume retains abandoned attempts; historical missing has an import constraint)
 - Task Architect: produces a human-reviewable Plan only — never freezes or dispatches
 - Deterministic integration full-suite gate, estimate-plan telemetry calibration, Linux verifier process-group timeout reclaim
+- **StateStore** (`cdde392` / `1fd737f`): event-sourced facts + projection; run/queue write authority; durable backend is **SQLite via `better-sqlite3`** when installed (JSON-file fallback otherwise)
+- **`cliyardd` + read-only Control API** (`1f4be2d`) and **ExecutionSupervisor / RuntimeHandle** (`6f9e550`)
 
-**P0 is closed.** Legacy JSON stores / foreground Supervisor features / PID-as-authority / DSH monitor features are frozen — see [docs/P0_LEGACY_SEAM_FREEZE.md](docs/P0_LEGACY_SEAM_FREEZE.md).  
-Next executable slice: after human review of Delivery Control Plane v2, **P1 StateStore**.
+**P0 is closed** ([docs/P0_LEGACY_SEAM_FREEZE.md](docs/P0_LEGACY_SEAM_FREEZE.md)).  
+**P1 / P1b / P2a / P2b are on mainline.** Residuals: ledger/journal production attach; launchd-class backends; controller-death nested recovery.  
+Next major product slice after DCP v2 review: **P3 SandboxAdapter + background VerificationTask** (see [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md)).
 
 ## What we do not claim
 
@@ -69,7 +72,8 @@ Next executable slice: after human review of Delivery Control Plane v2, **P1 Sta
 - Not a daemon, cross-host recovery, Windows Job Object parity, or 24-hour unattended operation
 - Not automatic Plan approval, automatic `main` merge, or unbounded parallelism
 - Not production-ready dynamic routing / ProfileCatalog activation / hierarchical admission
-- Not a recommended supervised pilot yet — DCP v2 still needs a human decision
+- Not “SQLite owns every JSON file” — ledger/journal entrypoints may still write JSON directly
+- Not a recommended supervised pilot yet — DCP v2 still needs a human decision; P3 gates remain
 
 Adjacent products: [docs/OSS_LANDSCAPE.md](docs/OSS_LANDSCAPE.md).  
 Unlike ThinkRail-style agentic IDEs built around one coding engine, cliyard is an **engine-agnostic delivery control plane** with a replaceable human surface.
@@ -141,7 +145,10 @@ Standing rules: [`.agents/rules/`](.agents/rules/). Task SOPs: [`.agents/skills/
 | Task authority | RunManifest | accepted/rejected live only here |
 | Coordination | Foreground queue | Explicit approval; sequential today |
 | Human surface | DSH plugin (replaceable) | Never the sole store of contracts/evidence |
-| Safety boundary | WorkspaceBoundary → future SandboxAdapter | Detect today; OS write isolation later |
+| Durable state | StateStore (`better-sqlite3`) | Run/queue authority; JSON exports derived |
+| Daemon / read API | `cliyardd` | Read-only Control API; not dispatch owner yet |
+| Execution identity | ExecutionSupervisor / RuntimeHandle | PID/PGID diagnostic only |
+| Safety boundary | WorkspaceBoundary → future SandboxAdapter | Detect today; OS write isolation in P3 |
 
 ## License
 
