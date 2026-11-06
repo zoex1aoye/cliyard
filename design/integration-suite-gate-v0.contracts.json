@@ -1,0 +1,51 @@
+{
+  "planId": "integration-suite-gate-v0",
+  "contracts": [
+    {
+      "taskId": "integration-suite-gate",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Add a deterministic full-suite integration gate to the run finalization in src/scheduler/codex-batch.ts. After all tasks are accepted and merged into the integration worktree, run a bounded set of gate commands (safe default: npm test then npm run build) in the integration worktree before computing allAccepted. If any gate command exits non-zero, the run must report allAccepted false and status blocked, record a structured gate-failure record (each command, exit code and bounded log tail) in the returned result and the run evidence, and leave every accepted task verdict untouched. The gate runs as a plain shell command, never through a model, and must not rewrite accepted-task verdicts or evidence. Preserve the per-task focused verifyCommands exactly. Add tests proving: all tasks accepted plus a green gate yields allAccepted true and status completed; all tasks accepted plus a red gate yields allAccepted false, status blocked and a gate-failure record while task verdicts stay accepted; and a dependency-skip already yields allAccepted false without invoking the gate."
+      ],
+      "nonGoals": [
+        "Do not route the gate through a model.",
+        "Do not change per-task focused verifyCommands.",
+        "Do not rewrite accepted task verdicts on gate failure."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "AGENTS.md",
+        "docs/ROADMAP.md",
+        "design/integration-suite-gate-v0.md",
+        "src/scheduler/codex-batch.ts",
+        "src/supervisor/cli.ts",
+        "src/supervisor/types.ts",
+        "src/verification/verifier.ts",
+        "tests/codex-batch-dry.test.ts",
+        "tests/parallel-batch.test.ts"
+      ],
+      "writePaths": [
+        "src/scheduler/codex-batch.ts",
+        "tests/integration-gate.test.ts"
+      ],
+      "sharedResources": [],
+      "baseCommit": "b9fcfff81a4a1b646604306f11c3217c84033fc3",
+      "verifyCommands": [
+        "npx tsx --test tests/integration-gate.test.ts tests/codex-batch-dry.test.ts",
+        "npm run build"
+      ],
+      "deliverables": [
+        "A deterministic full-suite integration gate before finalization.",
+        "Structured gate-failure evidence without verdict mutation.",
+        "Gate green/red/skip regression tests."
+      ],
+      "forbidden": [
+        "Do not call a model to run the gate.",
+        "Do not mutate accepted task verdicts on gate failure.",
+        "Do not run an unbounded or interactive gate command."
+      ],
+      "maxRepairs": 1
+    }
+  ]
+}
