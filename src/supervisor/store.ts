@@ -22,6 +22,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -93,18 +94,29 @@ export const RUNS_DIR = "runs";
 export const ACTIVE_RUN_FILE = "active.json";
 export const SUPERVISOR_LOCK_FILE = "supervisor.lock";
 /**
- * The StateStore lives under the control-plane runtime root because the
- * WorkspaceBoundary excludes `.cliyard/runtime/` while a worker wave runs.
- * Supervisor checkpoints are control-plane writes, not authority-checkout
- * changes; keeping them outside the compared tree is what lets a checkpoint
- * land mid-wave without being reported as a boundary violation. The reaper
- * only scans `<runtime>/<id>/runtime-manifest.json` directories, so this
- * sibling is ignored by runtime reconciliation.
+ * Canonical StateStore lives at `.cliyard/state.db` (shared with queue /
+ * ledger / journal). Legacy `.cliyard/runtime/statestore/` is relocated once
+ * by `resolveControlStatePaths` (design/statestore-path-unify-v0.md).
+ * WorkspaceBoundary excludes `.cliyard` wholesale, so checkpoints do not
+ * trip the guard.
+ *
+ * `STATE_DIR` / `STATE_SQLITE_FILE` remain the *legacy* path segments for
+ * relocate detection and older imports; new opens go through
+ * `supervisorStatePaths` → `resolveControlStatePaths`.
  */
-export const STATE_DIR = "runtime/statestore";
-export const STATE_SQLITE_FILE = "state.sqlite";
-export const STATE_FACTS_FILE = "facts.json";
-export const STATE_EVIDENCE_DIR = "evidence";
+export {
+  LEGACY_SUPERVISOR_STATE_DIR as STATE_DIR,
+  LEGACY_SUPERVISOR_SQLITE_FILE as STATE_SQLITE_FILE,
+  LEGACY_SUPERVISOR_FACTS_FILE as STATE_FACTS_FILE,
+  LEGACY_SUPERVISOR_EVIDENCE_DIR as STATE_EVIDENCE_DIR,
+  LEGACY_SUPERVISOR_STATE_DIR,
+  CONTROL_STATE_DB_FILE,
+  CONTROL_STATE_EVIDENCE_DIR,
+} from "../statestore/paths.js";
+import {
+  resolveControlStatePaths,
+  type ControlStatePaths,
+} from "../statestore/paths.js";
 
 /**
  * Reserved active-pointer id stored in the append-only log when the active
@@ -150,8 +162,16 @@ export function runManifestPath(repoRoot: string, runId: string): string {
 
 export interface SupervisorStatePaths {
   repoRoot: string;
+  /**
+   * Directory that holds only StateStore durable files for this layout.
+   * After path unify this is NOT the whole `.cliyard` tree: callers that
+   * `rmSync(stateDir)` to drop the store must not wipe run JSON exports.
+   * Implementation uses the fallback directory as the removable store root
+   * plus explicit db/evidence paths on the sibling files — prefer
+   * {@link clearSupervisorStateStoreFiles} for cleanup.
+   */
   stateDir: string;
-  /** SQLite authority when `better-sqlite3` is installed. */
+  /** SQLite authority when `better-sqlite3` is installed (`.cliyard/state.db`). */
   sqlitePath: string;
   /** Durable single-process fallback when the native driver is absent. */
   factsPath: string;
@@ -159,20 +179,44 @@ export interface SupervisorStatePaths {
 }
 
 /**
- * StateStore location for the supervisor run domain. The legacy
- * `.cliyard/runs/*.json` files stay in place as the read-only JSON export;
- * the append-only state log is the write authority.
+ * StateStore location for the supervisor run domain. Shared with queue /
+ * ledger / journal at `.cliyard/state.db`. The legacy `.cliyard/runs/*.json`
+ * files stay as the read-only JSON export; the append-only state log is the
+ * write authority. Resolving paths may one-shot relocate a legacy
+ * `runtime/statestore` authority.
  */
 export function supervisorStatePaths(repoRoot: string): SupervisorStatePaths {
-  const root = resolve(repoRoot);
-  const stateDir = join(root, SUPERVISOR_DIR, STATE_DIR);
+  const { paths } = resolveControlStatePaths(repoRoot);
+  return toSupervisorStatePaths(paths);
+}
+
+function toSupervisorStatePaths(paths: ControlStatePaths): SupervisorStatePaths {
   return {
-    repoRoot: root,
-    stateDir,
-    sqlitePath: join(stateDir, STATE_SQLITE_FILE),
-    factsPath: join(stateDir, STATE_FACTS_FILE),
-    evidenceDir: join(stateDir, STATE_EVIDENCE_DIR),
+    repoRoot: paths.repoRoot,
+    // Fallback dir is store-only; sqlite + evidence sit beside it under
+    // `.cliyard`. Tests that only rmSync(stateDir) must also clear db/evidence
+    // via clearSupervisorStateStoreFiles.
+    stateDir: paths.fallbackDir,
+    sqlitePath: paths.dbPath,
+    factsPath: paths.fallbackFactsPath,
+    evidenceDir: paths.evidenceDir,
   };
+}
+
+/** Remove canonical StateStore files without deleting `.cliyard/runs`. */
+export function clearSupervisorStateStoreFiles(repoRoot: string): void {
+  const { paths } = resolveControlStatePaths(repoRoot);
+  for (const target of [
+    paths.dbPath,
+    paths.fallbackDir,
+    paths.evidenceDir,
+  ]) {
+    try {
+      rmSync(target, { recursive: true, force: true });
+    } catch {
+      /* best-effort test/cleanup helper */
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -624,7 +668,9 @@ function createSupervisorStateDriver(
 function openSupervisorState(repoRoot: string): SupervisorStateContext {
   const root = resolve(repoRoot);
   const paths = supervisorStatePaths(root);
+  mkdirSync(dirname(paths.sqlitePath), { recursive: true, mode: 0o700 });
   mkdirSync(paths.stateDir, { recursive: true, mode: 0o700 });
+  mkdirSync(paths.evidenceDir, { recursive: true, mode: 0o700 });
   const driver = createSupervisorStateDriver(paths);
   let store: StateStore;
   try {

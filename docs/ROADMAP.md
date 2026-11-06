@@ -25,8 +25,8 @@ The endpoint has three inseparable parts:
 |---|---|---|---|
 | P0 封刀 | **complete** | Cost-truth + pilot closeout + stack land; freeze binding | — |
 | P1 StateStore | **complete** (`cdde392`) | SQLite event-sourced store + read projection | — |
-| P1b write cutover | **complete** (`1fd737f` + production ledger/journal attach) | Run + queue + ledger + journal single-writer; JSON derived exports | Supervisor/queue DB unification |
-| P2a daemon + Control API | **complete** (`1f4be2d`) | `cliyardd` + read-only `/v1/status|events|runs` | Authenticated actions; daemon-owned dispatch |
+| P1b write cutover | **complete** (`1fd737f` + production ledger/journal attach + path unify) | Run + queue + ledger + journal single-writer on `.cliyard/state.db` | — |
+| P2a daemon + Control API | **complete** (`1f4be2d`) | `cliyardd` + read-only `/v1/status|events|runs` | Write/auth + daemon-owned dispatch deferred to P5 |
 | P2b ExecutionSupervisor | **complete** (`6f9e550`) | RuntimeHandle authority + continuity + conformance | launchd / systemd-run / Job Object backends |
 | P3 沙箱 + 独立验收 + 干净裁决 | **next** | nono SandboxAdapter + background VerificationTask + clean-context Reviewer | microVM tier |
 | P4 路由 + 分层并行 | pending | ProfileCatalog activation + routing A/B + hierarchical admission | — |
@@ -48,10 +48,11 @@ JSON-file fallback remains when the native module is missing. Evidence:
 
 Ledger/journal production attach evidence:
 [LEDGER_JOURNAL_PRODUCTION_CUTOVER.md](./evidence/LEDGER_JOURNAL_PRODUCTION_CUTOVER.md).
+Path unification evidence:
+[STATESTORE_PATH_UNIFY.md](./evidence/STATESTORE_PATH_UNIFY.md).
 Honor
 [COST_TRUTH_HISTORICAL_MISSING.md](./evidence/COST_TRUTH_HISTORICAL_MISSING.md)
-on import. Residual: supervisor runtime store and queue `state.db` remain
-separate files.
+on import. Canonical authority is `.cliyard/state.db` for all control domains.
 
 ### P2a / P2b — daemon and execution layer (complete; residual backends)
 

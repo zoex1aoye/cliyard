@@ -36,6 +36,7 @@ import {
   RunNotFoundError,
   saveRunManifest,
   setActiveRun,
+  clearSupervisorStateStoreFiles,
   supervisorPaths,
   supervisorStatePaths,
   SupervisorLockHeldError,
@@ -565,10 +566,7 @@ test("first write imports legacy runs once and verifies the import hash", async 
     });
 
     // Drop the StateStore to simulate a repository written before the cutover.
-    rmSync(supervisorStatePaths(repo).stateDir, {
-      recursive: true,
-      force: true,
-    });
+    clearSupervisorStateStoreFiles(repo);
     assert.equal(inspectSupervisorStateStore(repo), undefined);
     const legacy = loadRunManifest(repo, manifest.runId);
     assert.equal(legacy.tasks["task-a"]!.accepted, true);

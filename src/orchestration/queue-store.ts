@@ -123,11 +123,13 @@ export const QUEUE_LOCK_FILE = "queue.lock";
 export const DEFAULT_MAX_ATTEMPTS = 3;
 /** Derived export metadata; cached CAS position for `saveQueue` callers. */
 export const QUEUE_EXPORT_META_FILE = "queue.export-meta.json";
-export const QUEUE_STATE_DB_FILE = "state.db";
-export const QUEUE_STATE_EVIDENCE_DIR = "state-evidence";
-export const QUEUE_STATE_FALLBACK_DIR = "state-fallback";
-const QUEUE_STATE_FALLBACK_FILE = "facts.json";
-const QUEUE_STATE_FALLBACK_LOCK_FILE = "facts.lock";
+/** @deprecated Prefer CONTROL_STATE_* from `statestore/paths`; kept for callers. */
+export {
+  CONTROL_STATE_DB_FILE as QUEUE_STATE_DB_FILE,
+  CONTROL_STATE_EVIDENCE_DIR as QUEUE_STATE_EVIDENCE_DIR,
+  CONTROL_STATE_FALLBACK_DIR as QUEUE_STATE_FALLBACK_DIR,
+} from "../statestore/paths.js";
+import { resolveControlStatePaths } from "../statestore/paths.js";
 /** Bounded reopen-and-retry for optimistic queue mutations. */
 const QUEUE_MUTATION_ATTEMPTS = 5;
 
@@ -368,17 +370,16 @@ export interface QueueStatePaths {
 }
 
 export function queueStatePaths(repoRoot: string): QueueStatePaths {
-  const { repoRoot: root, cliyardDir } = queuePaths(repoRoot);
-  const fallbackDir = join(cliyardDir, QUEUE_STATE_FALLBACK_DIR);
+  const { paths } = resolveControlStatePaths(repoRoot);
   return {
-    repoRoot: root,
-    cliyardDir,
-    dbPath: join(cliyardDir, QUEUE_STATE_DB_FILE),
-    evidenceDir: join(cliyardDir, QUEUE_STATE_EVIDENCE_DIR),
-    fallbackDir,
-    fallbackFactsPath: join(fallbackDir, QUEUE_STATE_FALLBACK_FILE),
-    fallbackLockPath: join(fallbackDir, QUEUE_STATE_FALLBACK_LOCK_FILE),
-    exportMetaPath: join(cliyardDir, QUEUE_EXPORT_META_FILE),
+    repoRoot: paths.repoRoot,
+    cliyardDir: paths.cliyardDir,
+    dbPath: paths.dbPath,
+    evidenceDir: paths.evidenceDir,
+    fallbackDir: paths.fallbackDir,
+    fallbackFactsPath: paths.fallbackFactsPath,
+    fallbackLockPath: paths.fallbackLockPath,
+    exportMetaPath: join(paths.cliyardDir, QUEUE_EXPORT_META_FILE),
   };
 }
 

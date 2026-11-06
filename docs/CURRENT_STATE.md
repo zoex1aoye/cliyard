@@ -74,8 +74,8 @@ self-host controller loaded the new code.
   timeout reclaim.
 
 These facts do not imply parallel queue operation, dynamic routing, OS sandbox,
-24-hour unattended operation, launchd/Job Object parity, or that supervisor and
-queue StateStores have been unified into one database file.
+24-hour unattended operation, launchd/Job Object parity, or authenticated
+Control API write/action endpoints.
 
 ## Accepted but not integrated
 
@@ -161,14 +161,17 @@ list is its summary. New slices start only after a human-approved Plan.
    ([STATESTORE_SQLITE_AUTHORITY.md](evidence/STATESTORE_SQLITE_AUTHORITY.md)).
    Ledger + event-journal **production attach** wired
    ([LEDGER_JOURNAL_PRODUCTION_CUTOVER.md](evidence/LEDGER_JOURNAL_PRODUCTION_CUTOVER.md));
+   control-plane StateStore path **unified** on `.cliyard/state.db`
+   ([STATESTORE_PATH_UNIFY.md](evidence/STATESTORE_PATH_UNIFY.md));
    honor
    [COST_TRUTH_HISTORICAL_MISSING.md](evidence/COST_TRUTH_HISTORICAL_MISSING.md)
    on any remaining import. Residual: non-repo fixture ledger paths still use
-   JSON; supervisor run store remains a separate file from queue `state.db`.
+   JSON (unit-test only).
 
 3. **P2a daemon + Control API** — **complete on mainline** (`1f4be2d`).
-   Residual: authenticated write/action endpoints; daemon does not yet own
-   dispatch.
+   Read-only `/v1/status|events|runs` remains. Authenticated write/action
+   endpoints and daemon-owned dispatch are **deferred** (P5 human-machine /
+   Control API write surface), not a blocking residual before P3.
 
 4. **P2b ExecutionSupervisor** — **complete on mainline** (`6f9e550`).
    Residual: launchd / systemd-run / Windows Job Object backends beyond the
@@ -176,10 +179,10 @@ list is its summary. New slices start only after a human-approved Plan.
    still open.
 
 5. **P3 SandboxAdapter + nono (native-first)** — **next major product slice**
-   after DCP v2 review (may interleave a small ledger/journal attach Plan).
-   Wrap a fixed nono version behind `SandboxAdapter` with a capability gate:
-   refuse or require explicit approval when a task's requirements exceed the
-   backend; never silently downgrade. Sandbox reports enter EvidenceBundle.
+   after DCP v2 review. P1b residuals (ledger/journal attach + path unify) are
+   closed. Wrap a fixed nono version behind `SandboxAdapter` with a capability
+   gate: refuse or require explicit approval when a task's requirements exceed
+   the backend; never silently downgrade. Sandbox reports enter EvidenceBundle.
 
 6. **Background VerificationTask**
    Decouple long verification from Worker lifecycle.
@@ -202,7 +205,7 @@ These are capability gates, not date estimates or a percentage score.
 
 | Use mode | Current assessment | Gate before use |
 |---|---|---|
-| Supervised single-repository pilot | Near, but not yet recommended | Complete DCP v2 review; finish ledger/journal attach + sandbox gate; keep human Plan/diff gates; do not claim readiness from P1–P2b land alone |
+| Supervised single-repository pilot | Near, but not yet recommended | Complete DCP v2 review; land P3 sandbox gate; keep human Plan/diff gates; do not claim readiness from P1–P2b land alone |
 | Small-team real project | Not ready | Add background verification, OS-level write isolation, authenticated Control API/event replay, stable DSH compatibility, and intervention history |
 | Parallel multi-module delivery | Not ready | Background verifier, per-run ownership, provider/runtime admission, deterministic integration lineage and measured DSH/UI lifecycle behavior |
 | Overnight or 24-hour unattended operation | Far | Durable controller/daemon recovery, complete process ownership, provider quota/balance handling, bounded soak, incident recovery and an auditable human-escalation path |
