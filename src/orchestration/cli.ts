@@ -26,6 +26,8 @@ import {
   type QueueRunSummary,
   type QueueSupervisorRunner,
 } from "./queue-runner.js";
+// Side-effect: register ledger/journal production cutover hook for queue mutations.
+import "./control-domain-cutover.js";
 import {
   buildControlSnapshot,
   latestWorkerProgress,

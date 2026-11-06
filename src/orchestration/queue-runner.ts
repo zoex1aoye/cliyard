@@ -54,6 +54,7 @@ import {
   type QueuePlanMaterialization,
 } from "./queue-store.js";
 import { tryAppendQueueEvent } from "./event-journal.js";
+import { ensureLedgerJournalCutoverSync } from "./control-domain-cutover.js";
 import {
   continuationPolicyToSupervisorArgs,
   parseQueueContinuationPolicy,
@@ -343,6 +344,8 @@ export async function runQueue(
   const runner = options.runner ?? defaultQueueSupervisorRunner;
   const log = options.log ?? (() => undefined);
   const startedAt = now();
+  // Cut ledger + journal over before any saveQueue / tryAppendQueueEvent.
+  ensureLedgerJournalCutoverSync(repoRoot);
 
   return withQueueLockWait(
     repoRoot,

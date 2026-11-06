@@ -99,6 +99,24 @@ import {
   type StateStoreDomainRecord,
 } from "../statestore/write.js";
 
+/**
+ * Optional production hook installed by `control-domain-cutover.ts` so queue
+ * mutations can ensure ledger/journal cutover without a static import cycle
+ * through `migrate.ts`.
+ */
+let ledgerJournalCutoverHook: ((repoRoot: string) => void) | undefined;
+
+/** Called once from control-domain-cutover module evaluation. */
+export function setLedgerJournalCutoverHook(
+  hook: ((repoRoot: string) => void) | undefined,
+): void {
+  ledgerJournalCutoverHook = hook;
+}
+
+function ensureLedgerJournalCutoverIfRegistered(repoRoot: string): void {
+  ledgerJournalCutoverHook?.(repoRoot);
+}
+
 export const QUEUE_VERSION = 1 as const;
 export const QUEUE_FILE = "queue.json";
 export const QUEUE_LOCK_FILE = "queue.lock";
@@ -463,6 +481,39 @@ interface QueueMutationOutcome<T> {
   event?: () => void;
 }
 
+/**
+ * Open the queue durable StateStore (SQLite or JSON-file fallback) without
+ * importing domains. Callers that keep the handle must close it themselves.
+ * Production ledger/journal cutover reuses this file as the shared control
+ * store for queue + ledger + audit-event domains.
+ */
+export function openQueueStateStoreHandles(
+  repoRoot: string,
+): QueueStateContext {
+  const paths = queueStatePaths(repoRoot);
+  const evidence = new FileEvidenceStore({ directory: paths.evidenceDir });
+  let store: StateStore;
+  try {
+    store = openFileStateStore({ path: paths.dbPath });
+  } catch (error) {
+    if (!(error instanceof StateStoreDriverUnavailableError)) throw error;
+    // The SQLite binding is an optional native dependency. Keep the same
+    // durable, multi-process write semantics through the StateStore driver
+    // seam rather than silently writing queue.json as a second authority.
+    store = StateStore.open(
+      new QueueFallbackStateStoreDriver(
+        paths.fallbackFactsPath,
+        paths.fallbackLockPath,
+      ),
+    );
+  }
+  return {
+    store,
+    evidence,
+    writer: new StateStoreDomainWriter({ store, evidence }),
+  };
+}
+
 function withQueueStateContext<T>(
   repoRoot: string,
   options: QueueStateStoreOptions,
@@ -486,31 +537,11 @@ function withQueueStateContext<T>(
     });
   }
 
-  const paths = queueStatePaths(repoRoot);
-  const evidence = new FileEvidenceStore({ directory: paths.evidenceDir });
-  let store: StateStore;
+  const context = openQueueStateStoreHandles(repoRoot);
   try {
-    store = openFileStateStore({ path: paths.dbPath });
-  } catch (error) {
-    if (!(error instanceof StateStoreDriverUnavailableError)) throw error;
-    // The SQLite binding is an optional native dependency. Keep the same
-    // durable, multi-process write semantics through the StateStore driver
-    // seam rather than silently writing queue.json as a second authority.
-    store = StateStore.open(
-      new QueueFallbackStateStoreDriver(
-        paths.fallbackFactsPath,
-        paths.fallbackLockPath,
-      ),
-    );
-  }
-  try {
-    return fn({
-      store,
-      evidence,
-      writer: new StateStoreDomainWriter({ store, evidence }),
-    });
+    return fn(context);
   } finally {
-    store.close();
+    context.store.close();
   }
 }
 
@@ -718,6 +749,7 @@ function mutateQueueDocument<T>(
 
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
+      ensureLedgerJournalCutoverIfRegistered(root);
       return withQueueStateContext(root, options, (context) => {
         ensureQueueImported(root, context);
         const authority = readQueueAuthority(context);
@@ -894,6 +926,7 @@ export function saveQueue(
   options: QueueStateStoreOptions = {},
 ): void {
   const root = resolve(repoRoot);
+  ensureLedgerJournalCutoverIfRegistered(root);
   const normalized = parseQueueDocument(document, "queue", root);
   const token = queueExportTokens.get(document);
 

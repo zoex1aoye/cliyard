@@ -25,7 +25,7 @@ The endpoint has three inseparable parts:
 |---|---|---|---|
 | P0 封刀 | **complete** | Cost-truth + pilot closeout + stack land; freeze binding | — |
 | P1 StateStore | **complete** (`cdde392`) | SQLite event-sourced store + read projection | — |
-| P1b write cutover | **complete** (`1fd737f`) | Run + queue single-writer; JSON derived exports | Ledger / journal production attach |
+| P1b write cutover | **complete** (`1fd737f` + production ledger/journal attach) | Run + queue + ledger + journal single-writer; JSON derived exports | Supervisor/queue DB unification |
 | P2a daemon + Control API | **complete** (`1f4be2d`) | `cliyardd` + read-only `/v1/status|events|runs` | Authenticated actions; daemon-owned dispatch |
 | P2b ExecutionSupervisor | **complete** (`6f9e550`) | RuntimeHandle authority + continuity + conformance | launchd / systemd-run / Job Object backends |
 | P3 沙箱 + 独立验收 + 干净裁决 | **next** | nono SandboxAdapter + background VerificationTask + clean-context Reviewer | microVM tier |
@@ -46,10 +46,12 @@ JSON-file fallback remains when the native module is missing. Evidence:
 [STATESTORE_WRITE_CUTOVER.md](./evidence/STATESTORE_WRITE_CUTOVER.md),
 [STATESTORE_SQLITE_AUTHORITY.md](./evidence/STATESTORE_SQLITE_AUTHORITY.md).
 
-Residual before treating JSON as fully demoted everywhere: attach ledger and
-event-journal production writers; honor
+Ledger/journal production attach evidence:
+[LEDGER_JOURNAL_PRODUCTION_CUTOVER.md](./evidence/LEDGER_JOURNAL_PRODUCTION_CUTOVER.md).
+Honor
 [COST_TRUTH_HISTORICAL_MISSING.md](./evidence/COST_TRUTH_HISTORICAL_MISSING.md)
-on import.
+on import. Residual: supervisor runtime store and queue `state.db` remain
+separate files.
 
 ### P2a / P2b — daemon and execution layer (complete; residual backends)
 

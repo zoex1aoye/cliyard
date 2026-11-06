@@ -45,6 +45,13 @@ import {
   hashLegacySources,
   readLegacySourceRefs,
 } from "../src/statestore/migrate.js";
+import {
+  ensureLedgerJournalCutoverSync,
+  resetControlDomainCutover,
+} from "../src/orchestration/control-domain-cutover.js";
+import { createHash } from "node:crypto";
+import { addQueueItem } from "../src/orchestration/queue-store.js";
+import { spawnSync } from "node:child_process";
 
 test("updateLedger: parallel writers keep all task ids", async () => {
   const dir = mkdtempSync(join(tmpdir(), "cliyard-lock-"));
@@ -669,6 +676,96 @@ test("cutover imports missing legacy files as empty truth and creates no JSON", 
     detachLedgerStateStore(defaultLedgerPath(repo));
     detachQueueEventStateStore(repo);
     store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("production ensure imports once; later writes leave legacy JSON untouched", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cliyard-prod-cutover-"));
+  const repo = join(dir, "repo");
+  mkdirSync(join(repo, ".cliyard"), { recursive: true });
+  // Minimal git repo so queue add can freeze contracts baseCommit.
+  spawnSync("git", ["init"], { cwd: repo, stdio: "ignore" });
+  spawnSync("git", ["config", "user.email", "t@t.com"], {
+    cwd: repo,
+    stdio: "ignore",
+  });
+  spawnSync("git", ["config", "user.name", "t"], { cwd: repo, stdio: "ignore" });
+  writeFileSync(join(repo, "README.md"), "# fixture\n");
+  spawnSync("git", ["add", "."], { cwd: repo, stdio: "ignore" });
+  spawnSync("git", ["commit", "-m", "init"], { cwd: repo, stdio: "ignore" });
+  const head = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: repo,
+    encoding: "utf8",
+  }).stdout.trim();
+
+  const ledgerPath = defaultLedgerPath(repo);
+  const journalPath = queueEventJournalPath(repo);
+  mkdirSync(dirname(ledgerPath), { recursive: true });
+  mkdirSync(dirname(journalPath), { recursive: true, mode: 0o700 });
+  const ledgerBytes =
+    JSON.stringify(
+      { path: ledgerPath, tasks: { alpha: ledgerTask("alpha") } },
+      null,
+      2,
+    ) + "\n";
+  const journalBytes = `${JSON.stringify({
+    version: 1,
+    eventId: "legacy-1",
+    at: "2026-03-01T00:00:00.000Z",
+    type: "controller.started",
+  })}\n`;
+  writeFileSync(ledgerPath, ledgerBytes, "utf8");
+  writeFileSync(journalPath, journalBytes, "utf8");
+
+  const contractsPath = join(repo, "contracts.json");
+  writeFileSync(
+    contractsPath,
+    JSON.stringify(
+      {
+        contracts: [
+          {
+            taskId: "task",
+            version: 1,
+            frozen: true,
+            goals: ["g"],
+            dependsOn: [],
+            readPaths: ["."],
+            writePaths: ["out.txt"],
+            sharedResources: [],
+            baseCommit: head,
+            verifyCommands: ["test -f out.txt"],
+            maxRepairs: 0,
+          },
+        ],
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+
+  try {
+    ensureLedgerJournalCutoverSync(repo);
+    await updateLedger(ledgerPath, (ledger) => {
+      ledger.tasks.beta = ledgerTask("beta");
+    });
+    addQueueItem(repo, {
+      id: "item-1",
+      contractsPath,
+      worker: "claude",
+    });
+    assert.equal(loadLedger(ledgerPath).tasks.beta?.taskId, "beta");
+    assert.equal(readFileSync(ledgerPath, "utf8"), ledgerBytes);
+    assert.equal(readFileSync(journalPath, "utf8"), journalBytes);
+    assert.ok(readQueueEventJournal(repo).totalEvents >= 2);
+    // Content hash of legacy ledger bytes must be unchanged (no rewrite).
+    assert.equal(
+      createHash("sha256").update(readFileSync(ledgerPath)).digest("hex"),
+      createHash("sha256").update(ledgerBytes).digest("hex"),
+    );
+  } finally {
+    resetControlDomainCutover(repo);
     rmSync(dir, { recursive: true, force: true });
   }
 });
