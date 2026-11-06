@@ -1,0 +1,54 @@
+{
+  "planId": "ledger-journal-production-cutover-v0",
+  "contracts": [
+    {
+      "taskId": "ledger-journal-production-cutover",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Wire production ledger and queue event-journal writes onto the StateStore cutover APIs. Add src/orchestration/control-domain-cutover.ts with a process-scoped open of the queue durable store (.cliyard/state.db or JSON-file fallback), ensureLedgerJournalCutoverSync(repoRoot) that idempotently attachLedgerStateStore + attachQueueEventStateStore (sync journal attach via migrate API parameter to avoid the write↔event-journal↔migrate TDZ cycle), and keep the store open for the process. Refactor event-journal to export attachQueueEventStateStoreWithMigrate; keep async attachQueueEventStateStore as a thin wrapper. Call ensure from updateLedger (derive repoRoot from ledger path) and from mutateQueueDocument / queue-runner dispatch paths before tryAppendQueueEvent. Add focused tests proving production ensure imports once, subsequent saveLedger/appendQueueEvent do not rewrite legacy JSON, and drift still fails closed. Write docs/evidence/LEDGER_JOURNAL_PRODUCTION_CUTOVER.md. Update docs/CURRENT_STATE.md residual note so ledger/journal production attach is complete with any honest residual called out."
+      ],
+      "nonGoals": [
+        "Do not unify supervisor runtime/statestore with queue state.db.",
+        "Do not delete legacy JSON files.",
+        "Do not implement P3 sandbox.",
+        "Do not claim every test fixture auto-attaches."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "src/persistence/ledger.ts",
+        "src/orchestration/event-journal.ts",
+        "src/orchestration/queue-store.ts",
+        "src/orchestration/queue-runner.ts",
+        "docs/evidence/STATESTORE_WRITE_CUTOVER.md",
+        "design/ledger-journal-production-cutover-v0.md"
+      ],
+      "writePaths": [
+        "src/orchestration/control-domain-cutover.ts",
+        "src/orchestration/event-journal.ts",
+        "src/persistence/ledger.ts",
+        "src/orchestration/queue-store.ts",
+        "src/orchestration/queue-runner.ts",
+        "tests/ledger-lock.test.ts",
+        "docs/evidence/LEDGER_JOURNAL_PRODUCTION_CUTOVER.md",
+        "docs/CURRENT_STATE.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "f8ccedc7f2e3dc3868792be3d3388621195d9d2e",
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/ledger-lock.test.ts tests/statestore-write.test.ts"
+      ],
+      "deliverables": [
+        "Production ensure helper.",
+        "Ledger + journal production writes use StateStore when ensure runs.",
+        "Evidence + CURRENT_STATE residual update."
+      ],
+      "forbidden": [
+        "Do not weaken legacy drift fail-closed.",
+        "Do not rewrite historical RunManifests."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}
