@@ -23,7 +23,7 @@ The endpoint has three inseparable parts:
 
 | Phase | Deliverable | Unblocks | Deferred |
 |---|---|---|---|
-| P0 封刀 | Cost-truth + pilot closeout on mainline; declare freeze; human-merge open stack | Reliable self-host loop during the rewrite | — |
+| P0 封刀 | Cost-truth + pilot closeout + stack #1–#5 on mainline; freeze binding | Reliable self-host loop during the rewrite | — |
 | P1 StateStore 地基 | SQLite event-sourced store + read projection + CLI status/events | Observability and recovery stop depending on JSON files | JSON write-path migration |
 | P2 daemon + 执行层 | `cliyardd` + Control API + ExecutionSupervisor (macOS) + RuntimeHandle authority + conformance suite | Restart-safe tasks, OS-owned process trees | — |
 | P3 沙箱 + 独立验收 + 干净裁决 | nono SandboxAdapter + background VerificationTask + clean-context Reviewer | Falsifiable acceptance and OS write isolation | microVM tier |
@@ -33,18 +33,17 @@ The endpoint has three inseparable parts:
 
 ## Phase detail
 
-### P0 — close the legacy seam (awaiting human merge / freeze declaration)
+### P0 — close the legacy seam (complete on mainline)
 
-Cost-truth resume retention (`c5714db`) and pilot safety reliability closeout
-(`c1d0dbb` / `fb665ab`) are already on the mainline ancestry. The historical
-missing attempt is recorded in
+Cost-truth resume retention (`c5714db`), pilot safety reliability closeout
+(`c1d0dbb` / `fb665ab`), and PR stack #1–#5 are on
+`codex/supervisor-v0-baseline` (land `a0609e8`). The historical missing attempt
+is recorded in
 [evidence/COST_TRUTH_HISTORICAL_MISSING.md](./evidence/COST_TRUTH_HISTORICAL_MISSING.md).
-The freeze list is declared in
-[P0_LEGACY_SEAM_FREEZE.md](./P0_LEGACY_SEAM_FREEZE.md) and becomes binding after
-a human merges open PRs #1–#4. No further P0 implementation work is queued;
-do not treat unmerged stack tips as mainline.
+The freeze list in [P0_LEGACY_SEAM_FREEZE.md](./P0_LEGACY_SEAM_FREEZE.md) is
+**binding**. No further P0 implementation work is queued.
 
-### P1 — StateStore foundation (next plan after human merge + DCP v2 review)
+### P1 — StateStore foundation (next plan after DCP v2 review)
 
 SQLite append-only facts log + projection, deterministic kernel (clock/random
 injected), optimistic concurrency, rebuild without migrations. A read-only

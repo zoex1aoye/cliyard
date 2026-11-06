@@ -29,9 +29,8 @@ self-host controller loaded the new code.
 
 ## Lineage at this checkpoint
 
-- Mainline branch: `codex/supervisor-v0-baseline` (tip at sediment `b9fcfff`
-  before the open PR stack). Open stacked PRs #1–#4 and this P0 authority
-  closeout are **not** merged; human merge is required.
+- Mainline branch: `codex/supervisor-v0-baseline` tip `a0609e8` (PR stack
+  #1–#5 landed 2026-11-06 Asia/Shanghai).
 - Pilot safety reliability closeout run
   `6919db6d-9948-42f4-b5d6-04111f5d0dba` is accepted and merged: closeout merge
   `c1d0dbb`, integration head includes `fb665ab` (`task-budget-ledger`). Evidence:
@@ -41,9 +40,9 @@ self-host controller loaded the new code.
   import constraint in
   [COST_TRUTH_HISTORICAL_MISSING.md](evidence/COST_TRUTH_HISTORICAL_MISSING.md);
   the RunManifest is not rewritten.
-- Intended legacy-seam freeze:
-  [P0_LEGACY_SEAM_FREEZE.md](P0_LEGACY_SEAM_FREEZE.md) (binding after human
-  merge of the pending stack).
+- Legacy-seam freeze:
+  [P0_LEGACY_SEAM_FREEZE.md](P0_LEGACY_SEAM_FREEZE.md) (**binding** on mainline
+  after land `a0609e8`).
 - WorkspaceBoundary v1 is accepted at `c04bb96` but is not an ancestor of all
   current governance commits.
 - WorkerProcessTree v1.1 is accepted at `9a38174` but is not merged into the
@@ -168,8 +167,8 @@ list is its summary. Steps 2+ each start only after a human-approved Plan.
    native-first execution design before any P1 Plan is frozen for dispatch.
    Still open.
 
-1. **P0 legacy-seam closeout (authority)** — code implemented on mainline;
-   docs/freeze in this checkpoint; **human merge of open stack still required**.
+1. **P0 legacy-seam closeout (authority)** — **complete on mainline**
+   (`a0609e8`).
    - Pilot foundation reliability: **implemented / merged** (`c1d0dbb`,
      integration includes `fb665ab`). Bounded process-table cleanup, verifier
      timeout policy, cumulative budget ledger, DSH monitor hardening and
@@ -179,15 +178,13 @@ list is its summary. Steps 2+ each start only after a human-approved Plan.
    - Historical missing attempt: **marked** in
      [COST_TRUTH_HISTORICAL_MISSING.md](evidence/COST_TRUTH_HISTORICAL_MISSING.md)
      for StateStore import; RunManifest not rewritten.
-   - Freeze list: **declared** in
-     [P0_LEGACY_SEAM_FREEZE.md](P0_LEGACY_SEAM_FREEZE.md); binding after human
-     merge of PRs #1–#4 (integration-suite-gate, P2b regressions,
-     estimate-telemetry calibration, Linux POSIX verifier hardening).
-   - Remaining P0 action is human: merge the open stack, then treat the freeze
-     as binding. No further P0 implementation slice is queued.
+   - Freeze list: **binding** in
+     [P0_LEGACY_SEAM_FREEZE.md](P0_LEGACY_SEAM_FREEZE.md) after land of PRs
+     #1–#5.
+   - No further P0 implementation slice is queued.
 
 2. **P1 StateStore SQLite boundary** — **next executable implementation slice**
-   after human merge of the pending stack and DCP v2 review.
+   after DCP v2 review.
    Move task/attempt/event state from JSON files to SQLite behind one store
    interface, using the ExecutionHandle schema (runtime handle authority,
    PID diagnostic only) from delivery-control-plane-v2. Keep design, plans
@@ -243,7 +240,7 @@ These are capability gates, not date estimates or a percentage score.
 
 | Use mode | Current assessment | Gate before use |
 |---|---|---|
-| Supervised single-repository pilot | Near, but not yet recommended | Human-merge the open PR stack, bind the legacy-seam freeze, complete DCP v2 review, and keep human Plan/diff gates; do not claim readiness from P0 code alone |
+| Supervised single-repository pilot | Near, but not yet recommended | Complete DCP v2 review and keep human Plan/diff gates; do not claim readiness from P0 land alone |
 | Small-team real project | Not ready | Add background verification, OS-level write isolation, authenticated Control API/event replay, stable DSH compatibility, and intervention history |
 | Parallel multi-module delivery | Not ready | Background verifier, per-run ownership, provider/runtime admission, deterministic integration lineage and measured DSH/UI lifecycle behavior |
 | Overnight or 24-hour unattended operation | Far | Durable controller/daemon recovery, complete process ownership, provider quota/balance handling, bounded soak, incident recovery and an auditable human-escalation path |
@@ -257,10 +254,10 @@ Candidate pilot envelope after the reliability and monitor-security gates:
 - human Plan approval, human diff review and no automatic merge or push;
 - no claim of OS sandboxing, unlimited parallel work or unattended operation.
 
-The first credible supervised pilot should start only after priority item 1's
-human merge/freeze gate is complete and item 0 (DCP v2 review) has a human
-decision. Team use additionally requires the background verifier, sandbox,
-clean-context review and authenticated event/action API gates.
+The first credible supervised pilot should start only after item 0 (DCP v2
+review) has a human decision. Priority item 1 is complete on mainline. Team use
+additionally requires the background verifier, sandbox, clean-context review
+and authenticated event/action API gates.
 
 ## Release gates
 

@@ -2,8 +2,8 @@
 
 > Recorded: 2026-11-06 (Asia/Shanghai).
 > Source: [delivery-control-plane-v2.md](../design/delivery-control-plane-v2.md) §7.1.
-> Status: **intended now**; **binding** after a human merges the pending PR
-> stack (#1–#4) onto `codex/supervisor-v0-baseline`.
+> Status: **binding** on `codex/supervisor-v0-baseline` after human merge of
+> PR stack #1–#5 (landed tip `a0609e8`, 2026-11-06 Asia/Shanghai).
 
 ## Why
 
@@ -33,18 +33,19 @@ After the pending stack is human-merged, **no new features** land on:
   self-host workflow, skills and docs).
 - New work that targets the v2 seams listed in delivery-control-plane-v2.
 
-## Not yet binding
+## Binding evidence
 
-Until a human merges open PRs:
+Merged and reachable from `codex/supervisor-v0-baseline`:
 
 1. [#1 deterministic integration full-suite gate](https://github.com/zoex1aoye/cliyard/pull/1)
 2. [#2 P2b full-suite regression fix](https://github.com/zoex1aoye/cliyard/pull/2)
 3. [#3 estimate-plan telemetry calibration](https://github.com/zoex1aoye/cliyard/pull/3)
 4. [#4 Linux POSIX verifier / process-tree hardening](https://github.com/zoex1aoye/cliyard/pull/4)
+5. [#5 P0 authority closeout](https://github.com/zoex1aoye/cliyard/pull/5)
 
-this document is the **intended** freeze. Stacked branches may still land
-safety fixes that touch the listed seams. After those merges, the freeze is
-binding on mainline.
+Land commit: `a0609e8` (`merge: land PR stack #2–#5 onto supervisor baseline`).
+The freeze is binding on mainline; only safety-blocker patches may touch the
+listed seams until their v2 replacements land.
 
 ## Explicit non-claims
 
