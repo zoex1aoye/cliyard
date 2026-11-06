@@ -1,4 +1,10 @@
 import type { TaskContract } from "../contracts/schema.js";
+import {
+  calibrateGuardUsd,
+  ESTIMATE_GUARD_MARGIN,
+  ESTIMATE_TELEMETRY_VERSION,
+  type GuardCalibration,
+} from "./estimate-telemetry.js";
 import { compilePlan } from "./plan.js";
 
 export type TaskSize = "S" | "M" | "L" | "XL";
@@ -6,6 +12,18 @@ export type TaskSize = "S" | "M" | "L" | "XL";
 export interface NumericRange {
   min: number;
   max: number;
+}
+
+export interface TaskEstimateCalibration {
+  version: typeof ESTIMATE_TELEMETRY_VERSION;
+  basis: GuardCalibration["basis"];
+  sampleSize: number;
+  confidence: GuardCalibration["confidence"];
+  p75Usd: number | null;
+  margin: number;
+  staticFloorUsd: number;
+  usedStaticFloor: boolean;
+  evidencePaths: string[];
 }
 
 export interface TaskEstimate {
@@ -21,6 +39,20 @@ export interface TaskEstimate {
   recommendedMaxRepairs: number;
   drivers: string[];
   recommendation: string;
+  calibration: TaskEstimateCalibration;
+}
+
+export interface PlanEstimateCalibration {
+  version: typeof ESTIMATE_TELEMETRY_VERSION;
+  margin: number;
+  taskSummaries: Array<{
+    taskId: string;
+    size: TaskSize;
+    basis: GuardCalibration["basis"];
+    sampleSize: number;
+    confidence: GuardCalibration["confidence"];
+    guardBudgetUsd: number;
+  }>;
 }
 
 export interface PlanEstimate {
@@ -30,6 +62,7 @@ export interface PlanEstimate {
   totalApiCostCnyOffPeak: NumericRange;
   totalApiCostCnyPeak: NumericRange;
   pricingReference: PricingReference;
+  calibration: PlanEstimateCalibration;
   notes: string[];
 }
 
@@ -49,6 +82,9 @@ const STATE_TERMS =
 export function estimatePlan(raw: unknown): PlanEstimate {
   const plan = compilePlan(raw, { baseCommit: "HEAD" });
   const tasks = plan.contracts.map(estimateTask);
+  const telemetryCount = tasks.filter(
+    (task) => task.calibration.basis === "telemetry-p75-margin",
+  ).length;
   return {
     planId: plan.planId,
     tasks,
@@ -66,12 +102,26 @@ export function estimatePlan(raw: unknown): PlanEstimate {
       balanceIncluded: false,
       observedAt: null,
     },
+    calibration: {
+      version: ESTIMATE_TELEMETRY_VERSION,
+      margin: ESTIMATE_GUARD_MARGIN,
+      taskSummaries: tasks.map((task) => ({
+        taskId: task.taskId,
+        size: task.size,
+        basis: task.calibration.basis,
+        sampleSize: task.calibration.sampleSize,
+        confidence: task.calibration.confidence,
+        guardBudgetUsd: task.guardBudgetUsd,
+      })),
+    },
     notes: [
       "Heuristic ranges, not a quote.",
       "guardBudgetUsd is the local Claude --max-budget-usd guard and is deliberately conservative.",
+      telemetryCount > 0
+        ? `guardBudgetUsd uses curated cli-estimated P75×${ESTIMATE_GUARD_MARGIN} telemetry when a size has enough samples; otherwise the static floor. Samples are non-authoritative.`
+        : "guardBudgetUsd is still on the static floor for every task in this plan (insufficient telemetry samples).",
       "apiCostCny* is a reference range using historical deepseek-flash public prices; it is not current subscription pricing, balance or an invoice.",
       "Provider pricing, quota and balance must be observed per endpoint/account/model execution binding before autonomous budget admission.",
-      "Ranges are calibrated from the first WinUI 3 Key Mind run and should be replaced by empirical history per task type.",
     ],
   };
 }
@@ -85,7 +135,6 @@ export function estimateTask(contract: TaskContract): TaskEstimate {
     ...contract.readPaths,
     ...contract.writePaths,
   ].join("\n");
-  const normalized = text.toLowerCase();
   const positiveGoals = contract.goals
     .join("\n")
     .replace(/\b(do not|don't|never)\b[^.;\n]*/gi, "")
@@ -158,6 +207,7 @@ export function estimateTask(contract: TaskContract): TaskEstimate {
   const size = sizeFor(score);
   const profile = profileFor(size);
   const peak = scaleRange(profile.apiCostCnyOffPeak, 2);
+  const guard = calibrateGuardUsd(size);
 
   return {
     taskId: contract.taskId,
@@ -166,11 +216,10 @@ export function estimateTask(contract: TaskContract): TaskEstimate {
     turns: profile.turns,
     wallMinutes: profile.wallMinutes,
     outputTokens: profile.outputTokens,
-    guardBudgetUsd: profile.guardBudgetUsd,
+    guardBudgetUsd: guard.guardBudgetUsd,
     apiCostCnyOffPeak: profile.apiCostCnyOffPeak,
     apiCostCnyPeak: peak,
-    recommendedMaxRepairs:
-      size === "S" ? 0 : size === "XL" ? 0 : 1,
+    recommendedMaxRepairs: size === "S" ? 0 : size === "XL" ? 0 : 1,
     drivers,
     recommendation:
       size === "XL"
@@ -178,6 +227,17 @@ export function estimateTask(contract: TaskContract): TaskEstimate {
         : size === "L" && score >= 55
           ? "Dispatchable, but consider separating demo or evidence work."
           : "Dispatchable as one acceptance unit.",
+    calibration: {
+      version: ESTIMATE_TELEMETRY_VERSION,
+      basis: guard.basis,
+      sampleSize: guard.sampleSize,
+      confidence: guard.confidence,
+      p75Usd: guard.p75Usd,
+      margin: guard.margin,
+      staticFloorUsd: guard.staticFloorUsd,
+      usedStaticFloor: guard.usedStaticFloor,
+      evidencePaths: guard.evidencePaths,
+    },
   };
 }
 
@@ -192,7 +252,6 @@ function profileFor(size: TaskSize): {
   turns: NumericRange;
   wallMinutes: NumericRange;
   outputTokens: NumericRange;
-  guardBudgetUsd: number;
   apiCostCnyOffPeak: NumericRange;
 } {
   switch (size) {
@@ -201,7 +260,6 @@ function profileFor(size: TaskSize): {
         turns: { min: 5, max: 15 },
         wallMinutes: { min: 1, max: 4 },
         outputTokens: { min: 5_000, max: 25_000 },
-        guardBudgetUsd: 1,
         apiCostCnyOffPeak: { min: 0.03, max: 0.2 },
       };
     case "M":
@@ -209,7 +267,6 @@ function profileFor(size: TaskSize): {
         turns: { min: 20, max: 40 },
         wallMinutes: { min: 4, max: 9 },
         outputTokens: { min: 25_000, max: 80_000 },
-        guardBudgetUsd: 4,
         apiCostCnyOffPeak: { min: 0.2, max: 0.6 },
       };
     case "L":
@@ -217,7 +274,6 @@ function profileFor(size: TaskSize): {
         turns: { min: 35, max: 70 },
         wallMinutes: { min: 6, max: 15 },
         outputTokens: { min: 50_000, max: 140_000 },
-        guardBudgetUsd: 8,
         apiCostCnyOffPeak: { min: 0.3, max: 1.2 },
       };
     case "XL":
@@ -225,7 +281,6 @@ function profileFor(size: TaskSize): {
         turns: { min: 60, max: 120 },
         wallMinutes: { min: 12, max: 30 },
         outputTokens: { min: 100_000, max: 240_000 },
-        guardBudgetUsd: 12,
         apiCostCnyOffPeak: { min: 0.8, max: 2.5 },
       };
   }
