@@ -23,7 +23,7 @@ The endpoint has three inseparable parts:
 
 | Phase | Deliverable | Unblocks | Deferred |
 |---|---|---|---|
-| P0 封刀 | Merge cost-truth fix + pilot closeout; declare freeze list | Reliable self-host loop during the rewrite | — |
+| P0 封刀 | Cost-truth + pilot closeout on mainline; declare freeze; human-merge open stack | Reliable self-host loop during the rewrite | — |
 | P1 StateStore 地基 | SQLite event-sourced store + read projection + CLI status/events | Observability and recovery stop depending on JSON files | JSON write-path migration |
 | P2 daemon + 执行层 | `cliyardd` + Control API + ExecutionSupervisor (macOS) + RuntimeHandle authority + conformance suite | Restart-safe tasks, OS-owned process trees | — |
 | P3 沙箱 + 独立验收 + 干净裁决 | nono SandboxAdapter + background VerificationTask + clean-context Reviewer | Falsifiable acceptance and OS write isolation | microVM tier |
@@ -33,13 +33,18 @@ The endpoint has three inseparable parts:
 
 ## Phase detail
 
-### P0 — close the legacy seam (in progress)
+### P0 — close the legacy seam (awaiting human merge / freeze declaration)
 
-Repair the attempt cost-truth defect, human-review and merge the pilot closeout
-integration (`71484d9`), then stop adding features to the JSON stores,
-foreground Supervisor, PID registry and dev monitor.
+Cost-truth resume retention (`c5714db`) and pilot safety reliability closeout
+(`c1d0dbb` / `fb665ab`) are already on the mainline ancestry. The historical
+missing attempt is recorded in
+[evidence/COST_TRUTH_HISTORICAL_MISSING.md](./evidence/COST_TRUTH_HISTORICAL_MISSING.md).
+The freeze list is declared in
+[P0_LEGACY_SEAM_FREEZE.md](./P0_LEGACY_SEAM_FREEZE.md) and becomes binding after
+a human merges open PRs #1–#4. No further P0 implementation work is queued;
+do not treat unmerged stack tips as mainline.
 
-### P1 — StateStore foundation (next plan)
+### P1 — StateStore foundation (next plan after human merge + DCP v2 review)
 
 SQLite append-only facts log + projection, deterministic kernel (clock/random
 injected), optimistic concurrency, rebuild without migrations. A read-only
