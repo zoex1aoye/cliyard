@@ -1,359 +1,148 @@
 # cliyard
 
-Thin orchestrator for coding CLIs: **Windows entry → WSL workers**, capability-based, **no Docker required**.
+**Design-to-Evidence Delivery Control Plane**  
+设计到证据的 AI 工程交付控制面。
 
-North star: stop babysitting AI. **CLI + local Control API = stable product boundary**；**DSH = current MVP cockpit, not the control plane**；cliyard owns contracts, routing, isolation, gates and ledger. State lives on disk—not in a collapsing chat.
+cliyard **不是**另一个 coding agent，也 **不是**以聊天为真相的 IDE/GUI。
 
-**Current status, priority and release gates:** [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md).
-Use that page instead of treating older roadmap lists in individual design and
-evidence documents as the current next step.
-
-**第一步用户故事：** [docs/USER_STORY_STEP1.md](docs/USER_STORY_STEP1.md)  
-**End state (Linus-shaped):** [docs/VISION.md](docs/VISION.md) §3.
-**Product thesis / competitive boundary:** [docs/KEY_MIND.md](docs/KEY_MIND.md).
-**Strategy v2 / routing, parallel dispatch and replaceable entry:** [docs/PRODUCT_STRATEGY_V2.md](docs/PRODUCT_STRATEGY_V2.md).
-**V1 walking skeleton:** [docs/KEY_MIND_MVP.md](docs/KEY_MIND_MVP.md).
-**Continuous multi-wave trial:** [docs/CONTINUOUS_TRIAL.md](docs/CONTINUOUS_TRIAL.md).
-**WinUI 3 × TDesign pilot:** [docs/WINUI3_TDESIGN_PILOT.md](docs/WINUI3_TDESIGN_PILOT.md).
-**Task sizing and cost estimation:** [docs/TASK_ESTIMATION.md](docs/TASK_ESTIMATION.md).
-**Harness boundaries and DSH replacement strategy:** [docs/HARNESS_BOUNDARIES.md](docs/HARNESS_BOUNDARIES.md).
-**Execution authority and next control-plane order:** [design/execution-authority-v1.md](design/execution-authority-v1.md).
-**Supervisor v0 operations:** [docs/SUPERVISOR_V0.md](docs/SUPERVISOR_V0.md) — durable foreground runs, recovery, limitations, safe self-hosting.
-**Foreground orchestration queue v0:** [docs/evidence/ORCHESTRATION_QUEUE.md](docs/evidence/ORCHESTRATION_QUEUE.md) — explicit-approval queue over frozen contracts, dependency-ordered sequential dispatch, blocked stop/continue, retry/resume, stale-running reconciliation and queue-lock evidence. No daemon; RunManifest remains task authority.
-**Plan-backed chained queue base v0:** [docs/evidence/PLAN_BACKED_CHAIN.md](docs/evidence/PLAN_BACKED_CHAIN.md) — `queue add-plan` snapshots an approved Plan, materializes queue-owned contracts at a pinned root HEAD or the completed upstream RunManifest `integrationHead`, and proves downstream worktree/integration ancestry in three real Claude Code + DeepSeek two-item chains. Fail-closed, idempotent, one linear dependency; no daemon.
-**Queue manual adoption v1:** [docs/evidence/QUEUE_ADOPTION.md](docs/evidence/QUEUE_ADOPTION.md) — `queue adopt` closes one blocked item with a separately versioned `OperatorResolution` after human review; the source blocked RunManifest stays historical truth and its tasks are never marked accepted. Adopted lineage is explicit for Plan-backed dependants. Fail-closed on state, run binding, contracts/Plan identity, full-commit ancestry and bounded secret-free evidence. No parallel dispatch, profile activation, admission, Windows parity or daemon.
-**Pinned-base chained read context v0:** [docs/evidence/CHAINED_READ_CONTEXT.md](docs/evidence/CHAINED_READ_CONTEXT.md) — explicit downstream `readPaths` are validated against the exact shared contracts `baseCommit` with a Git object lookup, not the control checkout. Measured by focused tests and one real Claude Code + DeepSeek two-item chain (2/2, 13.953 s) whose downstream task read `foundation.txt` from the upstream base. No copying, automatic approval or daemon.
-**RuntimeManager v0:** [docs/RUNTIME_MANAGER.md](docs/RUNTIME_MANAGER.md) — finite local services, leased ports, runtime manifest/evidence, cleanup, limitations.
-**Runtime orphan recovery:** [docs/RUNTIME_ORPHAN_RECOVERY.md](docs/RUNTIME_ORPHAN_RECOVERY.md) — exact-identity preflight, exact lease-owner PID, `runtimeId`-bearing recovery records, `supervisor reap`, start/resume reconciliation, evidence-preserving gaps.
-**Runtime failure drills:** [docs/evidence/RUNTIME_FAILURE_DRILLS.md](docs/evidence/RUNTIME_FAILURE_DRILLS.md) — three measured failure scenarios in independent child processes, report, leases, ports.
-**Attempt continuity, worker progress, abnormal drill recovery:** [docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md) — measured rejected-attempt reuse, `--fresh-attempt`, live stream events, heartbeats, read-only status, and timed-out drill recovery.
-**Task Architect evidence:** [docs/evidence/TASK_ARCHITECT.md](docs/evidence/TASK_ARCHITECT.md) — measured read-only Plan production (fake-worker guards plus one real Claude Code + DeepSeek smoke), human review gate and limitations.
-**Control snapshot, event journal and resource snapshot v0:** [docs/evidence/CONTROL_SNAPSHOT.md](docs/evidence/CONTROL_SNAPSHOT.md) — read-only `queue status` joins queue, RunManifest, task, worker progress and line-age evidence; queue mutations append bounded audit events; host resources are sampled and provider capacity/quota/balance/pricing remain explicitly unknown until observed.
-**Worker failure taxonomy and cost truth v0:** [docs/evidence/FAILURE_COST_TRUTH.md](docs/evidence/FAILURE_COST_TRUTH.md) — one shared ten-category failure enum with bounded, credential-free records; four cost states (`provider-reported`, `cli-estimated`, `usage-only`, `unavailable`); Claude Code `total_cost_usd` is a non-authoritative CLI estimate, never a DeepSeek invoice or balance; the configured budget is a guard, not spend; RunManifest remains task authority; no automatic retry, routing, admission or parallel dispatch.
-**WorkerLease v1 (same-host controller-death recovery):** [docs/evidence/WORKER_LEASE.md](docs/evidence/WORKER_LEASE.md) — every Supervisor-backed Claude or Codex invocation writes one bounded, credential-free lease immediately after spawn and updates it with the exact POSIX identity and terminal cleanup evidence. `supervisor recover-workers` proves controller death and exact worker identity on this host, terminates only that dedicated process group, and reports resume-needed without changing RunManifest acceptance. Live owners, foreign hosts, identity mismatches and unknown identities never signal. No stdout reattachment, Windows Job Objects, cross-host recovery, automatic resume or daemon.
-**Worker process tree v1.1 (nested-group cleanup while the controller lives):** [docs/evidence/WORKER_PROCESS_TREE.md](docs/evidence/WORKER_PROCESS_TREE.md) — extends the dedicated POSIX group design to descendants that create their own group with `setsid`. A bounded process-table snapshot (8,192-row cap, exact `pid/ppid/pgid/lstart`) and a ≥250 ms sampler track descendants while the leader is alive; at timeout/cancel/child-close a fresh validated snapshot is merged, and each external-group descendant is re-read and matched by exact identity before an exact-pid SIGTERM → SIGKILL. Same-group members keep the existing group signal path. Malformed/reused identities, cliyard's own group, pid 1 and over-bound evidence fail closed; no `pkill`, name matching or broad scan. Controller-death recovery of nested groups is **not** closed: WorkerLease v1 stores only the top-level group, so that remains the next process-ownership follow-up.
-**WorkspaceBoundary v1 (guard-only detection):** [docs/evidence/WORKSPACE_BOUNDARY.md](docs/evidence/WORKSPACE_BOUNDARY.md) — every parallel ready wave captures a deterministic SHA-256 protected-root snapshot before dispatch and compares it before any result is accepted or merged. Authority-checkout source, important Git state, `queue.json`, plans/contracts and every RunManifest stay guarded; the exact active manifest for the requested run is excluded because deadline/budget extension checkpoints legitimately rewrite it during the wave. A dirty or uninspectable wave blocks every task with `workspace_boundary_violation` or `workspace_boundary_inspection_failed`, never deletes or reverts evidence, and persists bounded path-level records in the RunManifest. Detection only: no OS sandbox, prevention, credential isolation or network isolation; a provider-neutral `SandboxProvider` is the next safety task.
-**Next iteration:** [docs/NEXT_ITERATION.md](docs/NEXT_ITERATION.md) — after the now-implemented failure taxonomy/cost truth, queue manual adoption, deadline-fixture stability, **WorkerLease v1 / same-host controller-death recovery** and **WorkspaceBoundary v1 guard-only detection**, the revised order is: a provider-neutral **`SandboxProvider` for OS-level write prevention** (the remaining P0 safety gap), a secret-free **ProfileCatalog with real binding activation**, per-run Supervisor ownership with short control-store locks, **fixed hierarchical admission**, and only then Windows Job Object ownership and telemetry-backed dynamic scoring. Parallel queue dispatch is not enabled by adoption. The scheduler warm start is 3 concurrent tasks; it is not a provider permit. Provider concurrency, quota, balance and price are learned per execution binding, while CPU/RAM, runtime, port and rate-limit feedback constrain a calibrated hard bound. Unknown bindings begin with one in-flight probe. Product rationale/build-vs-borrow is in [docs/PRODUCT_STRATEGY_V2.md](docs/PRODUCT_STRATEGY_V2.md), admission design in [design/dynamic-parallel-admission-v0.md](design/dynamic-parallel-admission-v0.md), and operational gaps in [docs/NEXT_STEP_CONTROLLER.md](docs/NEXT_STEP_CONTROLLER.md). Daemon, cross-host execution, SQLite, automatic main merge and unlimited concurrency remain non-goals.
-
-## What we want (ideal)
+它负责把人的设计变成可审 Plan、冻结契约、隔离执行、独立验收，并在磁盘上留下可恢复的裁决；Codex / Claude Code / Qwen Code / OpenCode / CodeBuddy 等只是可替换 Worker，DSH 或未来自有 Web UI 只是可替换人机入口。
 
 ```text
-Human: versioned requirements + visual/design evidence
-   → UI client (DSH now; own/Paseo-compatible later): review Plan
-   → cliyard Control API: freeze contracts + select CLI/model profile
-   → parallel admission: isolated worktrees/runs → independent evidence
-   → human/integration gate: review-worthy accepted diffs
+人的设计与取舍
+  → 已审阅 Plan
+  → 冻结 TaskContract
+  → 能力匹配、准入与隔离执行
+  → 独立验收证据
+  → 人工审查 diff / 合入
+  → 可恢复的下一步
 ```
 
-## What works today
+**当前实现状态、优先级与 release gate 只以
+[docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) 为准。**  
+协作入口：[AGENTS.md](AGENTS.md)。路线图概览：[docs/ROADMAP.md](docs/ROADMAP.md)。
 
-- **Darwin MVP:** mock closed loop, DAG, `mock-batch` (parallel ready-wave), optional `--real-verify`, JSON ledger
-- **Master spike (S1):** `plugins/dsh-cliyard` + `npm run master-monitor` / `master-dispatch`
-- **Plan bridge:** structured Plan → validated/frozen contracts → isolated dispatch, also exposed to DSH as the `cliyard_plan_dispatch` agent tool
-- **Task Architect v0 (read-only Plan producer):** `npm run architect -- --repo <target> --design <committed-design.md> --plan-id <id> [--json]` requires a clean target and a tracked, repo-relative design; Claude runs in `plan` permission mode with only Read/Grep/Glob, and post-run guards reject touched paths, a changed worktree, a moved HEAD or an invalid Plan. With the default output it writes only `<target>/.cliyard/plans/<planId>.json` — never contracts, worktrees, runs, dispatch, merge or push. The Plan is for human review; freezing and dispatch remain explicit later steps.
-- **Codex worker spike (S2):** `npm run codex-batch -- … --dry-run` (real Codex without `--dry-run`)
-- **Claude Code + DeepSeek worker:** `claude-ds` + `npm run claude-batch`
-- **Continuous waves:** independent ready tasks execute in parallel within an integration branch; accepted task branches are snapshotted and merged sequentially, then the next dependent wave starts from the new integration head. This intra-item parallelism exists, but still needs first-class task/resource admission and two-level observability.
-- **Supervisor v0 (durable foreground):** `supervisor start/status/resume/reap/stop`, atomic JSON RunManifest, integration-branch checkpoint, one-lock recovery; resume skips accepted tasks (no daemon, no SQLite)
-- **WorkerLease v1 (same-host controller-death recovery):** every Supervisor-backed Claude or Codex invocation writes one lease under `.cliyard/worker-leases/<runId>/<taskId>/<leaseId>.json` immediately after spawn; exact pid/pgid/OS start identity is persisted before the result can be accepted, and normal close/timeout/cancel/spawn-error update the same record. `supervisor recover-workers --repo <path> [--run <id>] [--json]` reads the bounded store, proves controller death and exact worker identity on this host, terminates only the verified dedicated POSIX group with bounded SIGTERM → SIGKILL, appends recovery evidence and reports resume-needed. Live owner, foreign host, identity mismatch, unknown identity and malformed records never signal. It never reattaches stdout, writes a RunManifest or resumes automatically; Windows Job Objects, cross-host recovery and a daemon remain unimplemented.
-- **Worker process tree v1.1 (nested groups, in-process):** the worker manager tracks descendants from bounded process-table snapshots while the leader is alive and, at cleanup, kills external-group descendants by revalidated exact pid in addition to the existing dedicated-group SIGTERM → SIGKILL. The real fixture proves a detached helper in its own group dies on both timeout and cancel, and that a forged/reused identity is refused without touching the unrelated process. Nested groups are not recoverable after the controller is SIGKILLed; WorkerLease v1 still records only the top-level group.
-- **Foreground orchestration queue v0 (explicit approval):** `queue add/add-plan/list/retry/cancel/run/adopt` over frozen contracts or approved Plans. Contract-backed `add` freezes the contracts path and SHA-256 at add; `run` dispatches ready items one at a time through the existing Supervisor, stops at the first blocked item by default, and with `--continue-on-blocked` keeps independent work moving while dependants become blocked. Blocked items retry explicitly (`start` when no run exists, otherwise `resume --retry-rejected`); a same-host stale queue lock is reclaimed and a `running` item with a recorded run id reconciles against its RunManifest. `queue adopt` closes one reviewed blocked item with a separately versioned `OperatorResolution`: the source blocked/interrupted RunManifest is read-only historical truth, its tasks are never marked accepted, and the queue item becomes `completed` with `completion: "adopted"`. Adoption requires the exact run binding, unchanged frozen contracts/approved Plan, a full reviewed commit inside the pinned-base/current-HEAD lineage, and bounded secret-free evidence. The queue never approves or rewrites contracts and never rewrites a RunManifest. Completed and cancelled items are monotonic. The bounded `queue.item.adopted` observation lives only in the unified queue journal. Sequential, same-host, foreground only; adoption does not enable parallel dispatch.
-- **Control snapshot + queue event journal v0:** `queue status [--json]` is read-only and joins item state, Plan/materialization lineage, the latest RunManifest/tasks, queue and supervisor liveness, latest worker progress, retry policy and a host resource sample. Missing manifests and malformed journal lines are reported as degraded evidence; they never become success. Queue add/retry/cancel, Plan materialization, dispatch, blocking and provider session boundaries append bounded events to `.cliyard/queue-events/events.jsonl`. Provider profiles are unresolved until an `ExecutionProfile` exists: capacity, quota, balance and pricing are `unknown/null`, never filled from a public nominal number.
-- **Worker failure taxonomy + cost truth v0:** every newly rejected dispatched task carries a structured, bounded `FailureRecord` in its RunManifest task (category, stage, optional code, message, `observedAt`, advisory `retryableHint`). The exact categories are `budget_exhausted`, `timeout`, `provider_transient`, `provider_auth`, `provider_protocol`, `worker_process_exit`, `verifier_rejected`, `policy_blocked`, `resource_exhausted` and `unknown`; classification distinguishes a worker process failure from a post-success verifier rejection. Cost truth is one of `provider-reported`, `cli-estimated`, `usage-only` or `unavailable`, with per-session provenance and explicit `missing` reasons. Claude Code `total_cost_usd` is a non-authoritative CLI estimate (never a DeepSeek bill or balance); token usage is preserved independently; a zero emitted by the CLI stays zero but non-authoritative; missing cost stays `unavailable`, never `$0`. The configured `--max-budget-usd` is recorded as `guardBudgetUsd`, not spend. Accepted and rejected tasks keep their cost, including across worktree cleanup. `supervisor status` and `queue status` expose failure/cost; queue pre-dispatch blocks keep an item-level `policy_blocked` failure only when no RunManifest exists. RunManifest remains task authority. Nothing in this slice retries automatically: `retryableHint` is advisory, the queue needs explicit `queue retry`, Supervisor needs explicit `resume --retry-rejected`, and the Claude adapter's pre-existing bounded transient retry is unchanged.
-- **Plan-backed chained queue base v0:** `queue add-plan <plan.json> --repo <path> --id <id> [--depends-on <id>]` snapshots an explicitly approved Plan (absolute path + SHA-256) and requires the Plan id to equal the queue id. A root item pins the repository HEAD captured at add; a dependent item waits for its one upstream to complete, then compiles the Plan deterministically at that RunManifest's `integrationHead` into a queue-owned artifact under `.cliyard/queue/materialized/` before any attempt increment or Supervisor start. Retry/resume re-verifies the recorded Plan hash, artifact bytes, base and upstream lineage; a changed Plan, artifact or upstream evidence blocks instead of being substituted. The downstream integration branch starts at the upstream head, so the upstream `integrationHead` is an ancestor of the downstream one. A downstream task may declare an upstream-produced file explicitly in `readPaths`; preflight proves it against that pinned base. One linear dependency only; no automatic Plan generation/approval, no multi-parent integration/merge queue, no parallel dispatch or daemon.
-- **Pinned-base read context v0:** `validateReadContexts` receives the contracts' resolved shared base and proves each explicit `readPath` with `git cat-file -e <base>:<path>`. `.`, a genuinely missing optional `AGENTS.md` and paths produced by tasks in the same contracts document keep their exemptions. A path visible only as an untracked control-checkout file still fails with the untracked-context error, and a file tracked at current `HEAD` but absent at the pinned base is rejected. Nothing is copied from the control checkout; the worker worktree is created at the same pinned base.
-- **Attempt continuity + worker progress v0 (foreground):** a rejected task checkpoints its exact worktree, branch and base and keeps the dirty draft even without `--keep-worktrees`; default `resume --retry-rejected` reuses that draft, while `--fresh-attempt` deliberately starts a clean worktree. Claude `stream-json` events are appended to `.cliyard/worker-events/<runId>/<taskId>.jsonl` and shown read-only by `supervisor status`, with heartbeats during provider silence. Events are observational only; no conversation resume, daemon or SQLite
-- **RuntimeManager v0 (single host):** finite verification services started from the exact task worktree, leased `127.0.0.1` ports, HTTP readiness, URL env injection into `verifyCommands`, runtime manifest + service logs, process-group cleanup; no daemon, SQLite, or browser evidence
-- **Runtime orphan recovery v0 (single host):** persisted owner/pid/pgid/OS start identity, exact lease-owner PID correlation, read-only preflight, `supervisor reap`, automatic `start`/`resume` reconciliation, exact lease release after group exit, `runtimeId`-bearing recovery records; `needs_human` instead of heuristic kills. No daemon or cross-host kill
-- **Runtime failure drills v0:** `npm run runtime-drill` runs readiness-timeout, verify-failure and cleanup-failure in three independent child processes, writes a versioned JSON report plus per-scenario manifests/logs/leases, and verifies the service/port is clean afterward. A timed-out/abnormal child is terminated (SIGTERM → bounded SIGKILL) and its proven orphan runtime is reconciled by the exact reaper; the recovery is persisted in the report, while the abnormal scenario itself still reports failure. Diagnostic only — no daemon
-- **Windows track:** `doctor` / `run` / `batch` via WSL (deferred for CodeBuddy E2E)
+## 一句话原则
 
-Not yet: secret-free `ProfileCatalog` with real binding activation, CLI+model execution-profile routing, fixed hierarchical admission, bounded inter-item and intra-item parallel dispatch, a stable local Control API, a reusable DesignRevision/EvidenceBundle, a self-owned fallback UI, or a supervised look-ahead controller/daemon. Windows Job Object process-tree parity and telemetry-backed dynamic scoring are later prerequisites, not shortcuts past profile activation and fixed admission. WorkerLease v1 covers same-host POSIX groups only; worker process tree v1.1 cleans `setsid` descendants only while the controller is alive, so controller-death recovery of nested groups remains unclaimed. stdout reattachment, Windows Job Objects, cross-host recovery, automatic resume and daemon remain unclaimed. Windows CodeBuddy parallel E2E, JetBrains PSI, Docker, cross-host execution, SQLite manifests, unlimited parallel runtimes, multi-parent integration/merge queue and provider-conversation resume also remain unclaimed. The current queue is explicit-approval, sequential, same-host and foreground; adoption is a human review resolution, not parallel execution. The current task DAG can run independent ready tasks concurrently but lacks a shared CPU/RAM/provider/runtime admission broker. Plan-backed items deterministically compile contracts from an already-approved Plan; v0 supports only one linear queue dependency. Explicit downstream `readPaths` are validated at the pinned contracts base. Task Architect produces a human-reviewable Plan only; it does **not** freeze contracts or dispatch automatically.
+1. **设计是真相，聊天不是真相。** Plan / Contract / Git / RunManifest / 证据才权威。
+2. **完成必须带证据。** Worker 自报完成、heartbeat、exit 0 都不等于 accepted。
+3. **Worker 可替换，能力决定路由。** 不绑定单一 CLI、模型或订阅。
+4. **人只保留设计权与不可逆决策。** Plan 批准、契约冻结、合入、推送不能由系统擅自做。
+5. **长任务是系统属性。** 模型、GUI、Supervisor 可以退出；磁盘上的设计、租约、证据和裁决不能丢。
 
-Measured suite (2026-10-28, worker-process-tree v1.1): `npm run build` exit
-`0`; focused `tests/worker-process-tree.test.ts` **22/22** (7741.68 ms),
-including real detached helpers in their own POSIX process groups; full
-`npm test` **440/440** (25853.11 ms, 0 fail).
+产品命题与竞品边界见 [docs/KEY_MIND.md](docs/KEY_MIND.md)；  
+策略与路由见 [docs/PRODUCT_STRATEGY_V2.md](docs/PRODUCT_STRATEGY_V2.md)；  
+执行层改写方向见 [design/delivery-control-plane-v2.md](design/delivery-control-plane-v2.md)（仍待人工批准）。
 
-Measured suite (2026-10-28, WorkerLease v1 evidence at integrated HEAD
-`e6f922e`): `npm run build` exit `0`; focused worker-lease **19/19**
-(4652.98 ms), including the real SIGKILL controller-death fixture (1/1,
-241.49 ms); full `npm test` **394/394** (25657.98 ms, 0 fail). The 19 new
-lease tests account for the increase from the previously recorded 375.
-Earlier measurements remain historical: adoption journal unification at
-`41e5fcd` recorded focused queue adoption **11/11**
-(3006.48 ms), focused queue control snapshot **8/8** (832.59 ms), focused
-deadline extension **13/13** (23591.57 ms); full `npm test` was captured
-twice: **373/375** (25983.47 ms, 2 deadline-extension async-persistence
-failures) then **375/375** (24814.49 ms, 0 fail). The two failures did not
-reproduce in the focused run or the second captured full run; an earlier
-invocation also exited non-zero but its output was truncated before the
-summary, so no count from it is used. This is a local observation, not a
-flake-rate or stable-green-gate claim. `unify-adoption-journal`
-(`2c88012`) moves new adoption events from a dedicated `adoptions.jsonl` into
-the unified queue journal and adds 3 adoption tests plus 1 control-snapshot
-projection test (queue-adoption 8→11, queue-control 7→8). The adoption slice
-itself was measured at `ce1157a`: focused adoption **8/8** (2539.7 ms),
-deadline **13/13** (23601.98 ms), full **371/371** (24411.1 ms, 0 fail).
-That baseline integrated `manual-queue-adoption` (`b7f7d9e`) and
-`deadline-fixture-stability` (`c57d591`); the previous execution-authority
-review recorded **361/362** with the deadline fixture red, and this
-integration closed it. Earlier focused and full counts remain historical
-measurements: failure/cost
-**290/290** on `69f62de` (taxonomy 14/14, Claude 17/17, supervisor 12/12,
-queue control 7/7, combined 50/50); ControlSnapshot **245/245** on `3776c09`;
-read-context **240/240** on `390d61e` (focused 5/5, Plan-backed 31/31). One
-real Claude Code + DeepSeek two-item chain with downstream
-`readPaths: ["foundation.txt"]` completed 2/2 in 13.953 s, captured the live
-downstream worktree at the upstream `integrationHead` with `foundation.txt`
-present and `upper.txt` absent, observed the worker reading that file, and
-verified both final files plus integration ancestry (exit `0`). Three earlier
-chains without explicit readPaths (17.2 s, 24.6 s and 21.4 s) remain historical
-measurements. These are single local macOS results, not a long-term flake-rate,
-cost or CI claim. Evidence:
-[docs/evidence/QUEUE_ADOPTION.md](docs/evidence/QUEUE_ADOPTION.md),
-[docs/evidence/FAILURE_COST_TRUTH.md](docs/evidence/FAILURE_COST_TRUTH.md),
-[docs/evidence/CHAINED_READ_CONTEXT.md](docs/evidence/CHAINED_READ_CONTEXT.md),
-[docs/evidence/PLAN_BACKED_CHAIN.md](docs/evidence/PLAN_BACKED_CHAIN.md),
-[docs/evidence/ORCHESTRATION_QUEUE.md](docs/evidence/ORCHESTRATION_QUEUE.md),
-[docs/evidence/TASK_ARCHITECT.md](docs/evidence/TASK_ARCHITECT.md),
-[docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md](docs/evidence/ATTEMPT_CONTINUITY_PROGRESS.md),
-[docs/evidence/CONTROL_SNAPSHOT.md](docs/evidence/CONTROL_SNAPSHOT.md),
-[docs/evidence/WORKER_LEASE.md](docs/evidence/WORKER_LEASE.md),
-[docs/evidence/WORKSPACE_BOUNDARY.md](docs/evidence/WORKSPACE_BOUNDARY.md) and
-[docs/evidence/RUNTIME_FAILURE_DRILLS.md](docs/evidence/RUNTIME_FAILURE_DRILLS.md);
-per-run hardening durations and acceptance matrix:
-[docs/RUNTIME_ORPHAN_RECOVERY.md](docs/RUNTIME_ORPHAN_RECOVERY.md#verification).
-
-Hardening measured in the pre-drill baseline: a lease must be owned by the exact
-runtime owner PID (live or dead mismatch → `needs_human`); every new recovery
-record carries its `runtimeId` and the Supervisor reads it directly instead of
-matching reason text; `src/supervisor` contains no NUL bytes; and the seven
-runtime test files that start real processes or bind real ports use disjoint
-static port pools (22000–22699; the drill file takes a 90-port window,
-test-only — not cross-repository port coordination).
-
-## Recommended layout
-
-Keep the **app repo on the WSL filesystem** (e.g. `~/work/my-app`), not `/mnt/c/...`.
+## 理想闭环
 
 ```text
-Windows PowerShell
-  cliyard doctor | run | batch
-       │
-       ▼
-  wsl.exe -d <distro> --cd <linux-repo> -- bash -lc '…'
-       │
-       ├─ git worktree add …
-       └─ codebuddy | claude | codex …
+人：版本化需求 / 视觉 / 边界
+  → UI client（当前 DSH 插件；目标自有 Control API 控制台）
+  → cliyard：冻结契约 + 选择 CLI/模型 profile
+  → 隔离 worktree / runtime → 独立 Verifier / 门禁
+  → 人审 accepted diff → 合入（不可逆）
 ```
 
-## Local MVP (macOS mock)
+终点不是「无人自动合入 main」，而是：**人只定方向与终审，中间派工、校准、机器门禁交给控制面。**
 
-On Darwin there is no `wsl.exe`. Use the Route C mock control plane (no WSL / CodeBuddy / Docker):
+## 今天能做什么（诚实版）
+
+已在主线可用（前台、单仓库锁、顺序 queue；细节与证据见 CURRENT_STATE）：
+
+- Plan 编译与冻结 TaskContract；write-path / path audit；git worktree 隔离
+- 前台 Supervisor：原子 RunManifest、integration checkpoint、resume / reap / recover-workers
+- 显式批准的 foreground queue：`add` / `add-plan` / `run` / `retry` / `adopt`
+- RuntimeManager：本机 loopback 端口租约、readiness、runtime manifest、清理
+- WorkerLease + 进程树清理（POSIX；controller-death 嵌套组恢复仍未闭环）
+- WorkspaceBoundary v1：**检测型**保护根完整性（不是 OS sandbox）
+- 失败分类与成本真相（含 resume 保留 abandoned attempt；历史 missing 有导入约束）
+- Task Architect：只产出供人审的 Plan，不自动冻结或派发
+- 确定性 integration full-suite gate、estimate-plan telemetry 校准、Linux verifier 进程组超时回收
+
+**P0 已封刀。** 遗留 JSON store / 前台 Supervisor / PID-as-authority / DSH monitor
+功能面已冻结，见 [docs/P0_LEGACY_SEAM_FREEZE.md](docs/P0_LEGACY_SEAM_FREEZE.md)。  
+下一执行切片：人工审完 Delivery Control Plane v2 后做 **P1 StateStore**。
+
+## 今天还不能宣称什么
+
+- 不是 OS 级写保护 / 凭据隔离 / 网络隔离（Boundary 只是事后检测）
+- 不是 daemon、跨宿主恢复、Windows Job Object 对等、24 小时无人值守
+- 不是自动批准 Plan、自动合入 `main`、无限并行
+- 不是已完成的动态路由 / ProfileCatalog 实装 / 分层 admission 生产就绪
+- 不是 supervised pilot「已推荐」——仍差 DCP v2 人工决策与后续门禁
+
+对照表与相邻产品（含 Multica、Cezar、DSH 等）见 [docs/OSS_LANDSCAPE.md](docs/OSS_LANDSCAPE.md)。  
+与 ThinkRail 一类「围绕单一 coding engine 的 agentic IDE」不同：cliyard 做的是 **engine-agnostic 的交付控制面**，人机面可替换。
+
+## 快速开始
+
+要求：Node `>=20`，本机已安装并登录你要用的 Worker CLI（可选）。
 
 ```bash
-npm install --registry https://registry.npmjs.org/
+npm install
+npm run build
 npm test
-npm run mock-loop                                          # fail verify once → repair → accept (mock verifier)
-npm run mock-loop -- --fail-verify-times 0                 # happy path
-npm run mock-loop -- --fail-verify-times 3                 # exhaust maxRepairs → reject (exit 1)
-npm run mock-loop -- --briefing-dir .cliyard/briefing      # also write briefing/<taskId>.md
-# Optional real shell verify (still mock worker; no WSL):
-npm run mock-loop -- examples/real-verify.contract.json --real-verify --fail-verify-times 0
-# RuntimeManager v0: finite service + leased URL gate (mock worker, real shell verify):
-npm run mock-loop -- examples/runtime-verifier.contract.json --real-verify --fail-verify-times 0
-# Override the default 19000-19999 lease range if it is busy:
-CLIYARD_PORT_RANGE=21800-21899 npm run mock-loop -- \
-  examples/runtime-verifier.contract.json --real-verify --fail-verify-times 0
-# Runtime failure drills v0: three rejection paths in independent child processes
-npm run runtime-drill -- --out .cliyard/runtime-drills/manual --port-base 22800 --json
-# Output must be missing or empty; omit --out/--port-base for the defaults.
-# Multi-task mock scheduler (dependsOn / DAG; parallel ready-wave):
-npm run mock-batch -- examples/mock-batch.chain.json
-npm run mock-batch -- examples/mock-batch.parallel.json
 
-# Master monitor + dispatch (S1; no DSH required for demo)
-npm run master-monitor          # http://127.0.0.1:3927/
-npm run master-dispatch         # configured worker batch (Claude by default) → ledger
-
-# Codex dual worktree (S2); --dry-run skips API
-npm run codex-batch -- examples/codex-batch.parallel.json --dry-run
-
-# Claude Code + DeepSeek probe and worker smoke
-claude-ds -p 'Reply exactly with PROBE_OK.'
-npm run claude-batch -- examples/claude-smoke.contract.json --repo /path/to/temp-git-repo
-
-# Task Architect v0: read-only Plan from a committed design (clean target)
+# 只读：从已提交设计产出供人审的 Plan（不冻结、不派发）
 npm run architect -- --repo /path/to/clean-target \
   --design design/feature.md --plan-id feature --json
-# Writes only <target>/.cliyard/plans/<planId>.json; review it, then use the
-# existing plan compiler/plan-dispatch and Supervisor explicitly.
 
-# Plan → contract file → optional dispatch (distinct parallel writePaths required)
-npm run plan-dispatch -- examples/glass-parallel.plan.json --repo ../ui-prototype
-npm run plan-dispatch -- examples/glass-parallel.plan.json --repo ../ui-prototype \
-  --dispatch --worker codex --model deepseek-flash --dry-run
-# Remove --dry-run for a real Codex run. Codex worktrees are kept by default.
-# Add --background to return a pid/log receipt immediately; ledger remains the truth.
+# 人审 Plan 后：编译/冻结契约（不自动开跑）
+npm run plan-dispatch -- path/to/approved.plan.json --repo /path/to/target
 
-# Glass sibling trial (../ui-prototype)
-npm run glass-dry
-npm run glass-dispatch   # deepseek-flash, keep worktrees
+# 前台 Supervisor（单仓库锁；无 daemon）
+npm run dev -- supervisor start path/to/contracts.json --repo /path/to/target --worker claude
+npm run dev -- supervisor status --repo /path/to/target --json
+npm run dev -- supervisor resume --repo /path/to/target
 
-# Durable Supervisor v0 (foreground; atomic JSON RunManifest; no daemon / SQLite)
-npm run dev -- supervisor start <contracts.json> --repo <scratch-repo> --worker claude
-npm run dev -- supervisor status --repo <scratch-repo> --json
-npm run dev -- supervisor resume --repo <scratch-repo>   # after interruption
-# Rejected retry reuses the recorded dirty worktree by default:
-npm run dev -- supervisor resume --repo <scratch-repo> --retry-rejected
-# Discard that draft and start a clean worktree:
-npm run dev -- supervisor resume --repo <scratch-repo> --retry-rejected --fresh-attempt
-npm run dev -- supervisor stop --repo <scratch-repo>     # cooperative SIGTERM
-npm run dev -- supervisor reap --repo <scratch-repo> --json  # orphan runtime recovery
-npm run dev -- supervisor recover-workers --repo <scratch-repo> \
-  [--run <run-id>] [--json]  # same-host dead-controller worker-group recovery
-# start/resume also reconcile proven orphan runtimes automatically and fail
-# closed when a runtime needs human review.
-# recover-workers only signals an exactly verified POSIX worker group after
-# proving its controller dead on this host; it reports resume-needed but never
-# reattaches stdout, resumes automatically or changes RunManifest acceptance.
-# After `npm run build`: node dist/cli.js supervisor …
-
-# Foreground orchestration queue v0 (explicit approval over frozen contracts
-# or approved Plans)
-npm run dev -- queue add <contracts.json> --repo <scratch-repo> --id <queue-id> \
-  --worker claude [--depends-on <id>] [--max-attempts n] [--json]
-npm run dev -- queue add-plan <plan.json> --repo <scratch-repo> --id <queue-id> \
-  [--depends-on <queue-id>] [--worker claude] [--model id] \
-  [--max-attempts n] [--json]
-npm run dev -- queue list --repo <scratch-repo> [--json]
-npm run dev -- queue status --repo <scratch-repo> [--json]
-npm run dev -- queue run --repo <scratch-repo> [--continue-on-blocked] \
-  [--max-dispatches n] [--json]
-npm run dev -- queue retry <queue-id> --repo <scratch-repo> [--json]
-npm run dev -- queue cancel <queue-id> --repo <scratch-repo> [--json]
-# Close one blocked item whose work was manually reviewed and integrated:
-npm run dev -- queue adopt <queue-id> --repo <scratch-repo> --run <run-id> \
-  --artifact <full-reviewed-commit> --evidence <review-evidence.json> \
-  --approved-by <operator> --reason <text> [--json]
-# Adoption records a separate OperatorResolution and leaves the blocked
-# RunManifest and its unaccepted tasks untouched.
-# Plan items support at most one dependency. A root item pins the HEAD captured
-# at add-plan; a dependent item materializes at the upstream completed
-# RunManifest integrationHead, or at the explicitly adopted reviewed commit.
-# Changing the Plan blocks; it is never auto-approved.
-# Default run stops at the first blocked item; --continue-on-blocked runs
-# independent items and blocks dependants. No daemon, parallel dispatch or dry-run.
-# After `npm run build`: node dist/cli.js queue …
+# 显式批准的队列
+npm run dev -- queue add-plan path/to/approved.plan.json --repo /path/to/target --id my-item
+npm run dev -- queue run --repo /path/to/target
+npm run dev -- queue status --repo /path/to/target --json
 ```
 
-By default, `architect` writes only `<target>/.cliyard/plans/<planId>.json`
-(`--out` may select another path); it writes no contracts and dispatches
-nothing. After human review, plan compile writes
-`<target>/.cliyard/plans/<planId>.json` and
-`<target>/.cliyard/contracts/<planId>.contracts.json`. The control plane
-resolves `HEAD` to a commit, freezes each contract, and rejects unknown deps,
-cycles, repo-external paths, and overlapping task `writePaths`.
+Mock 闭环（不依赖真实 Worker）：
 
-Ledger: `<target>/.cliyard/ledger.json` (gitignored).  
-Task Architect artifact: `<target>/.cliyard/plans/<planId>.json` (gitignored;
-human-reviewable Plan only — no contracts, runs or dispatch).
-Supervisor state: `<target>/.cliyard/runs/<runId>.json` + `active.json` + `supervisor.lock`
-(gitignored); accepted tasks, the integration head and rejected-attempt
-worktree/branch/base fields are checkpointed there. Worker progress is
-append-only at `<target>/.cliyard/worker-events/<runId>/<taskId>.jsonl`
-(gitignored, advisory only; never run authority). Worker leases are
-one-per-invocation at
-`<target>/.cliyard/worker-leases/<runId>/<taskId>/<leaseId>.json`
-(gitignored, mode `0600`, bounded and credential-free; observational evidence
-only; `supervisor status` reads them and `supervisor recover-workers` acts only
-on an exactly proven dead-controller POSIX group, never on RunManifest
-acceptance).
-Supervisor details: [docs/SUPERVISOR_V0.md](docs/SUPERVISOR_V0.md) — foreground only, JSON manifest, manual review/merge, no daemon or SQLite; attempt reuse is worktree continuity, not provider-conversation resume.
-Queue state: `<target>/.cliyard/queue.json` + `<target>/.cliyard/queue.lock`
-(gitignored). Contract-backed items freeze their contracts path and SHA-256 at
-`queue add`; changed or missing bytes block instead of dispatching.
-Plan-backed items freeze the approved Plan path/SHA-256 at `queue add-plan`, a
-pinned root base (`planBaseCommit`) or the completed upstream RunManifest
-`integrationHead`, and a queue-owned contracts artifact at
-`<target>/.cliyard/queue/materialized/<queue-id>/<base>-<plan-hash>.contracts.json`
-(gitignored; hash verified on every retry/resume). The queue coordinates
-Supervisor runs only: it never writes a RunManifest. Contract-backed dependency
-ordering does not chain integration branches (each run uses its own frozen
-`baseCommit`); Plan-backed v0 chains exactly one linear base, so the upstream
-`integrationHead` is an ancestor of the downstream head. Multi-parent
-integration and a merge queue are not implemented. Same-host stale locks are
-reclaimed; foreign-host locks fail closed. Details and measured crash windows:
-[docs/evidence/ORCHESTRATION_QUEUE.md](docs/evidence/ORCHESTRATION_QUEUE.md)
-and [docs/evidence/PLAN_BACKED_CHAIN.md](docs/evidence/PLAN_BACKED_CHAIN.md).
-Queue audit events are appended to
-`<target>/.cliyard/queue-events/events.jsonl` (gitignored). A successful first
-adoption appends exactly one bounded `queue.item.adopted` record to that same
-unified journal; there is no separate `adoptions.jsonl` writer or reader.
-`queue.json` remains the authority for the `OperatorResolution` if that
-observability append fails. The journal is a bounded, best-effort observation
-stream only; `queue status` reads it, including the `queue.adoptionEvents`
-projection derived by filtering `queue.item.adopted` from the unified journal,
-but never appends or rewrites it. An adopted item shows
-`completion: "adopted"`; its source blocked/interrupted RunManifest remains
-historical truth and is never rewritten.
-
-Runtime evidence: `<target>/.cliyard/runtime/<runtimeId>/runtime-manifest.json`
-plus `<service>.log` and `data/<service>/`; port leases live in
-`<target>/.cliyard/runtime/port-leases.json`; orphan reconciliation serializes
-through `<target>/.cliyard/runtime/reaper.lock` (all gitignored). A completed
-recovery writes a `recovery` record carrying its `runtimeId` into the runtime
-manifest. Lease correlation requires the lease owner PID to equal the manifest
-owner PID; a live or dead mismatch is `needs_human`. Runtime services are finite
-and single-host; details and limitations:
-[docs/RUNTIME_MANAGER.md](docs/RUNTIME_MANAGER.md) and
-[docs/RUNTIME_ORPHAN_RECOVERY.md](docs/RUNTIME_ORPHAN_RECOVERY.md). No daemon,
-SQLite, Playwright/axe, screenshot, or a11y evidence is produced; orphan
-recovery is never cross-host.
-
-Failure-drill evidence:
-`<target>/.cliyard/runtime-drills/<UTC>-<pid>/runtime-failure-drills.json` plus
-per-scenario `child.log`, `child-result.json`, runtime manifests, service logs
-and lease stores (gitignored). An abnormal scenario records its child
-termination and exact-reaper recovery under `abnormalRecovery`; it is never
-reinterpreted as accepted. Measured summary and artifact layout:
-[docs/evidence/RUNTIME_FAILURE_DRILLS.md](docs/evidence/RUNTIME_FAILURE_DRILLS.md)
-and [docs/RUNTIME_MANAGER.md](docs/RUNTIME_MANAGER.md#runtime-failure-drills).
-Glass 实机：[docs/GLASS_TRIAL.md](docs/GLASS_TRIAL.md) · DSH 插件：[plugins/dsh-cliyard/README.md](plugins/dsh-cliyard/README.md).
-Claude + DeepSeek：[docs/CLAUDE_DEEPSEEK_WORKER.md](docs/CLAUDE_DEEPSEEK_WORKER.md).
-
-`npm run doctor` / `run` / `batch` need Windows+WSL — expect failure on macOS.
-
-## Quick start (Windows)
-
-```powershell
-cd \\wsl$\Ubuntu\home\<you>\cliyard
-npm install
-copy config.example.yaml config.yaml
-
-npm run doctor
-npm run run-task -- --repo ~/work/my-app --prompt "…" --worker codebuddy --model gpt-5 --dry-run
-npm run batch -- examples/module.tasks.yaml --dry-run
+```bash
+npm run mock-loop
+npm run mock-batch -- examples/mock-batch.parallel.json
 ```
 
-- Step-1 user story: [docs/USER_STORY_STEP1.md](docs/USER_STORY_STEP1.md)  
-- Vision: [docs/VISION.md](docs/VISION.md)  
-- MVP plan: [docs/MVP_IMPLEMENTATION_PLAN.md](docs/MVP_IMPLEMENTATION_PLAN.md)  
-- OSS landscape: [docs/OSS_LANDSCAPE.md](docs/OSS_LANDSCAPE.md) · [docs/SCAFFOLD_FROM_OSS.md](docs/SCAFFOLD_FROM_OSS.md)
+Windows + WSL 入口（`doctor` / `run` / `batch`）仍可用，但 **已不是产品主叙事**；本机 macOS/Linux 前台控制面才是当前主路径。
 
-## Building blocks
+状态落在目标仓库的 `.cliyard/`（gitignored）：`runs/`、`queue.json`、`worker-leases/`、`runtime/` 等。  
+**RunManifest 是任务权威**；queue 只做协调；聊天不是权威。
 
-| Concern | Brick | Role |
-|---------|--------|------|
-| Bridge | `wsl.exe` | Windows → Linux |
-| Isolation | `git worktree` + WorkspaceBoundary v1 | Parallel without shared dirty tree; guard-only detection of authority-checkout changes (no OS sandbox yet) |
-| Workers | CodeBuddy / Claude / Codex | BYO install + login |
-| Verification runtime | RuntimeManager v0 | Leased 127.0.0.1 ports, HTTP readiness, manifest, cleanup |
-| Later | Workflow-style ledger, verify gates | Master without fat context |
-| Later | tree-sitter MCP / JetBrains headless | Optional semantic accept |
-| Optional | Docker | Never required |
+## 文档地图
+
+| 想了解 | 去读 |
+|---|---|
+| 现在做到哪、下一步做什么 | [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) |
+| 怎么在本仓库协作 | [AGENTS.md](AGENTS.md) |
+| 阶段路线（P0–P6） | [docs/ROADMAP.md](docs/ROADMAP.md) |
+| 产品命题 | [docs/KEY_MIND.md](docs/KEY_MIND.md) |
+| 并行 / 路由 / 入口策略 | [docs/PRODUCT_STRATEGY_V2.md](docs/PRODUCT_STRATEGY_V2.md) |
+| 执行层改写（待人工批准） | [design/delivery-control-plane-v2.md](design/delivery-control-plane-v2.md) |
+| P0 冻结面 | [docs/P0_LEGACY_SEAM_FREEZE.md](docs/P0_LEGACY_SEAM_FREEZE.md) |
+| Supervisor / Runtime 操作 | [docs/SUPERVISOR_V0.md](docs/SUPERVISOR_V0.md)、[docs/RUNTIME_MANAGER.md](docs/RUNTIME_MANAGER.md) |
+| 证据与测量 | [docs/evidence/](docs/evidence/)（单次测量，不替代 CURRENT_STATE） |
+
+常驻纪律在 [`.agents/rules/`](.agents/rules/)，任务 SOP 在 [`.agents/skills/`](.agents/skills/)。  
+`.cursor/rules` 与 `.cursor/skills` 是指向同一源的软链接，不要复制第二份正文。
+
+## 积木
+
+| 关注点 | 落点 | 说明 |
+|---|---|---|
+| 设计 / 意图 | Plan + TaskContract | 人审后冻结；变更即新版本 |
+| 隔离 | git worktree + writePaths | 并行不共享脏树；path audit 验越界 |
+| 执行 | 可替换 Worker CLI | BYO 安装与登录 |
+| 运行态验收 | RuntimeManager | 租约端口、readiness、清理 |
+| 任务权威 | RunManifest | accepted/rejected 只写这里 |
+| 协调 | foreground queue | 显式批准；当前顺序派发 |
+| 人机面 | DSH 插件（可替换） | 不持有契约/证据唯一真相 |
+| 安全边界 | WorkspaceBoundary → 未来 SandboxAdapter | 今日检测，明日 OS 写隔离 |
 
 ## License
 
-Apache-2.0 (planned) — TBD on first public release.
+Apache-2.0（planned）— 首次公开发布时再定稿。
