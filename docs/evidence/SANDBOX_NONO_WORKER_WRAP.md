@@ -27,11 +27,15 @@ npx tsx --test tests/sandbox-wrap.test.ts tests/sandbox-adapter.test.ts
 
 ## 3. Host measurement (this cloud image)
 
-`/sys/kernel/security/landlock` is absent. Live probe against the pinned
-`nono` binary reports `enforced: false` because an outside-allow write still
-persists. Therefore this host must not claim filesystem isolation; the
-adapter correctly keeps `filesystemIsolation: "unsupported"` and the
-capability gate refuses tasks that require `partial`/`full`.
+Landlock **is** compiled in and active (`CONFIG_SECURITY_LANDLOCK=y`, LSM list
+includes `landlock`). An early false negative came from placing the allow/deny
+probe under `/tmp`, which nono includes in its default system grants — outside
+writes still succeeded and looked like "no enforcement".
+
+After moving the probe under `~/.cache/cliyard/nono-measure-*`, the same pinned
+nono `v0.81.0` reports `enforced: true` on this host (allow write ok, deny
+write held). `/sys/kernel/security/landlock` may be absent as a directory even
+when the LSM is loaded; use the syscall / measurement, not that path alone.
 
 ## 4. Non-claims
 

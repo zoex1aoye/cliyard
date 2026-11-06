@@ -15,7 +15,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { NONO_PINNED_VERSION } from "./pin.js";
 
@@ -50,7 +50,12 @@ export function measureNonoFilesystemEnforcement(
 ): NonoFilesystemEnforcementMeasurement {
   const binaryPath = options.binaryPath?.trim() || "nono";
   const measuredAt = options.now?.() ?? new Date().toISOString();
-  const root = mkdtempSync(join(tmpdir(), "cliyard-nono-measure-"));
+  // Do NOT place the probe under `/tmp`: nono grants broad system paths that
+  // typically include `/tmp`, which produces a false "not enforced" result
+  // even when Landlock is active. Use a home-scoped temp root instead.
+  const probeRoot = join(homedir(), ".cache", "cliyard");
+  mkdirSync(probeRoot, { recursive: true, mode: 0o700 });
+  const root = mkdtempSync(join(probeRoot, "nono-measure-"));
   const allowDir = join(root, "allow");
   const denyDir = join(root, "deny");
   mkdirSync(allowDir, { recursive: true });
