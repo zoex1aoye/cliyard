@@ -66,6 +66,8 @@ import {
 } from "../sandbox/types.js";
 import { isVerificationObservation } from "../verification/background-verifier.js";
 import type { VerificationObservation } from "../verification/background-verifier.js";
+import { isReviewObservation } from "../review/observation.js";
+import type { ReviewObservation } from "../review/observation.js";
 import {
   FileEvidenceStore,
   META_PROJECTION_FORMAT,
@@ -1799,6 +1801,12 @@ function parseRunManifest(raw: unknown, source: string): RunManifest {
         `${source}: task ${key}.verification`,
       );
     }
+    if (task.review !== undefined) {
+      task.review = parseReviewObservation(
+        task.review,
+        `${source}: task ${key}.review`,
+      );
+    }
   }
 
   return raw as unknown as RunManifest;
@@ -1820,6 +1828,18 @@ function parseVerificationObservation(
   if (!isVerificationObservation(raw)) {
     throw new RunManifestError(
       `${source} is not a valid VerificationObservation (observational; fail closed)`,
+    );
+  }
+  return raw;
+}
+
+function parseReviewObservation(
+  raw: unknown,
+  source: string,
+): ReviewObservation {
+  if (!isReviewObservation(raw)) {
+    throw new RunManifestError(
+      `${source} is not a valid ReviewObservation (observational; fail closed)`,
     );
   }
   return raw;

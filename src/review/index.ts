@@ -53,6 +53,19 @@ export {
 } from "./model-reviewer.js";
 
 export {
+  MAX_REVIEW_OBSERVATION_FINDING_IDS,
+  isReviewObservation,
+  type ReviewObservation,
+} from "./observation.js";
+
+export {
+  AcceptanceReviewError,
+  isCleanReviewEnabled,
+  runAcceptanceReview,
+  type CleanReviewWireOptions,
+} from "./acceptance-wire.js";
+
+export {
   REVIEW_FINDING_SEVERITIES,
   REVIEW_FINDING_STATUSES,
   isCleanReviewContext,

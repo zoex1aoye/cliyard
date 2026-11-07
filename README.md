@@ -55,12 +55,12 @@ Authoritative detail: [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) · overview
 | **P0** legacy closeout | **done** | Freeze binding |
 | **P1 / P1b** StateStore | **done** | SQLite authority + ledger/journal attach + `.cliyard/state.db` unify |
 | **P2a / P2b** daemon + ExecutionSupervisor | **done** | Read-only Control API; RuntimeHandle (launchd / Job Object residual) |
-| **P3** sandbox + independent verify + clean review | **in progress** | Sandbox/VT/Reviewer/ledger/SkillPack **on mainline**; model Reviewer adapter **open PR** |
+| **P3** sandbox + independent verify + clean review | **in progress** | Sandbox/VT/Reviewer/ledger/SkillPack **on mainline**; acceptance-flow Reviewer wire **open PR** |
 | **P4** routing / admission | **in progress** | ProfileCatalog + opt-in queue admission **on mainline** |
 | **P5** human-machine UI | pending | Control API console |
 | **P6** endpoint acceptance | pending | Vue Liquid Glass TDesign via the tool |
 
-**Next after model Reviewer lands:** acceptance-flow Reviewer wire, and/or routing A/B (not unbounded parallel).
+**Next after acceptance-flow Reviewer lands:** routing A/B, and/or default-on review/VT (not unbounded parallel).
 
 ## What works today (honest)
 
@@ -74,7 +74,7 @@ On mainline today (foreground Supervisor, single-repo lock, sequential queue —
 - WorkspaceBoundary v1: **detection-only** protected-root integrity (independent of sandbox)
 - **Opt-in OS sandbox (P3):** nono `v0.81.0` pin, Landlock-honest measure, `CLIYARD_SANDBOX=1` / `sandbox.enabled` worker wrap (not default-on; no network/credential measure)
 - **Background VerificationTask (P3):** durable `.cliyard/verification/`, detached runner, recovery → `lost`; opt-in `CLIYARD_BACKGROUND_VERIFY=1` batch wire
-- **Clean-context Reviewer v0:** `ReviewFinding` + chat-free context + durable `.cliyard/reviews/` (fixture + injectable model adapter)
+- **Clean-context Reviewer v0:** `ReviewFinding` + chat-free context + durable `.cliyard/reviews/` (fixture + model adapter; opt-in `CLIYARD_CLEAN_REVIEW=1` acceptance wire)
 - **Human intervention ledger v0:** six roles, durable `.cliyard/interventions/`, secret-refusing reasons (observational)
 - **SkillPack provenance v0:** `.agents/skills` digests + durable pack snapshot + run binding
 - Failure taxonomy and cost truth (resume retains abandoned attempts; historical missing has an import constraint)
@@ -83,7 +83,7 @@ On mainline today (foreground Supervisor, single-repo lock, sequential queue —
 - **StateStore** (`cdde392` / `1fd737f`): event-sourced facts + projection; run/queue/ledger/journal write authority on `.cliyard/state.db` when SQLite is available
 - **`cliyardd` + read-only Control API** (`1f4be2d`) and **ExecutionSupervisor / RuntimeHandle** (`6f9e550`)
 
-**P0–P2b are closed on mainline.** P3 through SkillPack + ProfileCatalog/admission gate are on mainline (sandbox/VT/admission **opt-in**); model Reviewer adapter is the open P3 residual slice.
+**P0–P2b are closed on mainline.** P3 through SkillPack + ProfileCatalog/admission gate are on mainline (sandbox/VT/admission/review **opt-in**); acceptance-flow Reviewer wire is the open P3 residual slice.
 
 ## What we do not claim
 
@@ -91,7 +91,7 @@ On mainline today (foreground Supervisor, single-repo lock, sequential queue —
 - Not a dispatch-owning daemon, cross-host recovery, Windows Job Object parity, or 24-hour unattended operation
 - Not automatic Plan approval, automatic `main` merge, or unbounded parallelism
 - Not production-ready dynamic routing / default-on hierarchical admission (catalog + opt-in queue gate exist; no learned ramp)
-- Not an acceptance-wired / live-CLI Reviewer yet; intervention ledger automation / Control API write not shipped
+- Not a default-on / live-CLI Reviewer yet (opt-in acceptance wire exists); intervention ledger automation / Control API write not shipped
 - Not a recommended supervised pilot yet — DCP v2 still needs a human decision; P3 residuals remain
 
 Adjacent products: [docs/OSS_LANDSCAPE.md](docs/OSS_LANDSCAPE.md).  
@@ -169,7 +169,7 @@ Standing rules: [`.agents/rules/`](.agents/rules/). Task SOPs: [`.agents/skills/
 | Execution identity | ExecutionSupervisor / RuntimeHandle | PID/PGID diagnostic only |
 | Safety boundary | WorkspaceBoundary + opt-in SandboxAdapter/nono | Detect always; OS wrap opt-in (`CLIYARD_SANDBOX`) |
 | Independent verify | VerificationTask + optional background Verifier | Detached PG; shell verify still default |
-| Clean review | ReviewFinding / CleanReviewContext (v0) | Fixture + injectable model adapter |
+| Clean review | ReviewFinding / CleanReviewContext (v0) | Fixture + model adapter; opt-in accept wire |
 | Human interventions | Intervention ledger (v0) | Six roles; observational; no auto-execute |
 | Skill provenance | SkillPack digests (v0) | `.agents/skills` → pack digest + run binding |
 | Admission | ProfileCatalog + opt-in queue gate (v0) | Unknown binding permit=1; `CLIYARD_ADMISSION=1` |

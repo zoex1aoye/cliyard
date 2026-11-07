@@ -1,7 +1,7 @@
 # cliyard Current State
 
-> Verified: 2026-11-07 (Asia/Shanghai) — admission queue wire merged
-> (`b88889d` / PR #20); model-backed Reviewer adapter v0 on branch
+> Verified: 2026-11-07 (Asia/Shanghai) — model Reviewer adapter merged
+> (`d47f26e` / PR #21); acceptance-flow Reviewer wire v0 on branch
 > (see evidence).
 >
 > This page is the single current-status authority for implementation order,
@@ -207,12 +207,14 @@ list is its summary. New slices start only after a human-approved Plan.
    Residual: default-on background verify; RuntimeManager-backed verify
    services; cascade stop of owned tasks.
 
-7. **Clean-context Reviewer** — **v0 merged** (`56c1bd2`); **model adapter
-   v0 on branch**: injectable `createModelReviewer` over CleanReviewContext
-   only; findings never grant acceptance. Evidence:
+7. **Clean-context Reviewer** — **v0 + model adapter merged** (`56c1bd2`,
+   `d47f26e`); **acceptance-flow wire v0 on branch**: opt-in
+   `CLIYARD_CLEAN_REVIEW=1` after `verify.ok`; `task.review` observational;
+   findings never flip verdict. Evidence:
    [REVIEWER_CLEAN_CONTEXT_V0.md](evidence/REVIEWER_CLEAN_CONTEXT_V0.md),
-   [REVIEWER_MODEL_ADAPTER_V0.md](evidence/REVIEWER_MODEL_ADAPTER_V0.md).
-   Residual: acceptance-flow wire; live CLI invoker production binding.
+   [REVIEWER_MODEL_ADAPTER_V0.md](evidence/REVIEWER_MODEL_ADAPTER_V0.md),
+   [REVIEWER_ACCEPTANCE_WIRE_V0.md](evidence/REVIEWER_ACCEPTANCE_WIRE_V0.md).
+   Residual: default-on review; live CLI invoker production binding.
 
 8. **Human intervention ledger** — **v0 merged** (`0d96d61`): six roles,
    durable `.cliyard/interventions/`, secret-refusing reasons, observational

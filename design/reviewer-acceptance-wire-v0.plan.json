@@ -1,0 +1,55 @@
+{
+  "planId": "reviewer-acceptance-wire-v0",
+  "tasks": [
+    {
+      "taskId": "reviewer-acceptance-wire-v0",
+      "goal": "Opt-in Reviewer acceptance-flow wire: add src/review/observation.ts (ReviewObservation + guard). Add src/review/acceptance-wire.ts (isCleanReviewEnabled, runAcceptanceReview with bounded git diff + CleanReviewContext + default fixture Reviewer). Wire into src/repair/loop.ts after verify.ok (observational; verdict unchanged) and src/scheduler/codex-batch.ts via cleanReview / CLIYARD_CLEAN_REVIEW=1; persist task.review on RunManifest accept/reject checkpoints with parse guard in src/supervisor/store.ts + types. Export from src/review/index.ts. tests/reviewer-acceptance-wire.test.ts. Evidence REVIEWER_ACCEPTANCE_WIRE_V0.md + CURRENT_STATE/ROADMAP/README bilingual.",
+      "nonGoals": [
+        "Do not default-on for every production batch.",
+        "Do not let findings accept, reject, or merge.",
+        "Do not call a live provider in default tests.",
+        "Do not replace Verifier / VerificationTask."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/reviewer-acceptance-wire-v0.md",
+        "design/reviewer-model-adapter-v0.md",
+        "src/repair/loop.ts",
+        "src/scheduler/codex-batch.ts",
+        "src/review/fixture-reviewer.ts",
+        "src/review/context.ts",
+        "src/supervisor/types.ts",
+        "src/supervisor/store.ts"
+      ],
+      "writePaths": [
+        "src/review/observation.ts",
+        "src/review/acceptance-wire.ts",
+        "src/review/index.ts",
+        "src/repair/loop.ts",
+        "src/scheduler/codex-batch.ts",
+        "src/supervisor/types.ts",
+        "src/supervisor/store.ts",
+        "tests/reviewer-acceptance-wire.test.ts",
+        "docs/evidence/REVIEWER_ACCEPTANCE_WIRE_V0.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md",
+        "README.md",
+        "README.zh-CN.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/reviewer-acceptance-wire.test.ts tests/reviewer-model-adapter.test.ts tests/reviewer-clean-context.test.ts"
+      ],
+      "deliverables": [
+        "Opt-in clean review observation on accept path.",
+        "Focused tests + evidence + status docs."
+      ],
+      "forbidden": [
+        "Do not change loop verdict from review findings.",
+        "Do not persist provider transcripts on RunManifest.",
+        "Do not add default-on clean review."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}
