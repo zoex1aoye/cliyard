@@ -100,22 +100,21 @@ DSH、WorkBuddy 或未来自有 Web UI 是可替换人机入口；cliyard 负责
 
 ## 6. 当前安全与能力事实
 
-截至 2026-10-29，当前路线已调整为“先可信，再持续”：
+截至 2026-11-08，**止损**：现行 MVP 执行线是 **DSH / Cordis 插件**
+（`dsh-plugin-cliyard`，M0 / M0.5 / M1–M4），不再加深自研 SQLite ledger /
+Landlock / 端口租约 / 进程树 ownership。主线 P0–P4 至 `ba2f458` 保留为库存；
+Routing A 停泊。
 
-1. 人工审阅并决定是否集成 v1.2 候选 `7b4544f`（无自动合入）；
-2. Harness Eval v0；
-3. 独立生命周期的 background `VerificationTask`；
-4. provider-neutral `SandboxProvider`；
-5. clean-context Reviewer 与结构化 `ReviewFinding`；
-6. audit-first 的 human intervention ledger；
-7. `SkillPack` provenance；
-8. ProfileCatalog、动态路由与分层 admission；
-9. 版本化 Control API 与可替换 UI。
+- MVP 细则（省下什么、可借/必自研、阶段门禁）：
+  [design/dsh-plugin-mvp-roadmap-v0.md](design/dsh-plugin-mvp-roadmap-v0.md)
+- 契约草案：
+  [design/dsh-plugin-cliyard-taskcontract-v0.md](design/dsh-plugin-cliyard-taskcontract-v0.md)
+- Master system 人设：
+  [design/dsh-master-persona-v0.md](design/dsh-master-persona-v0.md)
 
-WorkspaceBoundary v1 与 WorkerProcessTree v1.1 已验收但尚未合入当前主分支；
-controller-death nested-process 的 `af76d3a` / `a9d6e00` 是 reviewed draft，
-不是 accepted integration。完整事实、分支、current priority 和 release gate
-只以 [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) 为准；产品理由见
+完整事实、分支、current priority 和 release gate 只以
+[docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) 为准；路线概览见
+[docs/ROADMAP.md](docs/ROADMAP.md)。产品理由见
 [design/continuous-harness-v2.md](design/continuous-harness-v2.md)，历史缺口见
 [KNOWN_GAPS_2026-10-28.md](docs/KNOWN_GAPS_2026-10-28.md)。
 

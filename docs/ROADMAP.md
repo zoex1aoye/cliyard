@@ -1,124 +1,71 @@
 # Development Roadmap
 
-> Updated 2026-11-07 (Asia/Shanghai). Sequencing map only; the current
+> Updated 2026-11-08 (Asia/Shanghai). Sequencing map only; the current
 > implementation order remains the authority in
-> [CURRENT_STATE.md](./CURRENT_STATE.md). The architecture this map follows is
-> [delivery-control-plane-v2.md](../design/delivery-control-plane-v2.md).
+> [CURRENT_STATE.md](./CURRENT_STATE.md).
+>
+> **Stop-loss:** MVP = **DSH / Cordis plugin** (`dsh-plugin-cliyard`).
+> Detail roadmap (savings, borrow/build, stage gates):
+> [dsh-plugin-mvp-roadmap-v0.md](../design/dsh-plugin-mvp-roadmap-v0.md).
+> Contract:
+> [dsh-plugin-cliyard-taskcontract-v0.md](../design/dsh-plugin-cliyard-taskcontract-v0.md).
+> Master persona:
+> [dsh-master-persona-v0.md](../design/dsh-master-persona-v0.md).
 
-## Endpoint
+## Endpoint (unchanged user story)
 
-> 用 cliyard 开一个 **Vue 项目**，定制开发 **iOS 26 液态玻璃（Liquid Glass）
-> 主题的 TDesign 组件库**，全程有可用的人机面：人只开头定方向与边界、中间
-> 在看板可视、结尾审证据后合入。
+> 在 DSH 里整理 Plan → 人冻结契约 → **派本机 CLI** 到隔离 worktree →
+> 监控状态 → 独立 verify → 人审合入。  
+> Cordis/DSH 只提供会话、dispose、跨平台壳；不替代本机 Worker。
 
-The endpoint has three inseparable parts:
+Canonical story: [USER_STORY_STEP1.md](./USER_STORY_STEP1.md).  
+Prototypes: [design/prototypes/step1-user-story/](../design/prototypes/step1-user-story/).
 
-1. a working control plane that turns design into evidence (already the core);
-2. a **human-machine interface** — a task board, dependency view, event stream,
-   evidence, approval and cost read through one Control API;
-3. a real delivery proof — the Liquid Glass TDesign Vue component library built
-   through the tool itself.
+## What the stop-loss saves
 
-## Phases
+| Frozen (do not deepen for MVP) | Replaced by |
+|---|---|
+| SQLite ledger / event-sourcing deepen | Cordis memory + stock persist |
+| Landlock / nono default-on productization | cwd cage; optional docker/low-priv |
+| Port-lease RuntimeManager productization | Out of MVP envelope |
+| Process-tree pid/pgid/lstart ownership | `subCtx.on('dispose')` |
+| Routing A–B / admission product deepen | Contract `driver.target` registry |
+| Home-grown Master chat / agent loop | DSH session + system persona |
 
-| Phase | Status on mainline | Deliverable | Deferred / residual |
-|---|---|---|---|
-| P0 封刀 | **complete** | Cost-truth + pilot closeout + stack land; freeze binding | — |
-| P1 StateStore | **complete** (`cdde392`) | SQLite event-sourced store + read projection | — |
-| P1b write cutover | **complete** (`1fd737f` + production ledger/journal attach + path unify) | Run + queue + ledger + journal single-writer on `.cliyard/state.db` | — |
-| P2a daemon + Control API | **complete** (`1f4be2d`) | `cliyardd` + read-only `/v1/status|events|runs` | Write/auth + daemon-owned dispatch deferred to P5 |
-| P2b ExecutionSupervisor | **complete** (`6f9e550`) | RuntimeHandle authority + continuity + conformance | launchd / systemd-run / Job Object backends |
-| P3 沙箱 + 独立验收 + 干净裁决 | **acceptance-flow Reviewer wire merged** | Opt-in sandbox + VT + Reviewer + interventions + SkillPack on mainline | default-on review/VT/sandbox; live CLI reviewer |
-| P4 路由 + 分层并行 | **router→queue wire on PR** | Catalog + opt-in admission + Routing B + opt-in queue select/gate | Routing A; default-on; learned ramp |
-| P5 人机面 | pending | Web console over Control API; DSH thin client | desktop packaging |
-| P6 终点验收 | pending | Vue + Liquid Glass TDesign through the tool itself | — |
+**Still ours:** Master persona text, TaskContract freeze, CLI↔contract bind,
+writeRoots semantics, human merge gate, deterministic verify.
 
-## Phase detail
+## Active MVP stages
 
-### P0 — close the legacy seam (complete)
+| Stage | Status | Gate |
+|---|---|---|
+| **M0** TaskContract shell | draft on disk | Schema + code mock fixture |
+| **M0.5** Master system persona | design landed | New DSH session carries Master law (system layer) |
+| **M1** Idle spin + cwd lock | **next implement** | `/cliyard-test`: worktree + `local-cli` spawn; trunk clean |
+| **M2** Dispose (+ optional wrap) | pending | Cancel kills child; no Landlock claim |
+| **M3** Compiler + `/freeze` | pending | No dispatch without human freeze |
+| **M4** Demo (code CLI + second scene) | pending | Same schema; human review; no auto-merge |
 
-See [P0_LEGACY_SEAM_FREEZE.md](./P0_LEGACY_SEAM_FREEZE.md). Binding on mainline.
+```text
+DSH / Cordis
+  └── dsh-plugin-cliyard
+        ├── master persona (systemPrompt)
+        ├── compiler → Plan.json
+        ├── contract → /freeze → TaskContract.json
+        └── drivers → local-cli | (later) dsh-llm | external-api
+              └── verify → dispose
+```
 
-### P1 / P1b — StateStore (complete; residual attach)
+Borrow first where listed in the MVP doc (§3): conductor / worktrees /
+prompt-layer / proof·verify. Do not copy auto-merge-to-main boards.
 
-Merged: `cdde392`, `1fd737f`. `better-sqlite3` is the declared durable driver;
-JSON-file fallback remains when the native module is missing. Evidence:
-[STATESTORE_WRITE_CUTOVER.md](./evidence/STATESTORE_WRITE_CUTOVER.md),
-[STATESTORE_SQLITE_AUTHORITY.md](./evidence/STATESTORE_SQLITE_AUTHORITY.md).
+## Frozen mainline inventory
 
-Ledger/journal production attach evidence:
-[LEDGER_JOURNAL_PRODUCTION_CUTOVER.md](./evidence/LEDGER_JOURNAL_PRODUCTION_CUTOVER.md).
-Path unification evidence:
-[STATESTORE_PATH_UNIFY.md](./evidence/STATESTORE_PATH_UNIFY.md).
-Honor
-[COST_TRUTH_HISTORICAL_MISSING.md](./evidence/COST_TRUTH_HISTORICAL_MISSING.md)
-on import. Canonical authority is `.cliyard/state.db` for all control domains.
+P0–P4 through `ba2f458` stay as optional later reuse. Routing A PR **parked**.
+Unfreeze only after M1–M4 demo evidence + a new human Plan.
 
-### P2a / P2b — daemon and execution layer (complete; residual backends)
+## Non-goals until MVP demo
 
-Merged: `1f4be2d`, `6f9e550`. Foreground Supervisor may still dispatch; daemon
-owns read API and state lease. ExecutionSupervisor establishes RuntimeHandle
-authority; launchd-class backends and nested controller-death recovery remain.
-
-### P3 — sandbox, verification, review
-
-P3 adapter v0 + P3b wrap/measure + P3c batch wire: SandboxAdapter + nono
-`v0.81.0` pin + capability gate + observational SandboxReport + `nono wrap`
-helper + filesystem enforcement measurement + opt-in
-`prepareWorkerSandbox` / `CLIYARD_SANDBOX=1` production spawn wire
-([SANDBOX_ADAPTER_NONO_V0.md](./evidence/SANDBOX_ADAPTER_NONO_V0.md),
-[SANDBOX_NONO_WORKER_WRAP.md](./evidence/SANDBOX_NONO_WORKER_WRAP.md),
-[SANDBOX_BATCH_WIRE.md](./evidence/SANDBOX_BATCH_WIRE.md)).
-VerificationTask v0 (durable model, detached runner, recovery → `lost`):
-[VERIFICATION_TASK_V0.md](./evidence/VERIFICATION_TASK_V0.md).
-Opt-in batch wire (`createBackgroundVerifier` /
-`CLIYARD_BACKGROUND_VERIFY=1`):
-[VERIFICATION_BATCH_WIRE.md](./evidence/VERIFICATION_BATCH_WIRE.md).
-Clean-context Reviewer v0 (findings + chat-free context + durable session):
-[REVIEWER_CLEAN_CONTEXT_V0.md](./evidence/REVIEWER_CLEAN_CONTEXT_V0.md).
-Model-backed Reviewer adapter v0 (injectable CleanReviewContext-only path):
-[REVIEWER_MODEL_ADAPTER_V0.md](./evidence/REVIEWER_MODEL_ADAPTER_V0.md).
-Opt-in acceptance-flow Reviewer wire (`CLIYARD_CLEAN_REVIEW=1`):
-[REVIEWER_ACCEPTANCE_WIRE_V0.md](./evidence/REVIEWER_ACCEPTANCE_WIRE_V0.md).
-Human intervention ledger v0 (six roles, secret-free durable events):
-[INTERVENTION_LEDGER_V0.md](./evidence/INTERVENTION_LEDGER_V0.md).
-SkillPack provenance v0 (skill digests + run binding):
-[SKILLPACK_PROVENANCE_V0.md](./evidence/SKILLPACK_PROVENANCE_V0.md).
-Next within P3 residuals: default-on review/VT/sandbox; live CLI reviewer.
-
-### P4 — routing and hierarchical parallelism
-
-ProfileCatalog + hierarchical admission v0 (activated catalog, unknown
-permit=1, conjunctive min):
-[PROFILE_CATALOG_ADMISSION_V0.md](./evidence/PROFILE_CATALOG_ADMISSION_V0.md).
-Opt-in queue wire (`CLIYARD_ADMISSION=1`, deny ⇒ pending):
-[ADMISSION_QUEUE_WIRE_V0.md](./evidence/ADMISSION_QUEUE_WIRE_V0.md).
-Execution routing (Routing B) v0 — activated-catalog profile selection:
-[EXECUTION_ROUTING_V0.md](./evidence/EXECUTION_ROUTING_V0.md).
-Opt-in router→queue wire (`CLIYARD_ROUTING=1`, add select + run gate):
-[ROUTING_QUEUE_WIRE_V0.md](./evidence/ROUTING_QUEUE_WIRE_V0.md).
-Residual: Routing A (design attribution); default-on gate; learned 429
-ramp. Admission must keep considering provider quota, CPU/RAM, ports and
-non-overlapping write scope — none are auto-unlimited.
-
-### P5 — human-machine interface
-
-A local web console reads the versioned Control API: board, DAG, event replay,
-evidence bundles, approval actions and cost truth. DSH stays a replaceable
-entry; the console is the endpoint UI.
-
-### P6 — endpoint acceptance
-
-The Vue + Liquid Glass TDesign component library is the acceptance driver:
-frozen glass tokens and material layers first, then parallel reference
-components, verified by build, unit tests, same-viewport screenshots, axe and
-`prefers-reduced-motion`, accepted only through clean review and human diff.
-
-## Non-goals until the endpoint
-
-- OS sandbox before a human-reviewed P3 Plan (after DCP v2 review).
-- dynamic routing before background verification and clean review.
-- desktop packaging or multi-user UI before the web console proves the read
-  model.
-- Claiming SQLite write authority for ledger/journal before those entrypoints
-  attach.
+- 24h unattended / auto-merge main / unbounded parallel claims
+- Deepening SQLite / Landlock / port lease / process-tree ownership
+- Treating chat as design or acceptance truth

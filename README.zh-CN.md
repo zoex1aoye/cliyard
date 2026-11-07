@@ -51,17 +51,19 @@ English: [README.md](README.md)
 
 权威细节：[docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) · 概览：[docs/ROADMAP.md](docs/ROADMAP.md)。
 
-| 阶段 | 主线 | 说明 |
-|---|---|---|
-| **P0** 封刀 | **完成** | 冻结面已绑定 |
-| **P1 / P1b** StateStore | **完成** | SQLite 权威 + ledger/journal 挂接 + `.cliyard/state.db` 统一 |
-| **P2a / P2b** daemon + ExecutionSupervisor | **完成** | 只读 Control API；RuntimeHandle（launchd / Job Object 仍残留） |
-| **P3** 沙箱 + 独立验收 + 干净裁决 | **进行中** | 沙箱/VT/Reviewer/ledger/SkillPack + acceptance-flow review **已在主线**（仍 opt-in） |
-| **P4** 路由 / 准入 | **进行中** | Catalog + admission gate **已在主线**；execution routing（Routing B）**开 PR 中** |
-| **P5** 人机面 | 未开始 | Control API 控制台 |
-| **P6** 终点验收 | 未开始 | 用工具交付 Vue Liquid Glass TDesign |
+**止损（2026-11-08）：** 现行 MVP 是 DSH/Cordis 上的 **`dsh-plugin-cliyard`**，不再加深自研 SQLite / Landlock / 端口租约 / 进程树 ownership。契约草案：[design/dsh-plugin-cliyard-taskcontract-v0.md](design/dsh-plugin-cliyard-taskcontract-v0.md)。
 
-**Routing B 合入后的下一刀：** router→queue 挂接，和/或 Routing A（设计归因）——不是无限并行。
+| 轨道 | 状态 | 说明 |
+|---|---|---|
+| **M0** TaskContract 外壳 | **草案** | 通用 `intent` / `workspace` / `driver` / `verify` / `cleanup` |
+| **M0.5** Master system 人设 | **设计已落** | systemPrompt 宪法，不只靠 AGENTS.md |
+| **M1** 空转 + 目录锁 | **下一步** | `/cliyard-test` mock → worktree → `local-cli` spawn |
+| **M2** dispose + 可选包裹 | 未开始 | Cordis dispose；可选 docker/low-priv |
+| **M3** Compiler + `/freeze` | 未开始 | 会话 → Plan → 人工冻结 |
+| **M4** 三场景演示 | 未开始 | 代码 / 小说 / 短剧同一 Schema |
+| 主线 P0–P4 库存 | **MVP 冷冻** | 保留至 `ba2f458`；Routing A 停泊 |
+
+**下一步：** M0 Schema 夹具 + M0.5 人设挂载 → M1 空转。细则：[design/dsh-plugin-mvp-roadmap-v0.md](design/dsh-plugin-mvp-roadmap-v0.md)。
 
 ## 今天能做什么（诚实版）
 
@@ -84,16 +86,16 @@ English: [README.md](README.md)
 - **StateStore**（`cdde392` / `1fd737f`）：事件溯源 facts + projection；SQLite 可用时 run/queue/ledger/journal 写权威在 `.cliyard/state.db`
 - **`cliyardd` + 只读 Control API**（`1f4be2d`）与 **ExecutionSupervisor / RuntimeHandle**（`6f9e550`）
 
-**P0–P2b 已在主线封完。** P3 至 SkillPack + Reviewer acceptance wire + ProfileCatalog/admission 已上主线（**opt-in** 闸门）；当前打开切片是 execution routing（Routing B，P4）。
+**主线 P0–P4 库存仍在**（至 `ba2f458` 的 Routing B queue wire，多为 opt-in），但 **MVP 不再加深**。现行工作是 DSH 插件轨道（M0–M4）。
 
 ## 今天还不能宣称什么
 
-- 不是默认开启的 OS 写保护；不是凭据 / 网络隔离（Boundary 仍是事后检测）
-- 不是拥有派发权的 daemon、跨宿主恢复、Windows Job Object 对等、24 小时无人值守
+- 不是 DSH 插件 MVP 已跑通——M0 仅草案；M1 证据未落地
+- 不是默认开启的 OS 写保护；不是凭据 / 网络隔离
+- 不是拥有派发权的 daemon、Job Object 对等、24 小时无人值守
 - 不是自动批准 Plan、自动合入 `main`、无限并行
-- 不是已完成的 Routing A / 已挂 queue 的 router / default-on admission 生产就绪（Routing B 选择器 + opt-in gate 已有；无 learned ramp）
-- 不是 default-on / live-CLI Reviewer（opt-in acceptance wire 已有）；intervention ledger 自动化 / Control API 写面尚未交付
-- 不是 supervised pilot「已推荐」——仍差 DCP v2 人工决策与 P3 残留门禁
+- 不是继续把 Landlock / SQLite ledger / 进程树 ownership 当 MVP 主路径
+- 不是在没有插件演示证据与新 Plan 之前解冻主线模块
 
 对照表与相邻产品见 [docs/OSS_LANDSCAPE.md](docs/OSS_LANDSCAPE.md)。  
 与 ThinkRail 一类「围绕单一 coding engine 的 agentic IDE」不同：cliyard 做的是 **engine-agnostic 的交付控制面**，人机面可替换。

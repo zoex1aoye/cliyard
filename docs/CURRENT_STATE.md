@@ -1,16 +1,20 @@
 # cliyard Current State
 
-> Verified: 2026-11-07 (Asia/Shanghai) — Routing B merged (`73b7e50` /
-> PR #23); router→queue wire (opt-in `CLIYARD_ROUTING`) on branch
-> (see evidence).
+> Verified: 2026-11-08 (Asia/Shanghai) — **stop-loss**: active MVP line is
+> **DSH / Cordis plugin** (`dsh-plugin-cliyard`), not further self-built
+> runtime/OS ownership. Mainline through PR #24 (`ba2f458`) is inventory.
+> Routing A PR is **parked**. Contract draft:
+> [dsh-plugin-cliyard-taskcontract-v0.md](../design/dsh-plugin-cliyard-taskcontract-v0.md).
+> Roadmap: [ROADMAP.md](ROADMAP.md) · MVP detail:
+> [dsh-plugin-mvp-roadmap-v0.md](../design/dsh-plugin-mvp-roadmap-v0.md).
 >
 > This page is the single current-status authority for implementation order,
 > known gaps and the next executable slice. Product rationale remains in
 > `KEY_MIND.md`, `PRODUCT_STRATEGY_V2.md` and
 > `design/continuous-harness-v2.md`; those documents must not maintain a second
-> competing "current next step". Architecture direction for the rewrite is
-> `design/delivery-control-plane-v2.md` (reviewed draft; human approval still
-> required before further P3+ Plans are frozen for dispatch).
+> competing "current next step". Native-first DCP v2
+> (`design/delivery-control-plane-v2.md`) stays a reviewed draft under the
+> **frozen** line — not the active MVP build order.
 
 Git history, frozen contracts, RunManifest and evidence remain the authorities
 for exact code and run facts. This page summarizes their current relationship.
@@ -146,98 +150,60 @@ neither earlier RunManifest is retroactively accepted.
 
 ## Current priority
 
-The order is a dependency order, not a promise of parallel delivery. The
-full rationale and open decisions live in
-[delivery-control-plane-v2.md](../design/delivery-control-plane-v2.md); this
-list is its summary. New slices start only after a human-approved Plan.
+**Active build order = DSH plugin MVP (M0–M4).** See [ROADMAP.md](ROADMAP.md).
+Do not start new mainline knives that deepen the frozen inventory below.
 
-0. **Human review of Delivery Control Plane v2** — approve or amend the
-   native-first execution design before further P3+ Plans are frozen for
-   dispatch. Still open.
+### Active — dsh-plugin-cliyard
 
-1. **P0 legacy-seam closeout** — **complete** (`a0609e8`, freeze binding).
+Detail: [dsh-plugin-mvp-roadmap-v0.md](../design/dsh-plugin-mvp-roadmap-v0.md).
+Master persona: [dsh-master-persona-v0.md](../design/dsh-master-persona-v0.md).
 
-2. **P1 / P1b StateStore** — **complete on mainline** (`cdde392`, `1fd737f`).
-   SQLite driver declared and measured
-   ([STATESTORE_SQLITE_AUTHORITY.md](evidence/STATESTORE_SQLITE_AUTHORITY.md)).
-   Ledger + event-journal **production attach** wired
-   ([LEDGER_JOURNAL_PRODUCTION_CUTOVER.md](evidence/LEDGER_JOURNAL_PRODUCTION_CUTOVER.md));
-   control-plane StateStore path **unified** on `.cliyard/state.db`
-   ([STATESTORE_PATH_UNIFY.md](evidence/STATESTORE_PATH_UNIFY.md));
-   honor
-   [COST_TRUTH_HISTORICAL_MISSING.md](evidence/COST_TRUTH_HISTORICAL_MISSING.md)
-   on any remaining import. Residual: non-repo fixture ledger paths still use
-   JSON (unit-test only).
+0. **M0 TaskContract shell (draft)** — `intent` + `workspace` + `driver`
+   (`local-cli` | `dsh-llm` | `external-api`) + `verify` + `cleanup`.
+   Next: JSON Schema + code mock fixture.
 
-3. **P2a daemon + Control API** — **complete on mainline** (`1f4be2d`).
-   Read-only `/v1/status|events|runs` remains. Authenticated write/action
-   endpoints and daemon-owned dispatch are **deferred** (P5 human-machine /
-   Control API write surface), not a blocking residual before P3.
+1. **M0.5 Master system persona** — systemPrompt / personaPrefix (not only
+   AGENTS.md). Text in `dsh-master-persona-v0.prompt.txt`.
 
-4. **P2b ExecutionSupervisor** — **complete on mainline** (`6f9e550`).
-   Residual: launchd / systemd-run / Windows Job Object backends beyond the
-   POSIX process-group capability label; controller-death nested-group recovery
-   still open.
+2. **M1 idle spin + cwd lock** — `/cliyard-test`: mock contract → worktree →
+   `local-cli` spawn; trunk untouched. Borrow worktree/conductor where useful.
 
-5. **P3 SandboxAdapter + nono (native-first)** — **v0 + P3b + P3c batch wire
-   landed**: provider-neutral `SandboxAdapter`, capability gate, nono pin
-   **`v0.81.0`**, observational `SandboxReport`, `nono wrap` argv builder,
-   filesystem-enforcement measurement (Landlock-honest), opt-in
-   `processTree.spawn({ sandboxWrap })`, and production wire
-   (`prepareWorkerSandbox` → codex/claude spawn → `LoopResult.sandbox` →
-   RunManifest `task.sandbox`) behind `sandbox.enabled` /
-   `CLIYARD_SANDBOX=1`. Evidence:
-   [SANDBOX_ADAPTER_NONO_V0.md](evidence/SANDBOX_ADAPTER_NONO_V0.md),
-   [SANDBOX_NONO_WORKER_WRAP.md](evidence/SANDBOX_NONO_WORKER_WRAP.md),
-   [SANDBOX_BATCH_WIRE.md](evidence/SANDBOX_BATCH_WIRE.md).
-   Filesystem isolation is `partial` only when measurement passes; otherwise
-   `unsupported`. This host has Landlock active; an early `/tmp`-based probe
-   was a false negative (fixed to home-scoped measure). Residual: default-on
-   wrap for every production batch (still opt-in); network/credential
-   measurement; microVM tier. WorkspaceBoundary remains the independent
-   post-run detection fallback.
+3. **M2 dispose + optional wrap** — Cordis `dispose`; optional docker/low-priv.
+   Not Landlock as MVP path.
 
-6. **Background VerificationTask** — **v0 + opt-in batch wire merged**
-   (`0fadc1a`, `3d88342`): durable `.cliyard/verification/`, detached worker
-   PG, offset + delivery latch, startup orphan → `lost`,
-   `createBackgroundVerifier` / `CLIYARD_BACKGROUND_VERIFY=1` / manifest
-   `task.verification`. Evidence:
-   [VERIFICATION_TASK_V0.md](evidence/VERIFICATION_TASK_V0.md),
-   [VERIFICATION_BATCH_WIRE.md](evidence/VERIFICATION_BATCH_WIRE.md).
-   Residual: default-on background verify; RuntimeManager-backed verify
-   services; cascade stop of owned tasks.
+4. **M3 Compiler + `/freeze`** — session → Plan → human freeze → immutable bytes.
 
-7. **Clean-context Reviewer** — **v0 + model adapter + acceptance wire
-   merged** (`56c1bd2`, `d47f26e`, `a5d1c47`): opt-in
-   `CLIYARD_CLEAN_REVIEW=1` after `verify.ok`; `task.review` observational;
-   findings never flip verdict. Evidence:
-   [REVIEWER_CLEAN_CONTEXT_V0.md](evidence/REVIEWER_CLEAN_CONTEXT_V0.md),
-   [REVIEWER_MODEL_ADAPTER_V0.md](evidence/REVIEWER_MODEL_ADAPTER_V0.md),
-   [REVIEWER_ACCEPTANCE_WIRE_V0.md](evidence/REVIEWER_ACCEPTANCE_WIRE_V0.md).
-   Residual: default-on review; live CLI invoker production binding.
+5. **M4 demos** — code local-CLI + one second scene on the same schema.
 
-8. **Human intervention ledger** — **v0 merged** (`0d96d61`): six roles,
-   durable `.cliyard/interventions/`, secret-refusing reasons, observational
-   only. Evidence:
-   [INTERVENTION_LEDGER_V0.md](evidence/INTERVENTION_LEDGER_V0.md).
-   Residual: automation of repeated Retry/Carry/Trigger; Control API surface.
+Soul kept: design-as-truth, workspace cage, deterministic verify, human freeze.
+Infrastructure borrowed: DSH session/LLM, Cordis dispose, community worktree/CLI
+bridges where they do not own acceptance authority.
 
-9. **SkillPack provenance** — **v0 merged** (`8e33df3`): digest
-   `.agents/skills`, durable pack snapshot + run binding. Evidence:
-   [SKILLPACK_PROVENANCE_V0.md](evidence/SKILLPACK_PROVENANCE_V0.md).
-   Residual: RunManifest field; eval-gated default pack promotion.
+### Frozen — mainline inventory (do not deepen for MVP)
 
-10. **ProfileCatalog, routing and hierarchical admission** — **catalog +
-    opt-in admission gate + Routing B merged** (`1993cc4`, `b88889d`,
-    `73b7e50`); **router→queue wire on branch** (`CLIYARD_ROUTING=1`):
-    add-time activated-catalog select (no legacy invent) + run-time
-    activated gate (`routing-denied` ⇒ pending). Evidence:
-    [PROFILE_CATALOG_ADMISSION_V0.md](evidence/PROFILE_CATALOG_ADMISSION_V0.md),
-    [ADMISSION_QUEUE_WIRE_V0.md](evidence/ADMISSION_QUEUE_WIRE_V0.md),
-    [EXECUTION_ROUTING_V0.md](evidence/EXECUTION_ROUTING_V0.md),
-    [ROUTING_QUEUE_WIRE_V0.md](evidence/ROUTING_QUEUE_WIRE_V0.md).
-    Residual: Routing A (design attribution); default-on admission/routing;
-    learned 429 ramp; intra-item ready-wave.
+P0–P4 work already on `codex/supervisor-v0-baseline` through `ba2f458`
+remains valid history and optional later reuse. While the plugin MVP is
+active, treat the following as **frozen**, not next knives:
+
+- **StateStore / SQLite ledger deepen** — complete through path unify; freeze
+  further event-sourcing productization for MVP.
+- **Daemon write/auth, launchd / Job Object, nested process-tree reclaim** —
+  freeze.
+- **Landlock / nono default-on productization** — opt-in code may stay; freeze
+  as MVP dependency.
+- **RuntimeManager port-lease productization** — freeze for MVP.
+- **Routing A / Architect wire / default-on admission / learned 429** —
+  Routing A PR **parked**; no further P4 knives until MVP evidence exists.
+
+Evidence pointers for inventory (not active order):
+[STATESTORE_SQLITE_AUTHORITY.md](evidence/STATESTORE_SQLITE_AUTHORITY.md),
+[SANDBOX_BATCH_WIRE.md](evidence/SANDBOX_BATCH_WIRE.md),
+[VERIFICATION_BATCH_WIRE.md](evidence/VERIFICATION_BATCH_WIRE.md),
+[REVIEWER_ACCEPTANCE_WIRE_V0.md](evidence/REVIEWER_ACCEPTANCE_WIRE_V0.md),
+[ROUTING_QUEUE_WIRE_V0.md](evidence/ROUTING_QUEUE_WIRE_V0.md).
+
+Native-first DCP v2 human review remains open as a **later** unfreeze gate,
+not a blocker for M1 plugin idle-spin.
 
 ## Actual-project readiness
 
@@ -245,40 +211,36 @@ These are capability gates, not date estimates or a percentage score.
 
 | Use mode | Current assessment | Gate before use |
 |---|---|---|
-| Supervised single-repository pilot | Near, but not yet recommended | Complete DCP v2 review; land P3 sandbox gate; keep human Plan/diff gates; do not claim readiness from P1–P2b land alone |
-| Small-team real project | Not ready | Add background verification, OS-level write isolation, authenticated Control API/event replay, stable DSH compatibility, and intervention history |
-| Parallel multi-module delivery | Not ready | Background verifier, per-run ownership, provider/runtime admission, deterministic integration lineage and measured DSH/UI lifecycle behavior |
-| Overnight or 24-hour unattended operation | Far | Durable controller/daemon recovery, complete process ownership, provider quota/balance handling, bounded soak, incident recovery and an auditable human-escalation path |
+| DSH plugin idle-spin (M1) | **Active target** | Mock contract + worktree/cwd spawn evidence; dispose on cancel |
+| Supervised local-CLI pilot via DSH | Not ready | M1–M2 green; human `/freeze`; one real `local-cli` target |
+| Multi-scene creator demo (novel/drama) | Not ready | M3–M4 on same TaskContract shell |
+| Legacy mainline unsupervised / 24h | Far (frozen path) | Not MVP; do not claim from P0–P4 inventory alone |
 
-Candidate pilot envelope after the reliability and monitor-security gates:
+Candidate MVP envelope:
 
-- one trusted repository on one macOS host;
-- Claude Code using the currently exercised DeepSeek compatibility profile,
-  with no production guarantee for other models or providers;
-- one foreground Supervisor or explicitly sequenced runs;
-- human Plan approval, human diff review and no automatic merge or push;
-- no claim of OS sandboxing, unlimited parallel work or unattended operation.
-
-The first credible supervised pilot should start only after item 0 (DCP v2
-review) has a human decision and P3 sandbox / background verification gates
-are credible. P0–P2b are on mainline; residual attach and backend gaps remain.
-Team use additionally requires clean-context review and authenticated
-event/action API gates.
+- develop as **dsh-plugin-cliyard** on DSH/Cordis;
+- local CLI dispatch is the highest-priority driver (`local-cli`);
+- workspace cage via `git worktree` / assets + `writeRoots`;
+- process reclaim via Cordis dispose, not a custom ownership ledger;
+- human Plan approve + `/freeze`; no auto-merge;
+- no claim of default-on OS sandbox, unbounded parallel, or 24h unattended.
 
 ## Release gates
 
-Before claiming a continuously working harness:
+### MVP gates (active)
 
-- every controller restart resumes from disk rather than chat history;
-- every background verifier survives Worker exit and has startup recovery;
-- a clean-context review is independent of the author's session;
-- one controlled eval shows no must-not-break regression;
-- sandbox and cleanup evidence bind to exact identities and commits;
-- terminal evidence is assembled after Worker exit, path audit, cleanup and cost
-  finalization;
-- human interventions and their outcomes are auditable;
-- parallel admission is observed, not hard-coded to three;
-- accepted branches still require a human integration decision;
-- a bounded soak has evidence. Until then, "24-hour continuous delivery" is a
-  target, not a capability claim.
+Before claiming the DSH plugin MVP works:
+
+- M1: mock contract spawn locks `cwd` to workspace; trunk untouched;
+- M2: cancel/dispose reclaims the child on the exercised OS;
+- M3: human `/freeze` produces immutable TaskContract bytes;
+- M4: at least two scenes demo on the same schema;
+- no secrets/absolute tool paths in contracts;
+- accepted plugin demos still require human review before any mainline unfreeze.
+
+### Frozen-line gates (not MVP blockers)
+
+The older continuous-harness gates (disk resume, background verifier survival,
+clean-context review, Landlock identity bind, parallel admission observation,
+24h soak) remain **targets for a later unfreeze**, not prerequisites for M1.
 
