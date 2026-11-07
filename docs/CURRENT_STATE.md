@@ -1,7 +1,7 @@
 # cliyard Current State
 
-> Verified: 2026-11-07 (Asia/Shanghai) — P3c merged (`1a930e4` / PR #13);
-> VerificationTask v0 implemented on branch (see evidence).
+> Verified: 2026-11-07 (Asia/Shanghai) — P3c + VerificationTask v0 merged
+> (`0fadc1a` / PR #14); VT batch wire on branch (see evidence).
 >
 > This page is the single current-status authority for implementation order,
 > known gaps and the next executable slice. Product rationale remains in
@@ -196,14 +196,15 @@ list is its summary. New slices start only after a human-approved Plan.
    measurement; microVM tier. WorkspaceBoundary remains the independent
    post-run detection fallback.
 
-6. **Background VerificationTask** — **v0 model/runner/recovery landed**
-   (branch evidence; not yet mainline): durable record under
-   `.cliyard/verification/`, detached worker PG, output offset + delivery
-   latch, startup orphan → `lost`. Evidence:
-   [VERIFICATION_TASK_V0.md](evidence/VERIFICATION_TASK_V0.md).
-   Residual: replace synchronous `createShellVerifier` inside
-   `runClosedLoop` / batch wire; RuntimeManager-backed verify services;
-   cascade stop of owned tasks.
+6. **Background VerificationTask** — **v0 merged** (`0fadc1a`); **opt-in
+   batch wire** on branch: durable `.cliyard/verification/`, detached worker
+   PG, offset + delivery latch, startup orphan → `lost`, plus
+   `createBackgroundVerifier` / `CLIYARD_BACKGROUND_VERIFY=1` / manifest
+   `task.verification`. Evidence:
+   [VERIFICATION_TASK_V0.md](evidence/VERIFICATION_TASK_V0.md),
+   [VERIFICATION_BATCH_WIRE.md](evidence/VERIFICATION_BATCH_WIRE.md).
+   Residual: default-on background verify; RuntimeManager-backed verify
+   services; cascade stop of owned tasks.
 
 7. **Clean-context Reviewer**
    Structured `ReviewFinding` against exact diff + bounded evidence.

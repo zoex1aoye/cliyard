@@ -64,6 +64,8 @@ import {
   isSandboxReport,
   type SandboxReport,
 } from "../sandbox/types.js";
+import { isVerificationObservation } from "../verification/background-verifier.js";
+import type { VerificationObservation } from "../verification/background-verifier.js";
 import {
   FileEvidenceStore,
   META_PROJECTION_FORMAT,
@@ -1791,6 +1793,12 @@ function parseRunManifest(raw: unknown, source: string): RunManifest {
         `${source}: task ${key}.sandbox`,
       );
     }
+    if (task.verification !== undefined) {
+      task.verification = parseVerificationObservation(
+        task.verification,
+        `${source}: task ${key}.verification`,
+      );
+    }
   }
 
   return raw as unknown as RunManifest;
@@ -1800,6 +1808,18 @@ function parseSandboxReport(raw: unknown, source: string): SandboxReport {
   if (!isSandboxReport(raw)) {
     throw new RunManifestError(
       `${source} is not a valid SandboxReport (observational; fail closed)`,
+    );
+  }
+  return raw;
+}
+
+function parseVerificationObservation(
+  raw: unknown,
+  source: string,
+): VerificationObservation {
+  if (!isVerificationObservation(raw)) {
+    throw new RunManifestError(
+      `${source} is not a valid VerificationObservation (observational; fail closed)`,
     );
   }
   return raw;

@@ -25,6 +25,11 @@ export interface VerifyResult {
   logTail: string;
   /** Present when a contract runtime was started for this verification. */
   runtime?: VerifyRuntimeEvidence;
+  /**
+   * Observational background VerificationTask summary when that path ran.
+   * Never grants acceptance by itself.
+   */
+  verification?: import("./background-verifier.js").VerificationObservation;
 }
 
 export interface Verifier {

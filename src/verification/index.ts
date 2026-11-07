@@ -46,3 +46,11 @@ export {
   type RecoverVerificationTasksOptions,
   type RecoverVerificationTasksResult,
 } from "./task-recovery.js";
+
+export {
+  createBackgroundVerifier,
+  isBackgroundVerificationEnabled,
+  isVerificationObservation,
+  type BackgroundVerifierOptions,
+  type VerificationObservation,
+} from "./background-verifier.js";
