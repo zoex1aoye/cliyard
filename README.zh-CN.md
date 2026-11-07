@@ -56,12 +56,12 @@ English: [README.md](README.md)
 | **P0** 封刀 | **完成** | 冻结面已绑定 |
 | **P1 / P1b** StateStore | **完成** | SQLite 权威 + ledger/journal 挂接 + `.cliyard/state.db` 统一 |
 | **P2a / P2b** daemon + ExecutionSupervisor | **完成** | 只读 Control API；RuntimeHandle（launchd / Job Object 仍残留） |
-| **P3** 沙箱 + 独立验收 + 干净裁决 | **进行中** | 沙箱/VT/Reviewer/ledger/SkillPack **已在主线**；acceptance-flow Reviewer 挂接 **开 PR 中** |
-| **P4** 路由 / 准入 | **进行中** | ProfileCatalog + opt-in queue 准入 **已在主线** |
+| **P3** 沙箱 + 独立验收 + 干净裁决 | **进行中** | 沙箱/VT/Reviewer/ledger/SkillPack + acceptance-flow review **已在主线**（仍 opt-in） |
+| **P4** 路由 / 准入 | **进行中** | Catalog + admission gate **已在主线**；execution routing（Routing B）**开 PR 中** |
 | **P5** 人机面 | 未开始 | Control API 控制台 |
 | **P6** 终点验收 | 未开始 | 用工具交付 Vue Liquid Glass TDesign |
 
-**acceptance-flow Reviewer 合入后的下一刀：** routing A/B，和/或 default-on review/VT（不是无限并行）。
+**Routing B 合入后的下一刀：** router→queue 挂接，和/或 Routing A（设计归因）——不是无限并行。
 
 ## 今天能做什么（诚实版）
 
@@ -84,14 +84,14 @@ English: [README.md](README.md)
 - **StateStore**（`cdde392` / `1fd737f`）：事件溯源 facts + projection；SQLite 可用时 run/queue/ledger/journal 写权威在 `.cliyard/state.db`
 - **`cliyardd` + 只读 Control API**（`1f4be2d`）与 **ExecutionSupervisor / RuntimeHandle**（`6f9e550`）
 
-**P0–P2b 已在主线封完。** P3 至 SkillPack + ProfileCatalog/admission gate 已上主线（沙箱/VT/admission/review 为 **opt-in**）；当前打开切片是 acceptance-flow Reviewer wire（P3 残留）。
+**P0–P2b 已在主线封完。** P3 至 SkillPack + Reviewer acceptance wire + ProfileCatalog/admission 已上主线（**opt-in** 闸门）；当前打开切片是 execution routing（Routing B，P4）。
 
 ## 今天还不能宣称什么
 
 - 不是默认开启的 OS 写保护；不是凭据 / 网络隔离（Boundary 仍是事后检测）
 - 不是拥有派发权的 daemon、跨宿主恢复、Windows Job Object 对等、24 小时无人值守
 - 不是自动批准 Plan、自动合入 `main`、无限并行
-- 不是已完成的动态路由 / default-on 分层 admission 生产就绪（catalog + opt-in queue gate 已有；无 learned ramp）
+- 不是已完成的 Routing A / 已挂 queue 的 router / default-on admission 生产就绪（Routing B 选择器 + opt-in gate 已有；无 learned ramp）
 - 不是 default-on / live-CLI Reviewer（opt-in acceptance wire 已有）；intervention ledger 自动化 / Control API 写面尚未交付
 - 不是 supervised pilot「已推荐」——仍差 DCP v2 人工决策与 P3 残留门禁
 
@@ -174,6 +174,7 @@ Windows + WSL 入口（`doctor` / `run` / `batch`）仍可用，但 **已不是�
 | 人工干预 | Intervention ledger（v0） | 六角色；仅观测；不自动执行 |
 | Skill 溯源 | SkillPack digests（v0） | `.agents/skills` → pack digest + run binding |
 | 准入 | ProfileCatalog + opt-in queue gate（v0） | 未知 binding permit=1；`CLIYARD_ADMISSION=1` |
+| 执行路由 | Routing B 选择器（v0） | 仅已激活 catalog；可解释；不自动派发 |
 
 ## License
 

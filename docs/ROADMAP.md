@@ -28,8 +28,8 @@ The endpoint has three inseparable parts:
 | P1b write cutover | **complete** (`1fd737f` + production ledger/journal attach + path unify) | Run + queue + ledger + journal single-writer on `.cliyard/state.db` | — |
 | P2a daemon + Control API | **complete** (`1f4be2d`) | `cliyardd` + read-only `/v1/status|events|runs` | Write/auth + daemon-owned dispatch deferred to P5 |
 | P2b ExecutionSupervisor | **complete** (`6f9e550`) | RuntimeHandle authority + continuity + conformance | launchd / systemd-run / Job Object backends |
-| P3 沙箱 + 独立验收 + 干净裁决 | **acceptance-flow Reviewer wire on PR** | Opt-in sandbox + VT + Reviewer + interventions + SkillPack on mainline | default-on review/VT/sandbox; live CLI reviewer |
-| P4 路由 + 分层并行 | **catalog + opt-in queue gate merged** | Catalog + unknown probe=1; `CLIYARD_ADMISSION=1` | default-on; routing A/B; learned ramp |
+| P3 沙箱 + 独立验收 + 干净裁决 | **acceptance-flow Reviewer wire merged** | Opt-in sandbox + VT + Reviewer + interventions + SkillPack on mainline | default-on review/VT/sandbox; live CLI reviewer |
+| P4 路由 + 分层并行 | **Routing B (execution) on PR** | Catalog + opt-in gate + deterministic profile select | Routing A; queue wire; learned ramp |
 | P5 人机面 | pending | Web console over Control API; DSH thin client | desktop packaging |
 | P6 终点验收 | pending | Vue + Liquid Glass TDesign through the tool itself | — |
 
@@ -93,9 +93,11 @@ permit=1, conjunctive min):
 [PROFILE_CATALOG_ADMISSION_V0.md](./evidence/PROFILE_CATALOG_ADMISSION_V0.md).
 Opt-in queue wire (`CLIYARD_ADMISSION=1`, deny ⇒ pending):
 [ADMISSION_QUEUE_WIRE_V0.md](./evidence/ADMISSION_QUEUE_WIRE_V0.md).
-Residual: default-on gate; routing A/B; learned 429 ramp. Admission must
-keep considering provider quota, CPU/RAM, ports and non-overlapping write
-scope — none of those are auto-unlimited.
+Execution routing (Routing B) v0 — activated-catalog profile selection:
+[EXECUTION_ROUTING_V0.md](./evidence/EXECUTION_ROUTING_V0.md).
+Residual: Routing A (design attribution); router→queue wire; default-on
+gate; learned 429 ramp. Admission must keep considering provider quota,
+CPU/RAM, ports and non-overlapping write scope — none are auto-unlimited.
 
 ### P5 — human-machine interface
 

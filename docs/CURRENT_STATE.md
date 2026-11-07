@@ -1,7 +1,7 @@
 # cliyard Current State
 
-> Verified: 2026-11-07 (Asia/Shanghai) — model Reviewer adapter merged
-> (`d47f26e` / PR #21); acceptance-flow Reviewer wire v0 on branch
+> Verified: 2026-11-07 (Asia/Shanghai) — acceptance-flow Reviewer wire
+> merged (`a5d1c47` / PR #22); execution routing (Routing B) v0 on branch
 > (see evidence).
 >
 > This page is the single current-status authority for implementation order,
@@ -207,8 +207,8 @@ list is its summary. New slices start only after a human-approved Plan.
    Residual: default-on background verify; RuntimeManager-backed verify
    services; cascade stop of owned tasks.
 
-7. **Clean-context Reviewer** — **v0 + model adapter merged** (`56c1bd2`,
-   `d47f26e`); **acceptance-flow wire v0 on branch**: opt-in
+7. **Clean-context Reviewer** — **v0 + model adapter + acceptance wire
+   merged** (`56c1bd2`, `d47f26e`, `a5d1c47`): opt-in
    `CLIYARD_CLEAN_REVIEW=1` after `verify.ok`; `task.review` observational;
    findings never flip verdict. Evidence:
    [REVIEWER_CLEAN_CONTEXT_V0.md](evidence/REVIEWER_CLEAN_CONTEXT_V0.md),
@@ -228,12 +228,14 @@ list is its summary. New slices start only after a human-approved Plan.
    Residual: RunManifest field; eval-gated default pack promotion.
 
 10. **ProfileCatalog, routing and hierarchical admission** — **catalog +
-    opt-in queue wire merged** (`1993cc4`, `b88889d`): activated catalog,
-    unknown permit=1, `CLIYARD_ADMISSION=1` deny ⇒ pending. Evidence:
+    opt-in queue wire merged** (`1993cc4`, `b88889d`); **execution routing
+    (Routing B) v0 on branch**: deterministic activated-catalog profile
+    selection with explainable reasons. Evidence:
     [PROFILE_CATALOG_ADMISSION_V0.md](evidence/PROFILE_CATALOG_ADMISSION_V0.md),
-    [ADMISSION_QUEUE_WIRE_V0.md](evidence/ADMISSION_QUEUE_WIRE_V0.md).
-    Residual: default-on gate; learned 429 ramp; routing A/B; intra-item
-    ready-wave wire.
+    [ADMISSION_QUEUE_WIRE_V0.md](evidence/ADMISSION_QUEUE_WIRE_V0.md),
+    [EXECUTION_ROUTING_V0.md](evidence/EXECUTION_ROUTING_V0.md).
+    Residual: queue wire for router; Routing A (design attribution);
+    default-on admission; learned 429 ramp; intra-item ready-wave.
 
 ## Actual-project readiness
 
