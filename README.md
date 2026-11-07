@@ -56,11 +56,11 @@ Authoritative detail: [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) · overview
 | **P1 / P1b** StateStore | **done** | SQLite authority + ledger/journal attach + `.cliyard/state.db` unify |
 | **P2a / P2b** daemon + ExecutionSupervisor | **done** | Read-only Control API; RuntimeHandle (launchd / Job Object residual) |
 | **P3** sandbox + independent verify + clean review | **in progress** | Sandbox/VT/Reviewer/ledger/SkillPack + acceptance-flow review **on mainline** (still opt-in) |
-| **P4** routing / admission | **in progress** | Catalog + admission + Routing B **on mainline**; router→queue wire **open PR** |
+| **P4** routing / admission | **in progress** | Catalog + admission + Routing B + queue wire **on mainline**; Routing A **open PR** |
 | **P5** human-machine UI | pending | Control API console |
 | **P6** endpoint acceptance | pending | Vue Liquid Glass TDesign via the tool |
 
-**Next after router→queue wire lands:** Routing A (design attribution) and/or default-on admission residuals — not unbounded parallel.
+**Next after Routing A lands:** Architect/Master CLI wire for design elaborator and/or default-on admission residuals — not unbounded parallel.
 
 ## What works today (honest)
 
@@ -83,14 +83,14 @@ On mainline today (foreground Supervisor, single-repo lock, sequential queue —
 - **StateStore** (`cdde392` / `1fd737f`): event-sourced facts + projection; run/queue/ledger/journal write authority on `.cliyard/state.db` when SQLite is available
 - **`cliyardd` + read-only Control API** (`1f4be2d`) and **ExecutionSupervisor / RuntimeHandle** (`6f9e550`)
 
-**P0–P2b are closed on mainline.** P3 through SkillPack + Reviewer acceptance wire + ProfileCatalog/admission + Routing B are on mainline (**opt-in** gates); router→queue wire is the open P4 slice.
+**P0–P2b are closed on mainline.** P3 through SkillPack + Reviewer acceptance wire + ProfileCatalog/admission + Routing B + queue wire are on mainline (**opt-in** gates); Routing A is the open P4 slice.
 
 ## What we do not claim
 
 - Not default-on OS write prevention; not credential / network isolation (Boundary remains post-hoc detection)
 - Not a dispatch-owning daemon, cross-host recovery, Windows Job Object parity, or 24-hour unattended operation
 - Not automatic Plan approval, automatic `main` merge, or unbounded parallelism
-- Not production-ready Routing A / default-on admission or routing (Routing B + opt-in queue wire exist; no learned ramp)
+- Not production-ready Architect-wired Routing A / default-on admission or routing (Routing A selector + Routing B + opt-in queue wire exist; no learned ramp)
 - Not a default-on / live-CLI Reviewer yet (opt-in acceptance wire exists); intervention ledger automation / Control API write not shipped
 - Not a recommended supervised pilot yet — DCP v2 still needs a human decision; P3 residuals remain
 
@@ -174,6 +174,7 @@ Standing rules: [`.agents/rules/`](.agents/rules/). Task SOPs: [`.agents/skills/
 | Skill provenance | SkillPack digests (v0) | `.agents/skills` → pack digest + run binding |
 | Admission | ProfileCatalog + opt-in queue gate (v0) | Unknown binding permit=1; `CLIYARD_ADMISSION=1` |
 | Execution routing | Routing B + opt-in queue wire (v0) | `CLIYARD_ROUTING=1`; activated catalog; deny ⇒ pending |
+| Design routing | Routing A elaborator select (v0) | Activated catalog; elevated needs preferences; no strength invention |
 
 ## License
 

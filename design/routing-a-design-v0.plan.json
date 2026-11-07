@@ -1,0 +1,51 @@
+{
+  "planId": "routing-a-design-v0",
+  "tasks": [
+    {
+      "taskId": "routing-a-design-v0",
+      "goal": "Routing A (design elaborator attribution) v0: add src/admission/design-routing.ts with DesignRoutingRequirements (mode routine|elevated + preferences), selectDesignElaboratorProfile over activated ProfileCatalog (preferredProfileId exact or preference score + stable profileId tie-break, explainable decision; never invent strength from model names). Extend RoutingDecisionRecord with optional role (design-elaborator|execution). Export from src/admission/index.ts. tests/routing-a-design.test.ts. Evidence ROUTING_A_DESIGN_V0.md + CURRENT_STATE/ROADMAP/README + README.zh-CN bilingual.",
+      "nonGoals": [
+        "Do not auto-approve Plans, freeze contracts, or dispatch workers.",
+        "Do not invent model-strength tables from brand/model names.",
+        "Do not wire Task Architect / Master CLI yet.",
+        "Do not learn 429 ramps or claim unbounded parallel delivery.",
+        "Do not enable Routing A by default as a product gate."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/routing-a-design-v0.md",
+        "design/execution-routing-v0.md",
+        "docs/PRODUCT_STRATEGY_V2.md",
+        "src/admission/routing.ts",
+        "src/admission/catalog.ts",
+        "src/execution/profile.ts"
+      ],
+      "writePaths": [
+        "src/admission/design-routing.ts",
+        "src/admission/routing.ts",
+        "src/admission/index.ts",
+        "tests/routing-a-design.test.ts",
+        "docs/evidence/ROUTING_A_DESIGN_V0.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md",
+        "README.md",
+        "README.zh-CN.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/routing-a-design.test.ts tests/execution-routing.test.ts"
+      ],
+      "deliverables": [
+        "Deterministic activated-catalog design elaborator selector.",
+        "Focused tests + evidence + status docs."
+      ],
+      "forbidden": [
+        "Do not select profiles absent from the activated catalog.",
+        "Do not invent quotas or strength ranks from model/provider names.",
+        "Do not persist secrets or endpoint URLs in routing decisions.",
+        "Do not transfer Plan freeze or intent ownership away from Master/human."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}

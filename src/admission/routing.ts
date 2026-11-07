@@ -229,12 +229,20 @@ export function selectExecutionProfile(
   };
 }
 
+/** Attribution role recorded on durable routing observations. */
+export type RoutingAttributionRole = "execution" | "design-elaborator";
+
 export interface RoutingDecisionRecord {
   at: string;
   code: RoutingDecisionCode;
   selectedProfileId: string | null;
   reasons: string[];
   candidateProfileIds: string[];
+  /**
+   * Optional role. Routing B rows historically omit this field; new writers
+   * should set `"execution"` or `"design-elaborator"` explicitly.
+   */
+  role?: RoutingAttributionRole;
 }
 
 export function routingDecisionsPath(repoRoot: string): string {
