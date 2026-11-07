@@ -1,0 +1,56 @@
+{
+  "planId": "execution-routing-v0",
+  "contracts": [
+    {
+      "taskId": "execution-routing-v0",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Execution routing (Routing B) v0: add src/admission/routing.ts with TaskRoutingRequirements, selectExecutionProfile over activated ProfileCatalog (capability filter, preference score, stable profileId tie-break, explainable decision); optional respectAdmission using effectiveProfilePermit + running counts; optional appendRoutingDecision to .cliyard/routing/decisions.jsonl. Export from src/admission/index.ts. tests/execution-routing.test.ts. Evidence EXECUTION_ROUTING_V0.md + CURRENT_STATE/ROADMAP/README bilingual. Clarify Routing A remains deferred."
+      ],
+      "nonGoals": [
+        "Do not implement Routing A (design elaborator attribution).",
+        "Do not auto-dispatch queue items or mutate queue state.",
+        "Do not learn 429 ramps or dynamic scoring from telemetry.",
+        "Do not hard-code provider brand concurrency tables.",
+        "Do not claim unbounded parallel delivery."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/execution-routing-v0.md",
+        "design/profile-catalog-admission-v0.md",
+        "docs/PRODUCT_STRATEGY_V2.md",
+        "src/admission/catalog.ts",
+        "src/admission/admit.ts",
+        "src/admission/gate.ts",
+        "src/execution/profile.ts"
+      ],
+      "writePaths": [
+        "src/admission/routing.ts",
+        "src/admission/index.ts",
+        "tests/execution-routing.test.ts",
+        "docs/evidence/EXECUTION_ROUTING_V0.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md",
+        "README.md",
+        "README.zh-CN.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "3a13aa987ce2b3a85385f69c7effad05979b273b",
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/execution-routing.test.ts tests/profile-catalog-admission.test.ts tests/admission-queue-wire.test.ts"
+      ],
+      "deliverables": [
+        "Deterministic activated-catalog ExecutionProfile selector.",
+        "Focused tests + evidence + status docs."
+      ],
+      "forbidden": [
+        "Do not select profiles absent from the activated catalog.",
+        "Do not invent quotas from model or provider names.",
+        "Do not persist secrets or endpoint URLs in routing decisions."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}
