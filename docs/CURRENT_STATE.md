@@ -1,7 +1,7 @@
 # cliyard Current State
 
-> Verified: 2026-11-07 (Asia/Shanghai) — P3c sandbox batch wire measured;
-> earlier realignment noted P1–P2b already on mainline.
+> Verified: 2026-11-07 (Asia/Shanghai) — P3c merged (`1a930e4` / PR #13);
+> VerificationTask v0 implemented on branch (see evidence).
 >
 > This page is the single current-status authority for implementation order,
 > known gaps and the next executable slice. Product rationale remains in
@@ -196,8 +196,14 @@ list is its summary. New slices start only after a human-approved Plan.
    measurement; microVM tier. WorkspaceBoundary remains the independent
    post-run detection fallback.
 
-6. **Background VerificationTask**
-   Decouple long verification from Worker lifecycle.
+6. **Background VerificationTask** — **v0 model/runner/recovery landed**
+   (branch evidence; not yet mainline): durable record under
+   `.cliyard/verification/`, detached worker PG, output offset + delivery
+   latch, startup orphan → `lost`. Evidence:
+   [VERIFICATION_TASK_V0.md](evidence/VERIFICATION_TASK_V0.md).
+   Residual: replace synchronous `createShellVerifier` inside
+   `runClosedLoop` / batch wire; RuntimeManager-backed verify services;
+   cascade stop of owned tasks.
 
 7. **Clean-context Reviewer**
    Structured `ReviewFinding` against exact diff + bounded evidence.

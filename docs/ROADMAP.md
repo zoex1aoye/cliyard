@@ -28,7 +28,7 @@ The endpoint has three inseparable parts:
 | P1b write cutover | **complete** (`1fd737f` + production ledger/journal attach + path unify) | Run + queue + ledger + journal single-writer on `.cliyard/state.db` | — |
 | P2a daemon + Control API | **complete** (`1f4be2d`) | `cliyardd` + read-only `/v1/status|events|runs` | Write/auth + daemon-owned dispatch deferred to P5 |
 | P2b ExecutionSupervisor | **complete** (`6f9e550`) | RuntimeHandle authority + continuity + conformance | launchd / systemd-run / Job Object backends |
-| P3 沙箱 + 独立验收 + 干净裁决 | **P3 v0+P3b+P3c batch wire; VerificationTask next** | SandboxAdapter + nono pin + gate + report + wrap/measure + opt-in batch wire | default-on batch wrap; microVM tier |
+| P3 沙箱 + 独立验收 + 干净裁决 | **P3c merged; VerificationTask v0 model next to land** | Sandbox + opt-in batch wire; VT v0 durable runner/recovery | VT batch wire; default-on sandbox; Reviewer |
 | P4 路由 + 分层并行 | pending | ProfileCatalog activation + routing A/B + hierarchical admission | — |
 | P5 人机面 | pending | Web console over Control API; DSH thin client | desktop packaging |
 | P6 终点验收 | pending | Vue + Liquid Glass TDesign through the tool itself | — |
@@ -69,7 +69,9 @@ helper + filesystem enforcement measurement + opt-in
 ([SANDBOX_ADAPTER_NONO_V0.md](./evidence/SANDBOX_ADAPTER_NONO_V0.md),
 [SANDBOX_NONO_WORKER_WRAP.md](./evidence/SANDBOX_NONO_WORKER_WRAP.md),
 [SANDBOX_BATCH_WIRE.md](./evidence/SANDBOX_BATCH_WIRE.md)).
-Next: background VerificationTask; clean-context Reviewer; default-on wrap.
+VerificationTask v0 (durable model, detached runner, recovery → `lost`):
+[VERIFICATION_TASK_V0.md](./evidence/VERIFICATION_TASK_V0.md).
+Next: VT batch wire into `runClosedLoop`; clean-context Reviewer; default-on wrap.
 
 ### P4 — routing and hierarchical parallelism
 
