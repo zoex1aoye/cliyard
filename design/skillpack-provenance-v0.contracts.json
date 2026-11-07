@@ -1,0 +1,53 @@
+{
+  "planId": "skillpack-provenance-v0",
+  "contracts": [
+    {
+      "taskId": "skillpack-provenance-v0",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "SkillPack provenance v0: add src/skillpack/types.ts (SkillPack model). Add src/skillpack/build.ts buildSkillPackFromAgentsDir({ repoRoot, id?, version?, entrypoint?, harnesses? }) scanning .agents/skills/*/SKILL.md with SHA-256 digests and pack digest; refuse path escape / empty pack. Add src/skillpack/store.ts save/load/list under .cliyard/skillpacks/. Add src/skillpack/bind.ts bindSkillPackToRun writing .cliyard/skillpacks/bindings/<runId>.json. Export src/skillpack/index.ts. tests/skillpack-provenance.test.ts with fixture skills tree. Evidence SKILLPACK_PROVENANCE_V0.md + CURRENT_STATE/ROADMAP/README bilingual touch."
+      ],
+      "nonGoals": [
+        "Do not gate SkillPack promotion on eval fixtures in this slice.",
+        "Do not mutate .agents/ content.",
+        "Do not implement ProfileCatalog or routing.",
+        "Do not rewrite RunManifest schema yet."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/skillpack-provenance-v0.md",
+        "design/continuous-harness-v2.md",
+        ".agents/skills/"
+      ],
+      "writePaths": [
+        "src/skillpack/types.ts",
+        "src/skillpack/build.ts",
+        "src/skillpack/store.ts",
+        "src/skillpack/bind.ts",
+        "src/skillpack/index.ts",
+        "tests/skillpack-provenance.test.ts",
+        "docs/evidence/SKILLPACK_PROVENANCE_V0.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md",
+        "README.md",
+        "README.zh-CN.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "20d0920c55b5389e25b1d7b35bdd499facb2ae52",
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/skillpack-provenance.test.ts"
+      ],
+      "deliverables": [
+        "SkillPack digest builder + durable snapshot + run binding.",
+        "Focused tests + evidence + status docs."
+      ],
+      "forbidden": [
+        "Do not follow symlinks outside the agents skills root.",
+        "Do not claim eval-gated default SkillPack promotion."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}
