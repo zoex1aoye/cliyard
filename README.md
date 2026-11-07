@@ -46,6 +46,22 @@ Human: versioned requirements / visuals / bounds
 
 The end state is not “auto-merge to main.” It is: **humans set direction and final review; the control plane owns dispatch, calibration, and machine gates.**
 
+## Where we are on the roadmap
+
+Authoritative detail: [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) · overview: [docs/ROADMAP.md](docs/ROADMAP.md).
+
+| Phase | Mainline | Notes |
+|---|---|---|
+| **P0** legacy closeout | **done** | Freeze binding |
+| **P1 / P1b** StateStore | **done** | SQLite authority + ledger/journal attach + `.cliyard/state.db` unify |
+| **P2a / P2b** daemon + ExecutionSupervisor | **done** | Read-only Control API; RuntimeHandle (launchd / Job Object residual) |
+| **P3** sandbox + independent verify + clean review | **in progress** | Sandbox opt-in + VerificationTask + VT batch wire **on mainline**; clean-context Reviewer v0 **open PR** (fixture only, no model yet) |
+| **P4** routing / admission | pending | ProfileCatalog |
+| **P5** human-machine UI | pending | Control API console |
+| **P6** endpoint acceptance | pending | Vue Liquid Glass TDesign via the tool |
+
+**Next after Reviewer v0 lands:** model-backed Reviewer adapter and/or human intervention ledger (not default-on sandbox / unbounded parallel).
+
 ## What works today (honest)
 
 On mainline today (foreground Supervisor, single-repo lock, sequential queue — details in CURRENT_STATE):
@@ -55,25 +71,25 @@ On mainline today (foreground Supervisor, single-repo lock, sequential queue —
 - Explicit-approval foreground queue: `add` / `add-plan` / `run` / `retry` / `adopt`
 - RuntimeManager: loopback port leases, readiness, runtime manifest, cleanup
 - WorkerLease + process-tree cleanup (POSIX; controller-death nested-group recovery still open)
-- WorkspaceBoundary v1: **detection-only** protected-root integrity (not an OS sandbox)
+- WorkspaceBoundary v1: **detection-only** protected-root integrity (independent of sandbox)
+- **Opt-in OS sandbox (P3):** nono `v0.81.0` pin, Landlock-honest measure, `CLIYARD_SANDBOX=1` / `sandbox.enabled` worker wrap (not default-on; no network/credential measure)
+- **Background VerificationTask (P3):** durable `.cliyard/verification/`, detached runner, recovery → `lost`; opt-in `CLIYARD_BACKGROUND_VERIFY=1` batch wire
 - Failure taxonomy and cost truth (resume retains abandoned attempts; historical missing has an import constraint)
 - Task Architect: produces a human-reviewable Plan only — never freezes or dispatches
 - Deterministic integration full-suite gate, estimate-plan telemetry calibration, Linux verifier process-group timeout reclaim
-- **StateStore** (`cdde392` / `1fd737f`): event-sourced facts + projection; run/queue write authority; durable backend is **SQLite via `better-sqlite3`** when installed (JSON-file fallback otherwise)
+- **StateStore** (`cdde392` / `1fd737f`): event-sourced facts + projection; run/queue/ledger/journal write authority on `.cliyard/state.db` when SQLite is available
 - **`cliyardd` + read-only Control API** (`1f4be2d`) and **ExecutionSupervisor / RuntimeHandle** (`6f9e550`)
 
-**P0 is closed** ([docs/P0_LEGACY_SEAM_FREEZE.md](docs/P0_LEGACY_SEAM_FREEZE.md)).  
-**P1 / P1b / P2a / P2b are on mainline.** Residuals: ledger/journal production attach; launchd-class backends; controller-death nested recovery.  
-Next major product slice after DCP v2 review: **P3 SandboxAdapter + background VerificationTask** (see [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md)).
+**P0–P2b are closed on mainline.** P3 sandbox + VerificationTask are on mainline as **opt-in** gates; clean-context Reviewer v0 is the open slice.
 
 ## What we do not claim
 
-- Not OS write prevention / credential isolation / network isolation (Boundary is post-hoc detection)
-- Not a daemon, cross-host recovery, Windows Job Object parity, or 24-hour unattended operation
+- Not default-on OS write prevention; not credential / network isolation (Boundary remains post-hoc detection)
+- Not a dispatch-owning daemon, cross-host recovery, Windows Job Object parity, or 24-hour unattended operation
 - Not automatic Plan approval, automatic `main` merge, or unbounded parallelism
 - Not production-ready dynamic routing / ProfileCatalog activation / hierarchical admission
-- Not “SQLite owns every JSON file” — ledger/journal entrypoints may still write JSON directly
-- Not a recommended supervised pilot yet — DCP v2 still needs a human decision; P3 gates remain
+- Not a model-backed clean Reviewer or human intervention ledger yet
+- Not a recommended supervised pilot yet — DCP v2 still needs a human decision; P3 residuals remain
 
 Adjacent products: [docs/OSS_LANDSCAPE.md](docs/OSS_LANDSCAPE.md).  
 Unlike ThinkRail-style agentic IDEs built around one coding engine, cliyard is an **engine-agnostic delivery control plane** with a replaceable human surface.
@@ -145,10 +161,12 @@ Standing rules: [`.agents/rules/`](.agents/rules/). Task SOPs: [`.agents/skills/
 | Task authority | RunManifest | accepted/rejected live only here |
 | Coordination | Foreground queue | Explicit approval; sequential today |
 | Human surface | DSH plugin (replaceable) | Never the sole store of contracts/evidence |
-| Durable state | StateStore (`better-sqlite3`) | Run/queue authority; JSON exports derived |
+| Durable state | StateStore (`better-sqlite3`) | Run/queue/ledger/journal on `.cliyard/state.db` |
 | Daemon / read API | `cliyardd` | Read-only Control API; not dispatch owner yet |
 | Execution identity | ExecutionSupervisor / RuntimeHandle | PID/PGID diagnostic only |
-| Safety boundary | WorkspaceBoundary → future SandboxAdapter | Detect today; OS write isolation in P3 |
+| Safety boundary | WorkspaceBoundary + opt-in SandboxAdapter/nono | Detect always; OS wrap opt-in (`CLIYARD_SANDBOX`) |
+| Independent verify | VerificationTask + optional background Verifier | Detached PG; shell verify still default |
+| Clean review | ReviewFinding / CleanReviewContext (v0) | Fixture reviewer; model adapter next |
 
 ## License
 
