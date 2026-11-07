@@ -29,7 +29,7 @@ The endpoint has three inseparable parts:
 | P2a daemon + Control API | **complete** (`1f4be2d`) | `cliyardd` + read-only `/v1/status|events|runs` | Write/auth + daemon-owned dispatch deferred to P5 |
 | P2b ExecutionSupervisor | **complete** (`6f9e550`) | RuntimeHandle authority + continuity + conformance | launchd / systemd-run / Job Object backends |
 | P3 沙箱 + 独立验收 + 干净裁决 | **SkillPack merged; P3 residuals remain** | Opt-in sandbox + VT + Reviewer + interventions + SkillPack on mainline | model Reviewer; default-on VT/sandbox |
-| P4 路由 + 分层并行 | **ProfileCatalog admission v0 on PR** | Catalog + unknown probe=1 + hierarchical admit | queue wire; routing A/B; learned ramp |
+| P4 路由 + 分层并行 | **catalog merged; queue wire on PR** | Catalog + unknown probe=1; opt-in queue gate | default-on; routing A/B; learned ramp |
 | P5 人机面 | pending | Web console over Control API; DSH thin client | desktop packaging |
 | P6 终点验收 | pending | Vue + Liquid Glass TDesign through the tool itself | — |
 
@@ -87,7 +87,9 @@ Next within P3 residuals: model-backed Reviewer; default-on VT/sandbox.
 ProfileCatalog + hierarchical admission v0 (activated catalog, unknown
 permit=1, conjunctive min):
 [PROFILE_CATALOG_ADMISSION_V0.md](./evidence/PROFILE_CATALOG_ADMISSION_V0.md).
-Residual: queue/scheduler wire; routing A/B; learned 429 ramp. Admission must
+Opt-in queue wire (`CLIYARD_ADMISSION=1`, deny ⇒ pending):
+[ADMISSION_QUEUE_WIRE_V0.md](./evidence/ADMISSION_QUEUE_WIRE_V0.md).
+Residual: default-on gate; routing A/B; learned 429 ramp. Admission must
 keep considering provider quota, CPU/RAM, ports and non-overlapping write
 scope — none of those are auto-unlimited.
 

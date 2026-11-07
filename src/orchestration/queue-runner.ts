@@ -68,6 +68,13 @@ import {
   type ExecutionPolicyCompatibility,
   type ExecutionProfile,
 } from "../execution/profile.js";
+import {
+  appendAdmissionDecision,
+  evaluateQueueAdmission,
+  isQueueAdmissionEnabled,
+  type QueueAdmissionEvaluation,
+  type QueueAdmissionOptions,
+} from "../admission/gate.js";
 
 export interface QueueSupervisorRequest {
   repoRoot: string;
@@ -132,7 +139,8 @@ export type QueueStopReason =
   | "idle"
   | "no-ready"
   | "blocked"
-  | "max-dispatches";
+  | "max-dispatches"
+  | "admission-denied";
 
 export interface QueueRunSummary {
   version: 1;
@@ -149,6 +157,8 @@ export interface QueueRunSummary {
   items: QueueItem[];
   stopped: QueueStopReason;
   reason?: string;
+  /** Present when the opt-in admission gate produced a durable observation. */
+  admission?: QueueAdmissionEvaluation;
 }
 
 export interface QueueRunOptions {
@@ -156,6 +166,11 @@ export interface QueueRunOptions {
   continueOnBlocked?: boolean;
   /** Bound dispatches in one foreground invocation. */
   maxDispatches?: number;
+  /**
+   * Opt-in ProfileCatalog hierarchical admission before dispatch
+   * (`CLIYARD_ADMISSION=1` when `enabled` is omitted).
+   */
+  admission?: QueueAdmissionOptions;
   /** Defaults to the Supervisor CLI runner. */
   runner?: QueueSupervisorRunner;
   /** Lock wait for a live same-host queue owner. Defaults to 5000 ms. */
@@ -378,6 +393,7 @@ export async function runQueue(
       const dispatches: QueueDispatchRecord[] = [];
       let stopped: QueueStopReason = "idle";
       let stopReason: string | undefined;
+      let admissionObservation: QueueAdmissionEvaluation | undefined;
 
       for (;;) {
         const ordered = dependencyOrder(document.items);
@@ -476,6 +492,36 @@ export async function runQueue(
           continue;
         }
 
+        if (isQueueAdmissionEnabled(options.admission)) {
+          const evaluation = evaluateQueueAdmission({
+            repoRoot,
+            candidate,
+            items: document.items,
+            options: options.admission,
+          });
+          admissionObservation = evaluation;
+          appendAdmissionDecision(repoRoot, {
+            at: now(),
+            itemId: candidate.id,
+            profileId: evaluation.profileId,
+            admitted: evaluation.admitted,
+            code: evaluation.code,
+            reasons: evaluation.reasons,
+            limitingScope: evaluation.decision?.limitingScope ?? null,
+            effective: evaluation.decision?.effective ?? null,
+          });
+          if (!evaluation.admitted) {
+            // Capacity denial is transient: leave the item pending so a later
+            // invocation can retry when in-flight work finishes.
+            stopped = "admission-denied";
+            stopReason =
+              `item ${JSON.stringify(candidate.id)} admission denied` +
+              ` (${evaluation.code}): ${evaluation.reasons.join("; ")}`;
+            log(`admission-denied ${candidate.id}: ${stopReason}`);
+            break;
+          }
+        }
+
         log(
           `dispatch ${candidate.id}: ${candidate.nextAction}` +
             (candidate.nextAction === "resume"
@@ -530,6 +576,9 @@ export async function runQueue(
         propagated,
         stopped,
         ...(stopReason !== undefined ? { reason: stopReason } : {}),
+        ...(admissionObservation !== undefined
+          ? { admission: admissionObservation }
+          : {}),
       });
     },
     {
@@ -2483,6 +2532,7 @@ interface BuildSummaryInput {
   propagated: QueueBlockRecord[];
   stopped: QueueStopReason;
   reason?: string;
+  admission?: QueueAdmissionEvaluation;
 }
 
 function buildSummary(input: BuildSummaryInput): QueueRunSummary {
@@ -2505,6 +2555,7 @@ function buildSummary(input: BuildSummaryInput): QueueRunSummary {
     })),
     stopped: input.stopped,
     ...(input.reason !== undefined ? { reason: input.reason } : {}),
+    ...(input.admission !== undefined ? { admission: input.admission } : {}),
   };
 }
 
