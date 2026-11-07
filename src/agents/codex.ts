@@ -53,6 +53,12 @@ export interface CodexWorkerOptions {
    * so shell verify can pass in CI without API.
    */
   dryRun?: boolean;
+  /**
+   * Opt-in OS sandbox (P3c). When enabled (or CLIYARD_SANDBOX=1), prepare
+   * nono before spawn; refuse on capability gaps; wrap via `nono wrap`.
+   * Ignored for dryRun.
+   */
+  sandbox?: import("../sandbox/worker-wire.js").WorkerSandboxOptions;
 }
 
 interface Session {
@@ -71,6 +77,12 @@ function runCodex(
   processTree: WorkerProcessTreeManager,
   onSpawn: (managed: ManagedWorkerProcess) => void,
   lease?: LeaseInvocation,
+  sandboxWrap?: {
+    report: import("../sandbox/types.js").SandboxReport;
+    workspaceRoot: string;
+    repoRoot?: string;
+    nonoBinary?: string;
+  },
 ): Promise<{
   code: number;
   stdout: string;
@@ -85,6 +97,7 @@ function runCodex(
       cwd,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
+      ...(sandboxWrap !== undefined ? { sandboxWrap } : {}),
     });
     const child = managed.child;
     onSpawn(managed);
@@ -289,7 +302,30 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
         }
 
         const processTrees: WorkerProcessRecord[] = [];
+        let prepared: Awaited<
+          ReturnType<
+            typeof import("../sandbox/worker-wire.js").prepareWorkerSandbox
+          >
+        > = null;
         try {
+          const {
+            createSandboxRefusalFailure,
+            prepareWorkerSandbox,
+          } = await import("../sandbox/worker-wire.js");
+          prepared = await prepareWorkerSandbox({
+            workspaceRoot: opts.cwd,
+            options: opts.sandbox,
+          });
+          if (prepared !== null && !prepared.ok) {
+            return {
+              sessionId,
+              exitCode: 1,
+              touchedPaths: [],
+              logTail: `[codex] sandbox refused: ${prepared.report.gaps.join("; ") || prepared.report.status}`,
+              failure: createSandboxRefusalFailure(prepared.report),
+              sandbox: prepared.report,
+            };
+          }
           const res = await runCodex(
             binary,
             opts.cwd,
@@ -310,6 +346,7 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
                   workspace: opts.cwd,
                 }
               : undefined,
+            prepared?.wrap,
           );
           recordWorkerProcessTree(processTrees, res.processTree);
           let changed: Awaited<ReturnType<typeof collectChangedPaths>>;
@@ -380,6 +417,9 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
             ...(processTrees.length > 0
               ? { processTrees: [...processTrees] }
               : {}),
+            ...(prepared?.report !== undefined
+              ? { sandbox: prepared.report }
+              : {}),
           };
         } catch (e) {
           const message = e instanceof Error ? e.message : String(e);
@@ -406,6 +446,9 @@ export function createCodexAdapter(opts: CodexWorkerOptions): AgentAdapter {
             ...(cleanupFailure ? { cleanupFailure } : {}),
             ...(processTrees.length > 0
               ? { processTrees: [...processTrees] }
+              : {}),
+            ...(prepared?.report !== undefined
+              ? { sandbox: prepared.report }
               : {}),
           };
         }

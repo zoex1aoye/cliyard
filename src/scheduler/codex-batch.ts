@@ -156,6 +156,13 @@ export interface CodexBatchOptions {
    * model.
    */
   integrationGateRunner?: IntegrationGateRunner;
+  /**
+   * Opt-in OS sandbox for production worker spawns (P3c). When enabled (or
+   * CLIYARD_SANDBOX=1 via the adapter env), prepare nono before spawn and
+   * wrap argv. Dry-run stays unwrapped. Ignored when `workerFactory` replaces
+   * the adapter unless that factory reads this field itself.
+   */
+  sandbox?: import("../sandbox/worker-wire.js").WorkerSandboxOptions;
 }
 
 /** Safe default gate: full suite then build, never a model. */
@@ -1398,6 +1405,15 @@ export async function runCodexBatch(
             };
           }
 
+          const sandboxOpts =
+            opts.sandbox !== undefined
+              ? {
+                  ...opts.sandbox,
+                  ...(opts.sandbox.repoRoot === undefined
+                    ? { repoRoot }
+                    : {}),
+                }
+              : undefined;
           const baseWorker =
             opts.workerFactory?.(workerKind, workerCwd) ??
             (workerKind === "claude"
@@ -1408,6 +1424,9 @@ export async function runCodexBatch(
                   ...(maxBudgetUsd !== undefined ? { maxBudgetUsd } : {}),
                   ...(budgetPolicy ? { budgetPolicy } : {}),
                   ...(deadlinePolicy ? { deadlinePolicy } : {}),
+                  ...(sandboxOpts !== undefined
+                    ? { sandbox: sandboxOpts }
+                    : {}),
                 })
               : createCodexAdapter({
                   cwd: workerCwd,
@@ -1415,6 +1434,9 @@ export async function runCodexBatch(
                   dryRun,
                   ...(deadlinePolicy
                     ? { timeoutMs: deadlinePolicy.baseTimeoutMs }
+                    : {}),
+                  ...(sandboxOpts !== undefined
+                    ? { sandbox: sandboxOpts }
                     : {}),
                 }));
           // Observe the task worktree as soon as the worker returns, before
@@ -1631,6 +1653,9 @@ export async function runCodexBatch(
                     result.extensions,
                   ),
                   ...(result.cost !== undefined ? { cost: result.cost } : {}),
+                  ...(result.sandbox !== undefined
+                    ? { sandbox: result.sandbox }
+                    : {}),
                   workspaceBoundary: boundaryRecord,
                 };
                 manifest.integrationHead = integrationHead;
@@ -1681,6 +1706,9 @@ export async function runCodexBatch(
                     manifest.tasks[id]?.extensions,
                     result.extensions,
                   ),
+                  ...(result.sandbox !== undefined
+                    ? { sandbox: result.sandbox }
+                    : {}),
                   // One bounded evidence record for every task in the wave,
                   // accepted or rejected. Full snapshots stay in memory.
                   workspaceBoundary: boundaryRecord,

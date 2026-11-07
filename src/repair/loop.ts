@@ -44,6 +44,10 @@ import {
   MAX_PROCESS_TREES,
   type PathAuditRecord,
 } from "../supervisor/types.js";
+import {
+  isSandboxReport,
+  type SandboxReport,
+} from "../sandbox/types.js";
 
 export interface LoopOptions {
   contract: TaskContract;
@@ -106,6 +110,11 @@ export interface LoopResult {
    * failure. A success result is rejected when this is present.
    */
   cleanupFailure?: FailureRecord;
+  /**
+   * Observational sandbox prepare/wrap report from the last worker attempt.
+   * Absence means sandbox was not enabled. Never grants acceptance.
+   */
+  sandbox?: SandboxReport;
 }
 
 function setStatus(
@@ -163,6 +172,8 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
    * adapters without a budget policy keep their existing behavior.
    */
   let taskBudget: TaskBudgetContinuationState | undefined;
+  /** Last valid sandbox report from a worker attempt (observational). */
+  let sandbox: SandboxReport | undefined;
 
   while (true) {
     await updateLedger(ledgerPath, (ledger) => {
@@ -194,6 +205,13 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
       ...(opts.onWorkerLease ? { onWorkerLease: opts.onWorkerLease } : {}),
     });
     const agentResult = await worker.collect(sessionId);
+    if (agentResult.sandbox !== undefined) {
+      // Fail closed on malformed sandbox evidence: keep the prior valid
+      // report (if any) rather than inventing fields.
+      if (isSandboxReport(agentResult.sandbox)) {
+        sandbox = agentResult.sandbox;
+      }
+    }
     for (const extension of agentResult.extensions ?? []) {
       const parsed = parseTaskExtensionRecord(extension);
       if (!parsed) continue;
@@ -382,6 +400,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         processTrees,
         cleanupFailure,
         taskBudget,
+        sandbox,
       );
     }
 
@@ -415,6 +434,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         processTrees,
         cleanupFailure,
         taskBudget,
+        sandbox,
       );
     }
 
@@ -458,6 +478,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         processTrees,
         cleanupFailure,
         taskBudget,
+        sandbox,
       );
     }
     priorFailure = {
@@ -493,6 +514,7 @@ function finish(
   processTrees: WorkerProcessRecord[],
   cleanupFailure: FailureRecord | undefined,
   taskBudget: TaskBudgetContinuationState | undefined,
+  sandbox: SandboxReport | undefined,
 ): LoopResult {
   return {
     taskId: record.taskId,
@@ -525,6 +547,7 @@ function finish(
       ...(tree.identity ? { identity: { ...tree.identity } } : {}),
     })),
     ...(cleanupFailure !== undefined ? { cleanupFailure } : {}),
+    ...(sandbox !== undefined ? { sandbox } : {}),
   };
 }
 
