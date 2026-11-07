@@ -19,6 +19,7 @@ import { runQueueCli } from "./orchestration/cli.js";
 import { runEvaluationCli } from "./evaluation/cli.js";
 import { runStateStoreCli } from "./statestore/read.js";
 import { runDaemonCli } from "./daemon/cli.js";
+import { runMvpTestCli } from "./mvp/cli.js";
 import type { PermissionIntent, WorkerId } from "./types.js";
 
 function usage(): never {
@@ -74,6 +75,7 @@ Usage:
   cliyard daemon start --repo <path> [--port <n>]
   cliyard daemon status --repo <path> [--json]
   cliyard daemon stop --repo <path> [--timeout <ms>] [--json]
+  cliyard mvp-test --repo <path> [contract.json] [--replace-existing] [--json]
 
 Master (DeepSeek Harness plugin / local demo):
   npm run master-monitor
@@ -216,6 +218,11 @@ async function main(): Promise<void> {
   if (cmd === "statestore") {
     // Read-only JSON projection; no daemon and no write path.
     process.exitCode = await runStateStoreCli(argv.slice(1));
+    return;
+  }
+
+  if (cmd === "mvp-test") {
+    await runMvpTestCli(argv.slice(1));
     return;
   }
 

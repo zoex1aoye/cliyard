@@ -39,12 +39,18 @@ type ToolDefinition = {
   execute?: (args: Record<string, unknown>) => Promise<string>;
 };
 
-function capturePlanTool(config: Record<string, unknown> = {}): ToolDefinition {
-  let registered: ToolDefinition | undefined;
+function captureRegisteredTools(
+  config: Record<string, unknown> = {},
+): Map<string, ToolDefinition> {
+  const registered = new Map<string, ToolDefinition>();
   const fakeCtx = {
     tools: {
       register(definition: ToolDefinition) {
-        registered = definition;
+        assert.ok(
+          definition.name,
+          "tool registration requires a stable name",
+        );
+        registered.set(definition.name!, definition);
         return () => undefined;
       },
     },
@@ -54,8 +60,14 @@ function capturePlanTool(config: Record<string, unknown> = {}): ToolDefinition {
   };
 
   apply(fakeCtx, { repoRoot, monitorPort: 0, ...config });
-  assert.ok(registered, "cliyard_plan_dispatch should be registered");
-  return registered!;
+  return registered;
+}
+
+function capturePlanTool(config: Record<string, unknown> = {}): ToolDefinition {
+  const registered = captureRegisteredTools(config);
+  const tool = registered.get("cliyard_plan_dispatch");
+  assert.ok(tool, "cliyard_plan_dispatch should be registered");
+  return tool!;
 }
 
 function writeLedger(dir: string, value: unknown): string {
@@ -174,16 +186,21 @@ test("master dispatch treats repoRoot as the target, not the cliyard checkout", 
 });
 
 test("dsh plugin registers a chat-callable Plan bridge tool", () => {
-  const tool = capturePlanTool();
-  assert.equal(tool.name, "cliyard_plan_dispatch");
-  assert.ok(tool.parameters);
+  const tools = captureRegisteredTools();
+  const tool = tools.get("cliyard_plan_dispatch");
+  assert.ok(tool, "cliyard_plan_dispatch should be registered");
+  assert.equal(tool!.name, "cliyard_plan_dispatch");
+  assert.ok(tool!.parameters);
   assert.deepEqual(
-    tool.parameters?.properties?.executionProfileId?.enum,
+    tool!.parameters?.properties?.executionProfileId?.enum,
     ["default"],
   );
-  assert.equal(tool.parameters?.properties?.worker, undefined);
-  assert.equal(tool.parameters?.properties?.model, undefined);
-  assert.equal(tool.parameters?.additionalProperties, false);
+  assert.equal(tool!.parameters?.properties?.worker, undefined);
+  assert.equal(tool!.parameters?.properties?.model, undefined);
+  assert.equal(tool!.parameters?.additionalProperties, false);
+  const mvp = tools.get("cliyard_mvp_test");
+  assert.ok(mvp, "cliyard_mvp_test should be registered");
+  assert.equal(mvp!.parameters?.additionalProperties, false);
 });
 
 test("dsh Plan tool exposes only configured execution-profile aliases", () => {
@@ -483,23 +500,28 @@ test("dsh Plan tool compiles a contract inside a sibling target repo", async () 
       stdio: "ignore",
     });
 
-    let execute:
-      | ((args: {
+    const tools = new Map<
+      string,
+      {
+        execute?: (args: {
           plan: unknown;
           dispatch?: boolean;
           executionProfileId?: string;
-        }) => Promise<string>)
-      | undefined;
+        }) => Promise<string>;
+      }
+    >();
     const fakeCtx = {
       tools: {
         register(definition: {
+          name?: string;
           execute?: (args: {
             plan: unknown;
             dispatch?: boolean;
             executionProfileId?: string;
           }) => Promise<string>;
         }) {
-          execute = definition.execute;
+          assert.ok(definition.name, "tool registration requires a name");
+          tools.set(definition.name!, definition);
           return () => undefined;
         },
       },
@@ -513,7 +535,8 @@ test("dsh Plan tool compiles a contract inside a sibling target repo", async () 
       monitorPort: 0,
       defaultWorker: "mock",
     });
-    assert.ok(execute);
+    const execute = tools.get("cliyard_plan_dispatch")?.execute;
+    assert.ok(execute, "cliyard_plan_dispatch should be registered");
     const stdout = await execute!({
       plan: {
         planId: "dsh-chat-plan",
