@@ -57,11 +57,11 @@ English: [README.md](README.md)
 | **P1 / P1b** StateStore | **完成** | SQLite 权威 + ledger/journal 挂接 + `.cliyard/state.db` 统一 |
 | **P2a / P2b** daemon + ExecutionSupervisor | **完成** | 只读 Control API；RuntimeHandle（launchd / Job Object 仍残留） |
 | **P3** 沙箱 + 独立验收 + 干净裁决 | **进行中** | 沙箱 opt-in + VT + Reviewer + intervention ledger + SkillPack **已在主线** |
-| **P4** 路由 / 准入 | **进行中** | ProfileCatalog + 分层准入 v0 **开 PR 中** |
+| **P4** 路由 / 准入 | **进行中** | ProfileCatalog **已在主线**；opt-in queue 准入挂接 **开 PR 中** |
 | **P5** 人机面 | 未开始 | Control API 控制台 |
 | **P6** 终点验收 | 未开始 | 用工具交付 Vue Liquid Glass TDesign |
 
-**ProfileCatalog 合入后的下一刀：** queue/scheduler 准入挂接，和/或模型驱动 Reviewer（不是 default-on sandbox / 无限并行）。
+**admission wire 合入后的下一刀：** routing A/B / default-on gate，和/或模型驱动 Reviewer（不是无限并行）。
 
 ## 今天能做什么（诚实版）
 
@@ -84,14 +84,14 @@ English: [README.md](README.md)
 - **StateStore**（`cdde392` / `1fd737f`）：事件溯源 facts + projection；SQLite 可用时 run/queue/ledger/journal 写权威在 `.cliyard/state.db`
 - **`cliyardd` + 只读 Control API**（`1f4be2d`）与 **ExecutionSupervisor / RuntimeHandle**（`6f9e550`）
 
-**P0–P2b 已在主线封完。** P3 至 SkillPack 已上主线（沙箱/VT 为 **opt-in**）；当前打开切片是 ProfileCatalog admission v0（P4）。
+**P0–P2b 已在主线封完。** P3 至 SkillPack 已上主线（沙箱/VT 为 **opt-in**）；ProfileCatalog 已上主线；当前打开切片是 opt-in admission queue wire（P4）。
 
 ## 今天还不能宣称什么
 
 - 不是默认开启的 OS 写保护；不是凭据 / 网络隔离（Boundary 仍是事后检测）
 - 不是拥有派发权的 daemon、跨宿主恢复、Windows Job Object 对等、24 小时无人值守
 - 不是自动批准 Plan、自动合入 `main`、无限并行
-- 不是已完成的动态路由 / 已挂 queue 的分层 admission 生产就绪（catalog v0 已有；无 learned ramp）
+- 不是已完成的动态路由 / default-on 分层 admission 生产就绪（catalog + opt-in queue gate 已有；无 learned ramp）
 - 不是模型驱动 Reviewer；intervention ledger 自动化 / Control API 写面尚未交付
 - 不是 supervised pilot「已推荐」——仍差 DCP v2 人工决策与 P3 残留门禁
 
@@ -173,7 +173,7 @@ Windows + WSL 入口（`doctor` / `run` / `batch`）仍可用，但 **已不是�
 | 干净裁决 | ReviewFinding / CleanReviewContext（v0） | Fixture reviewer；下一步模型适配器 |
 | 人工干预 | Intervention ledger（v0） | 六角色；仅观测；不自动执行 |
 | Skill 溯源 | SkillPack digests（v0） | `.agents/skills` → pack digest + run binding |
-| 准入 | ProfileCatalog + 分层 admit（v0） | 未知 binding permit=1；尚未挂 queue |
+| 准入 | ProfileCatalog + opt-in queue gate（v0） | 未知 binding permit=1；`CLIYARD_ADMISSION=1` |
 
 ## License
 

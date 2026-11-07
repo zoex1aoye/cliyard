@@ -18,6 +18,18 @@ export {
   setBindingCapacity,
 } from "./catalog.js";
 export {
+  admissionDecisionsPath,
+  appendAdmissionDecision,
+  evaluateQueueAdmission,
+  isQueueAdmissionEnabled,
+  readAdmissionDecisions,
+  type AdmissionDecisionRecord,
+  type EvaluateQueueAdmissionInput,
+  type QueueAdmissionEvaluation,
+  type QueueAdmissionItemView,
+  type QueueAdmissionOptions,
+} from "./gate.js";
+export {
   PROFILE_CATALOG_VERSION,
   UNKNOWN_EXECUTION_PROFILE_PERMIT,
   isProfileBindingCapacity,

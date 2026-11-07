@@ -56,11 +56,11 @@ Authoritative detail: [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) · overview
 | **P1 / P1b** StateStore | **done** | SQLite authority + ledger/journal attach + `.cliyard/state.db` unify |
 | **P2a / P2b** daemon + ExecutionSupervisor | **done** | Read-only Control API; RuntimeHandle (launchd / Job Object residual) |
 | **P3** sandbox + independent verify + clean review | **in progress** | Sandbox opt-in + VT + Reviewer + intervention ledger + SkillPack **on mainline** |
-| **P4** routing / admission | **in progress** | ProfileCatalog + hierarchical admission v0 **open PR** |
+| **P4** routing / admission | **in progress** | ProfileCatalog **on mainline**; opt-in queue admission wire **open PR** |
 | **P5** human-machine UI | pending | Control API console |
 | **P6** endpoint acceptance | pending | Vue Liquid Glass TDesign via the tool |
 
-**Next after ProfileCatalog lands:** queue/scheduler admission wire and/or model-backed Reviewer (not default-on sandbox / unbounded parallel).
+**Next after admission wire lands:** routing A/B / default-on gate, and/or model-backed Reviewer (not unbounded parallel).
 
 ## What works today (honest)
 
@@ -83,14 +83,14 @@ On mainline today (foreground Supervisor, single-repo lock, sequential queue —
 - **StateStore** (`cdde392` / `1fd737f`): event-sourced facts + projection; run/queue/ledger/journal write authority on `.cliyard/state.db` when SQLite is available
 - **`cliyardd` + read-only Control API** (`1f4be2d`) and **ExecutionSupervisor / RuntimeHandle** (`6f9e550`)
 
-**P0–P2b are closed on mainline.** P3 through SkillPack is on mainline (sandbox/VT **opt-in**); ProfileCatalog admission v0 is the open P4 slice.
+**P0–P2b are closed on mainline.** P3 through SkillPack is on mainline (sandbox/VT **opt-in**); ProfileCatalog is on mainline; opt-in admission queue wire is the open P4 slice.
 
 ## What we do not claim
 
 - Not default-on OS write prevention; not credential / network isolation (Boundary remains post-hoc detection)
 - Not a dispatch-owning daemon, cross-host recovery, Windows Job Object parity, or 24-hour unattended operation
 - Not automatic Plan approval, automatic `main` merge, or unbounded parallelism
-- Not production-ready dynamic routing / queue-wired hierarchical admission (catalog v0 exists; no learned ramp)
+- Not production-ready dynamic routing / default-on hierarchical admission (catalog + opt-in queue gate exist; no learned ramp)
 - Not a model-backed Reviewer; intervention ledger automation / Control API write not shipped
 - Not a recommended supervised pilot yet — DCP v2 still needs a human decision; P3 residuals remain
 
@@ -172,7 +172,7 @@ Standing rules: [`.agents/rules/`](.agents/rules/). Task SOPs: [`.agents/skills/
 | Clean review | ReviewFinding / CleanReviewContext (v0) | Fixture reviewer; model adapter next |
 | Human interventions | Intervention ledger (v0) | Six roles; observational; no auto-execute |
 | Skill provenance | SkillPack digests (v0) | `.agents/skills` → pack digest + run binding |
-| Admission | ProfileCatalog + hierarchical admit (v0) | Unknown binding permit=1; not queue-wired yet |
+| Admission | ProfileCatalog + opt-in queue gate (v0) | Unknown binding permit=1; `CLIYARD_ADMISSION=1` |
 
 ## License
 
