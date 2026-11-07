@@ -1,0 +1,50 @@
+{
+  "planId": "verification-task-v0",
+  "tasks": [
+    {
+      "taskId": "verification-task-v0",
+      "goal": "Background VerificationTask v0: add src/verification/task-types.ts (VerificationTask status machine including lost; output uri/offset; deliveredAt latch; ownerIdentity via RuntimeProcessIdentity). Add src/verification/task-store.ts for atomic JSON under .cliyard/verification/<id>.json (save/load/list). Add src/verification/task-runner.ts to start a detached finite command process group in a caller-supplied worktree cwd bound to artifactCommit, append output, advance offset, persist identity, set succeeded/failed/canceled. Add src/verification/task-recovery.ts recoverVerificationTasks(repoRoot) that marks running/stopping without live matching identity as lost (never succeeded by inference). Export from src/verification/index.ts (or existing barrel). Add tests/verification-task.test.ts covering offset advance, idempotent deliveredAt, parent-exit survival of verify child, recovery orphan→lost. Evidence docs/evidence/VERIFICATION_TASK_V0.md + CURRENT_STATE/ROADMAP.",
+      "nonGoals": [
+        "Do not replace createShellVerifier inside runClosedLoop in this slice.",
+        "Do not implement Reviewer or Harness Eval scenarios.",
+        "Do not start RuntimeManager services or claim OS sandbox.",
+        "Do not grant acceptance from VerificationTask status alone."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/verification-task-v0.md",
+        "design/continuous-harness-v2.md",
+        "src/verification/verifier.ts",
+        "src/runtime/types.ts",
+        "src/runtime/process.ts",
+        "src/agents/process-tree.ts",
+        "docs/CURRENT_STATE.md"
+      ],
+      "writePaths": [
+        "src/verification/task-types.ts",
+        "src/verification/task-store.ts",
+        "src/verification/task-runner.ts",
+        "src/verification/task-recovery.ts",
+        "src/verification/index.ts",
+        "tests/verification-task.test.ts",
+        "docs/evidence/VERIFICATION_TASK_V0.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/verification-task.test.ts"
+      ],
+      "deliverables": [
+        "Durable VerificationTask model + runner + recovery.",
+        "Focused fixtures proving offset, latch, survival, lost recovery."
+      ],
+      "forbidden": [
+        "Do not mark uncertain running tasks as succeeded on recovery.",
+        "Do not leave forever-running records when identity is gone.",
+        "Do not invent a worktree checkout inside the runner."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}
