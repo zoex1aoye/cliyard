@@ -1,0 +1,51 @@
+{
+  "planId": "reviewer-model-adapter-v0",
+  "tasks": [
+    {
+      "taskId": "reviewer-model-adapter-v0",
+      "goal": "Model-backed Reviewer adapter v0: add src/review/reviewer.ts (shared Reviewer interface). Add src/review/model-reviewer.ts createModelReviewer with CleanReviewContext-only prompt, injectable ModelReviewInvoker, strict JSON findings parse + validateReviewFinding, proposeFindings persistence. Align createFixtureReviewer with Reviewer. Export from src/review/index.ts. tests/reviewer-model-adapter.test.ts. Evidence REVIEWER_MODEL_ADAPTER_V0.md + CURRENT_STATE/ROADMAP/README bilingual.",
+      "nonGoals": [
+        "Do not wire into the acceptance / closed-loop path yet.",
+        "Do not call a live provider in default tests.",
+        "Do not auto-confirm findings or auto-merge.",
+        "Do not embed API keys, endpoint URLs, or full provider transcripts in the durable session.",
+        "Do not replace Verifier / VerificationTask."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/reviewer-model-adapter-v0.md",
+        "design/reviewer-clean-context-v0.md",
+        "src/review/fixture-reviewer.ts",
+        "src/review/context.ts",
+        "src/review/findings.ts",
+        "src/review/session.ts"
+      ],
+      "writePaths": [
+        "src/review/reviewer.ts",
+        "src/review/model-reviewer.ts",
+        "src/review/fixture-reviewer.ts",
+        "src/review/index.ts",
+        "tests/reviewer-model-adapter.test.ts",
+        "docs/evidence/REVIEWER_MODEL_ADAPTER_V0.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md",
+        "README.md",
+        "README.zh-CN.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/reviewer-model-adapter.test.ts tests/reviewer-clean-context.test.ts"
+      ],
+      "deliverables": [
+        "Injectable model Reviewer over CleanReviewContext.",
+        "Focused tests + evidence + status docs."
+      ],
+      "forbidden": [
+        "Do not grant acceptance from findings.",
+        "Do not include chat/prompt/selfAssessment in the model prompt payload.",
+        "Do not store provider transcripts in the review session."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}
