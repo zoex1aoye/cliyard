@@ -36,12 +36,20 @@ export {
   routingDecisionsPath,
   selectExecutionProfile,
   type ExecutionRoutingDecision,
+  type RoutingAttributionRole,
   type RoutingCandidateView,
   type RoutingDecisionCode,
   type RoutingDecisionRecord,
   type SelectExecutionProfileInput,
   type TaskRoutingRequirements,
 } from "./routing.js";
+export {
+  selectDesignElaboratorProfile,
+  type DesignElaboratorMode,
+  type DesignRoutingDecision,
+  type DesignRoutingRequirements,
+  type SelectDesignElaboratorProfileInput,
+} from "./design-routing.js";
 export {
   evaluateQueueRoutingGate,
   isQueueRoutingEnabled,
