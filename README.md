@@ -55,12 +55,12 @@ Authoritative detail: [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) · overview
 | **P0** legacy closeout | **done** | Freeze binding |
 | **P1 / P1b** StateStore | **done** | SQLite authority + ledger/journal attach + `.cliyard/state.db` unify |
 | **P2a / P2b** daemon + ExecutionSupervisor | **done** | Read-only Control API; RuntimeHandle (launchd / Job Object residual) |
-| **P3** sandbox + independent verify + clean review | **in progress** | Sandbox opt-in + VT + Reviewer + intervention ledger **on mainline**; SkillPack provenance v0 **open PR** |
-| **P4** routing / admission | pending | ProfileCatalog |
+| **P3** sandbox + independent verify + clean review | **in progress** | Sandbox opt-in + VT + Reviewer + intervention ledger + SkillPack **on mainline** |
+| **P4** routing / admission | **in progress** | ProfileCatalog + hierarchical admission v0 **open PR** |
 | **P5** human-machine UI | pending | Control API console |
 | **P6** endpoint acceptance | pending | Vue Liquid Glass TDesign via the tool |
 
-**Next after SkillPack lands:** ProfileCatalog / hierarchical admission, and/or model-backed Reviewer (not default-on sandbox / unbounded parallel).
+**Next after ProfileCatalog lands:** queue/scheduler admission wire and/or model-backed Reviewer (not default-on sandbox / unbounded parallel).
 
 ## What works today (honest)
 
@@ -76,20 +76,21 @@ On mainline today (foreground Supervisor, single-repo lock, sequential queue —
 - **Background VerificationTask (P3):** durable `.cliyard/verification/`, detached runner, recovery → `lost`; opt-in `CLIYARD_BACKGROUND_VERIFY=1` batch wire
 - **Clean-context Reviewer v0:** `ReviewFinding` + chat-free context + durable `.cliyard/reviews/` (fixture reviewer; no model yet)
 - **Human intervention ledger v0:** six roles, durable `.cliyard/interventions/`, secret-refusing reasons (observational)
+- **SkillPack provenance v0:** `.agents/skills` digests + durable pack snapshot + run binding
 - Failure taxonomy and cost truth (resume retains abandoned attempts; historical missing has an import constraint)
 - Task Architect: produces a human-reviewable Plan only — never freezes or dispatches
 - Deterministic integration full-suite gate, estimate-plan telemetry calibration, Linux verifier process-group timeout reclaim
 - **StateStore** (`cdde392` / `1fd737f`): event-sourced facts + projection; run/queue/ledger/journal write authority on `.cliyard/state.db` when SQLite is available
 - **`cliyardd` + read-only Control API** (`1f4be2d`) and **ExecutionSupervisor / RuntimeHandle** (`6f9e550`)
 
-**P0–P2b are closed on mainline.** P3 through intervention ledger is on mainline (sandbox/VT **opt-in**); SkillPack provenance v0 is the open slice.
+**P0–P2b are closed on mainline.** P3 through SkillPack is on mainline (sandbox/VT **opt-in**); ProfileCatalog admission v0 is the open P4 slice.
 
 ## What we do not claim
 
 - Not default-on OS write prevention; not credential / network isolation (Boundary remains post-hoc detection)
 - Not a dispatch-owning daemon, cross-host recovery, Windows Job Object parity, or 24-hour unattended operation
 - Not automatic Plan approval, automatic `main` merge, or unbounded parallelism
-- Not production-ready dynamic routing / ProfileCatalog activation / hierarchical admission
+- Not production-ready dynamic routing / queue-wired hierarchical admission (catalog v0 exists; no learned ramp)
 - Not a model-backed Reviewer; intervention ledger automation / Control API write not shipped
 - Not a recommended supervised pilot yet — DCP v2 still needs a human decision; P3 residuals remain
 
@@ -171,6 +172,7 @@ Standing rules: [`.agents/rules/`](.agents/rules/). Task SOPs: [`.agents/skills/
 | Clean review | ReviewFinding / CleanReviewContext (v0) | Fixture reviewer; model adapter next |
 | Human interventions | Intervention ledger (v0) | Six roles; observational; no auto-execute |
 | Skill provenance | SkillPack digests (v0) | `.agents/skills` → pack digest + run binding |
+| Admission | ProfileCatalog + hierarchical admit (v0) | Unknown binding permit=1; not queue-wired yet |
 
 ## License
 
