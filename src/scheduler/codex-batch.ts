@@ -19,6 +19,11 @@ import { spawn } from "node:child_process";
 import { createClaudeAdapter } from "../agents/claude.js";
 import { createCodexAdapter } from "../agents/codex.js";
 import {
+  createBackgroundVerifier,
+  isBackgroundVerificationEnabled,
+  recoverVerificationTasks,
+} from "../verification/index.js";
+import {
   BUDGET_CONTINUATION_POLICY_VERSION,
   DEFAULT_BUDGET_CONTINUATION_POLICY,
   MAX_BUDGET_CONTINUATIONS,
@@ -163,6 +168,13 @@ export interface CodexBatchOptions {
    * the adapter unless that factory reads this field itself.
    */
   sandbox?: import("../sandbox/worker-wire.js").WorkerSandboxOptions;
+  /**
+   * Opt-in background VerificationTask verify path. When true (or
+   * CLIYARD_BACKGROUND_VERIFY=1), non-dry-run batches use
+   * createBackgroundVerifier instead of createShellVerifier and run
+   * recoverVerificationTasks once at batch start. Dry-run stays on mock.
+   */
+  backgroundVerification?: boolean;
 }
 
 /** Safe default gate: full suite then build, never a model. */
@@ -1155,6 +1167,11 @@ export async function runCodexBatch(
     `[${workerKind}-batch] integration ${integration.branch} → ${integration.worktreePath}`,
   );
 
+  const backgroundVerification = isBackgroundVerificationEnabled(opts);
+  if (backgroundVerification && !dryRun) {
+    await recoverVerificationTasks({ repoRoot });
+  }
+
   try {
     if (checkpoint) {
       const integrationHead = await gitHead(integration.worktreePath);
@@ -1457,14 +1474,25 @@ export async function runCodexBatch(
           // logs, leases) and the exact task worktree (service cwd).
           const baseVerifier = dryRun
             ? createMockVerifier()
-            : createShellVerifier({
-                cwd: verifierCwd,
-                repoRoot,
-                worktree: verifierCwd,
-                ...(requestedManifest !== undefined
-                  ? { runtimeIdPrefix: requestedManifest.runId }
-                  : {}),
-              });
+            : backgroundVerification
+              ? createBackgroundVerifier({
+                  repoRoot,
+                  worktree: verifierCwd,
+                  ...(requestedManifest !== undefined
+                    ? {
+                        runId: requestedManifest.runId,
+                        contractsHash: requestedManifest.contractsHash,
+                      }
+                    : {}),
+                })
+              : createShellVerifier({
+                  cwd: verifierCwd,
+                  repoRoot,
+                  worktree: verifierCwd,
+                  ...(requestedManifest !== undefined
+                    ? { runtimeIdPrefix: requestedManifest.runId }
+                    : {}),
+                });
           const verifier: Verifier = {
             run: async (verifiedContract, agentResult) => {
               const result = await baseVerifier.run(
@@ -1656,6 +1684,9 @@ export async function runCodexBatch(
                   ...(result.sandbox !== undefined
                     ? { sandbox: result.sandbox }
                     : {}),
+                  ...(result.verification !== undefined
+                    ? { verification: result.verification }
+                    : {}),
                   workspaceBoundary: boundaryRecord,
                 };
                 manifest.integrationHead = integrationHead;
@@ -1708,6 +1739,9 @@ export async function runCodexBatch(
                   ),
                   ...(result.sandbox !== undefined
                     ? { sandbox: result.sandbox }
+                    : {}),
+                  ...(result.verification !== undefined
+                    ? { verification: result.verification }
                     : {}),
                   // One bounded evidence record for every task in the wave,
                   // accepted or rejected. Full snapshots stay in memory.

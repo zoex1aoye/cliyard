@@ -48,6 +48,10 @@ import {
   isSandboxReport,
   type SandboxReport,
 } from "../sandbox/types.js";
+import {
+  isVerificationObservation,
+  type VerificationObservation,
+} from "../verification/background-verifier.js";
 
 export interface LoopOptions {
   contract: TaskContract;
@@ -115,6 +119,11 @@ export interface LoopResult {
    * Absence means sandbox was not enabled. Never grants acceptance.
    */
   sandbox?: SandboxReport;
+  /**
+   * Observational background VerificationTask summary from the last verify.
+   * Absence means shell/mock verify was used. Never grants acceptance.
+   */
+  verification?: import("../verification/background-verifier.js").VerificationObservation;
 }
 
 function setStatus(
@@ -174,6 +183,8 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
   let taskBudget: TaskBudgetContinuationState | undefined;
   /** Last valid sandbox report from a worker attempt (observational). */
   let sandbox: SandboxReport | undefined;
+  /** Last valid background verification observation (observational). */
+  let verification: VerificationObservation | undefined;
 
   while (true) {
     await updateLedger(ledgerPath, (ledger) => {
@@ -362,6 +373,12 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
 
     if (effectiveExitCode !== 0) {
       const v = await verifier.run(contract, agentResult);
+      if (
+        v.verification !== undefined &&
+        isVerificationObservation(v.verification)
+      ) {
+        verification = v.verification;
+      }
       // A worker exit is never relabeled as a verifier rejection, even when
       // the verifier also fails afterward. Adapters without structured
       // failure metadata fall back to normal bounded classification.
@@ -401,6 +418,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         cleanupFailure,
         taskBudget,
         sandbox,
+        verification,
       );
     }
 
@@ -411,6 +429,12 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
     });
 
     const verify = await verifier.run(contract, agentResult);
+    if (
+      verify.verification !== undefined &&
+      isVerificationObservation(verify.verification)
+    ) {
+      verification = verify.verification;
+    }
     log(`  verify: ok=${verify.ok}`);
     log(verify.logTail.split("\n").map((l) => `    ${l}`).join("\n"));
 
@@ -435,6 +459,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         cleanupFailure,
         taskBudget,
         sandbox,
+        verification,
       );
     }
 
@@ -479,6 +504,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         cleanupFailure,
         taskBudget,
         sandbox,
+        verification,
       );
     }
     priorFailure = {
@@ -515,6 +541,7 @@ function finish(
   cleanupFailure: FailureRecord | undefined,
   taskBudget: TaskBudgetContinuationState | undefined,
   sandbox: SandboxReport | undefined,
+  verification: VerificationObservation | undefined,
 ): LoopResult {
   return {
     taskId: record.taskId,
@@ -548,6 +575,7 @@ function finish(
     })),
     ...(cleanupFailure !== undefined ? { cleanupFailure } : {}),
     ...(sandbox !== undefined ? { sandbox } : {}),
+    ...(verification !== undefined ? { verification } : {}),
   };
 }
 

@@ -156,6 +156,11 @@ export interface RunTaskState {
    * WorkspaceBoundary detection. Older manifests omit this field.
    */
   sandbox?: SandboxReport;
+  /**
+   * Background VerificationTask observation for the latest verify attempt.
+   * Observational only; never grants acceptance. Older manifests omit it.
+   */
+  verification?: import("../verification/background-verifier.js").VerificationObservation;
 }
 
 /** A rejected attempt whose worktree still validates for reuse. */
