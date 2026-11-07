@@ -101,10 +101,16 @@ DSH、WorkBuddy 或未来自有 Web UI 是可替换人机入口；cliyard 负责
 ## 6. 当前安全与能力事实
 
 截至 2026-11-08，**止损**：现行 MVP 执行线是 **DSH / Cordis 插件**
-（`dsh-plugin-cliyard`，M0–M4），不再加深自研 SQLite ledger / Landlock /
-端口租约 / 进程树 ownership。主线 P0–P4 至 `ba2f458` 保留为库存；Routing A
-停泊。契约草案见
-[design/dsh-plugin-cliyard-taskcontract-v0.md](design/dsh-plugin-cliyard-taskcontract-v0.md)。
+（`dsh-plugin-cliyard`，M0 / M0.5 / M1–M4），不再加深自研 SQLite ledger /
+Landlock / 端口租约 / 进程树 ownership。主线 P0–P4 至 `ba2f458` 保留为库存；
+Routing A 停泊。
+
+- MVP 细则（省下什么、可借/必自研、阶段门禁）：
+  [design/dsh-plugin-mvp-roadmap-v0.md](design/dsh-plugin-mvp-roadmap-v0.md)
+- 契约草案：
+  [design/dsh-plugin-cliyard-taskcontract-v0.md](design/dsh-plugin-cliyard-taskcontract-v0.md)
+- Master system 人设：
+  [design/dsh-master-persona-v0.md](design/dsh-master-persona-v0.md)
 
 完整事实、分支、current priority 和 release gate 只以
 [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) 为准；路线概览见

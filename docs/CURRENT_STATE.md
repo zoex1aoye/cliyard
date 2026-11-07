@@ -5,7 +5,8 @@
 > runtime/OS ownership. Mainline through PR #24 (`ba2f458`) is inventory.
 > Routing A PR is **parked**. Contract draft:
 > [dsh-plugin-cliyard-taskcontract-v0.md](../design/dsh-plugin-cliyard-taskcontract-v0.md).
-> Roadmap: [ROADMAP.md](ROADMAP.md).
+> Roadmap: [ROADMAP.md](ROADMAP.md) · MVP detail:
+> [dsh-plugin-mvp-roadmap-v0.md](../design/dsh-plugin-mvp-roadmap-v0.md).
 >
 > This page is the single current-status authority for implementation order,
 > known gaps and the next executable slice. Product rationale remains in
@@ -154,27 +155,29 @@ Do not start new mainline knives that deepen the frozen inventory below.
 
 ### Active — dsh-plugin-cliyard
 
-0. **M0 TaskContract shell (draft)** — full-scene contract:
-   `intent` + `workspace` + `driver` (`local-cli` | `dsh-llm` |
-   `external-api`) + `verify` + `cleanup`. Draft:
-   [dsh-plugin-cliyard-taskcontract-v0.md](../design/dsh-plugin-cliyard-taskcontract-v0.md).
-   Next doc step when approved: JSON Schema + M1 mock fixture.
+Detail: [dsh-plugin-mvp-roadmap-v0.md](../design/dsh-plugin-mvp-roadmap-v0.md).
+Master persona: [dsh-master-persona-v0.md](../design/dsh-master-persona-v0.md).
 
-1. **M1 idle spin + cwd lock** — DSH `/cliyard-test`: mock frozen contract →
-   `git worktree` / assets dir → `spawn` with `cwd=workspace.path`; trunk
-   untouched. No LLM compiler yet.
+0. **M0 TaskContract shell (draft)** — `intent` + `workspace` + `driver`
+   (`local-cli` | `dsh-llm` | `external-api`) + `verify` + `cleanup`.
+   Next: JSON Schema + code mock fixture.
 
-2. **M2 dispose + optional wrap** — Cordis `subCtx.on('dispose')` reclaim;
-   optional docker/low-priv intercept. Not Landlock C++ as MVP path.
+1. **M0.5 Master system persona** — systemPrompt / personaPrefix (not only
+   AGENTS.md). Text in `dsh-master-persona-v0.prompt.txt`.
 
-3. **M3 Compiler + `/freeze`** — session/samples → Plan → human freeze →
-   TaskContract bytes immutable without new version.
+2. **M1 idle spin + cwd lock** — `/cliyard-test`: mock contract → worktree →
+   `local-cli` spawn; trunk untouched. Borrow worktree/conductor where useful.
 
-4. **M4 three-scene demos** — code / novel / drama drivers on the same shell.
+3. **M2 dispose + optional wrap** — Cordis `dispose`; optional docker/low-priv.
+   Not Landlock as MVP path.
 
-Soul kept: design-as-truth, workspace cage, deterministic verify, human
-freeze. Infrastructure borrowed: DSH session/LLM, Cordis context/dispose,
-stock persist if needed.
+4. **M3 Compiler + `/freeze`** — session → Plan → human freeze → immutable bytes.
+
+5. **M4 demos** — code local-CLI + one second scene on the same schema.
+
+Soul kept: design-as-truth, workspace cage, deterministic verify, human freeze.
+Infrastructure borrowed: DSH session/LLM, Cordis dispose, community worktree/CLI
+bridges where they do not own acceptance authority.
 
 ### Frozen — mainline inventory (do not deepen for MVP)
 

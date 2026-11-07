@@ -56,13 +56,14 @@ English: [README.md](README.md)
 | 轨道 | 状态 | 说明 |
 |---|---|---|
 | **M0** TaskContract 外壳 | **草案** | 通用 `intent` / `workspace` / `driver` / `verify` / `cleanup` |
+| **M0.5** Master system 人设 | **设计已落** | systemPrompt 宪法，不只靠 AGENTS.md |
 | **M1** 空转 + 目录锁 | **下一步** | `/cliyard-test` mock → worktree → `local-cli` spawn |
 | **M2** dispose + 可选包裹 | 未开始 | Cordis dispose；可选 docker/low-priv |
 | **M3** Compiler + `/freeze` | 未开始 | 会话 → Plan → 人工冻结 |
 | **M4** 三场景演示 | 未开始 | 代码 / 小说 / 短剧同一 Schema |
 | 主线 P0–P4 库存 | **MVP 冷冻** | 保留至 `ba2f458`；Routing A 停泊 |
 
-**下一步：** 确认 M0 契约草案 → M1 mock 隔离空转——不是再开 routing/StateStore 刀。
+**下一步：** M0 Schema 夹具 + M0.5 人设挂载 → M1 空转。细则：[design/dsh-plugin-mvp-roadmap-v0.md](design/dsh-plugin-mvp-roadmap-v0.md)。
 
 ## 今天能做什么（诚实版）
 

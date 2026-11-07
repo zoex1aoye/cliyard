@@ -55,13 +55,14 @@ Authoritative detail: [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) · overview
 | Track | Status | Notes |
 |---|---|---|
 | **M0** TaskContract shell | **draft** | Universal `intent` / `workspace` / `driver` / `verify` / `cleanup` |
+| **M0.5** Master system persona | **design** | systemPrompt law — not AGENTS.md-only |
 | **M1** idle spin + cwd lock | **next** | `/cliyard-test` mock → worktree → `local-cli` spawn |
 | **M2** dispose + optional wrap | pending | Cordis dispose; optional docker/low-priv |
 | **M3** Compiler + `/freeze` | pending | Session → Plan → human freeze |
 | **M4** three-scene demos | pending | code / novel / drama on one schema |
 | Mainline P0–P4 inventory | **frozen for MVP** | Kept through `ba2f458`; Routing A parked |
 
-**Next:** approve M0 contract draft → M1 mock isolation spawn — not another routing/StateStore knife.
+**Next:** M0 schema fixture + M0.5 persona mount → M1 idle spin. Detail: [design/dsh-plugin-mvp-roadmap-v0.md](design/dsh-plugin-mvp-roadmap-v0.md).
 
 ## What works today (honest)
 
