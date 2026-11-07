@@ -1,7 +1,7 @@
 # cliyard Current State
 
-> Verified: 2026-11-07 (Asia/Shanghai) — Reviewer v0 merged (`56c1bd2` /
-> PR #16); human intervention ledger v0 on branch (see evidence).
+> Verified: 2026-11-07 (Asia/Shanghai) — intervention ledger merged
+> (`0d96d61` / PR #17); SkillPack provenance v0 on branch (see evidence).
 >
 > This page is the single current-status authority for implementation order,
 > known gaps and the next executable slice. Product rationale remains in
@@ -212,13 +212,16 @@ list is its summary. New slices start only after a human-approved Plan.
    [REVIEWER_CLEAN_CONTEXT_V0.md](evidence/REVIEWER_CLEAN_CONTEXT_V0.md).
    Residual: model-backed reviewer adapter; wire into acceptance flow.
 
-8. **Human intervention ledger** — **v0 on branch**: six roles, durable
-   `.cliyard/interventions/`, secret-refusing reasons, observational only.
-   Evidence: [INTERVENTION_LEDGER_V0.md](evidence/INTERVENTION_LEDGER_V0.md).
+8. **Human intervention ledger** — **v0 merged** (`0d96d61`): six roles,
+   durable `.cliyard/interventions/`, secret-refusing reasons, observational
+   only. Evidence:
+   [INTERVENTION_LEDGER_V0.md](evidence/INTERVENTION_LEDGER_V0.md).
    Residual: automation of repeated Retry/Carry/Trigger; Control API surface.
 
-9. **SkillPack provenance**
-   Version rule/skill input by id, digest, entrypoint and capability.
+9. **SkillPack provenance** — **v0 on branch**: digest `.agents/skills`,
+   durable pack snapshot + run binding. Evidence:
+   [SKILLPACK_PROVENANCE_V0.md](evidence/SKILLPACK_PROVENANCE_V0.md).
+   Residual: RunManifest field; eval-gated default pack promotion.
 
 10. **ProfileCatalog, routing and hierarchical admission**
    Activated bindings only; unknown concurrency starts at one probe.

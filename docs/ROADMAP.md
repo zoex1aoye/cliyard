@@ -28,7 +28,7 @@ The endpoint has three inseparable parts:
 | P1b write cutover | **complete** (`1fd737f` + production ledger/journal attach + path unify) | Run + queue + ledger + journal single-writer on `.cliyard/state.db` | — |
 | P2a daemon + Control API | **complete** (`1f4be2d`) | `cliyardd` + read-only `/v1/status|events|runs` | Write/auth + daemon-owned dispatch deferred to P5 |
 | P2b ExecutionSupervisor | **complete** (`6f9e550`) | RuntimeHandle authority + continuity + conformance | launchd / systemd-run / Job Object backends |
-| P3 沙箱 + 独立验收 + 干净裁决 | **Reviewer v0 merged; intervention ledger next** | Opt-in sandbox + VT + ReviewFinding; intervention ledger on PR | model Reviewer; SkillPack; default-on VT/sandbox |
+| P3 沙箱 + 独立验收 + 干净裁决 | **intervention ledger merged; SkillPack next** | Opt-in sandbox + VT + Reviewer + interventions; SkillPack on PR | model Reviewer; ProfileCatalog; default-on VT/sandbox |
 | P4 路由 + 分层并行 | pending | ProfileCatalog activation + routing A/B + hierarchical admission | — |
 | P5 人机面 | pending | Web console over Control API; DSH thin client | desktop packaging |
 | P6 终点验收 | pending | Vue + Liquid Glass TDesign through the tool itself | — |
@@ -78,8 +78,9 @@ Clean-context Reviewer v0 (findings + chat-free context + durable session):
 [REVIEWER_CLEAN_CONTEXT_V0.md](./evidence/REVIEWER_CLEAN_CONTEXT_V0.md).
 Human intervention ledger v0 (six roles, secret-free durable events):
 [INTERVENTION_LEDGER_V0.md](./evidence/INTERVENTION_LEDGER_V0.md).
-Next: SkillPack provenance; model-backed Reviewer adapter; default-on
-VT/sandbox wrap.
+SkillPack provenance v0 (skill digests + run binding):
+[SKILLPACK_PROVENANCE_V0.md](./evidence/SKILLPACK_PROVENANCE_V0.md).
+Next: ProfileCatalog / routing; model-backed Reviewer; default-on VT/sandbox.
 
 ### P4 — routing and hierarchical parallelism
 
