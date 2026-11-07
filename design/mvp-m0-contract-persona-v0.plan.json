@@ -1,0 +1,52 @@
+{
+  "planId": "mvp-m0-contract-persona-v0",
+  "tasks": [
+    {
+      "taskId": "mvp-m0-contract-persona-v0",
+      "goal": "M0+M0.5: add design/dsh-plugin-cliyard-taskcontract-v0.schema.json; examples/mvp/code-local-cli.mock.contract.json; src/mvp/taskcontract.ts validator (no absolute driver.target); src/mvp/master-persona.ts load prompt text; plugins/dsh-cliyard mount ctx.systemPrompt.section when present; tests/mvp-taskcontract.test.ts + tests/mvp-master-persona.test.ts; evidence + CURRENT_STATE/ROADMAP status touch.",
+      "nonGoals": [
+        "Do not implement /cliyard-test spawn (M1).",
+        "Do not deepen SQLite / Landlock / process-tree.",
+        "Do not require live DSH for unit tests."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/mvp-m0-contract-persona-v0.md",
+        "design/dsh-plugin-cliyard-taskcontract-v0.md",
+        "design/dsh-master-persona-v0.md",
+        "design/dsh-master-persona-v0.prompt.txt",
+        "plugins/dsh-cliyard/index.js"
+      ],
+      "writePaths": [
+        "design/dsh-plugin-cliyard-taskcontract-v0.schema.json",
+        "examples/mvp/code-local-cli.mock.contract.json",
+        "src/mvp/taskcontract.ts",
+        "src/mvp/master-persona.ts",
+        "src/mvp/index.ts",
+        "plugins/dsh-cliyard/lib/master-persona.js",
+        "plugins/dsh-cliyard/index.js",
+        "plugins/dsh-cliyard/README.md",
+        "tests/mvp-taskcontract.test.ts",
+        "tests/mvp-master-persona.test.ts",
+        "docs/evidence/MVP_M0_CONTRACT_PERSONA.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md",
+        "design/dsh-plugin-mvp-roadmap-v0.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/mvp-taskcontract.test.ts tests/mvp-master-persona.test.ts"
+      ],
+      "deliverables": [
+        "Validatable local-CLI TaskContract schema + mock fixture.",
+        "Master persona mount helper for DSH systemPrompt."
+      ],
+      "forbidden": [
+        "Do not add ajv or other schema runtime deps; hand validator is enough for v0.",
+        "Do not write absolute executable paths into fixtures.",
+        "Do not auto-dispatch or freeze Plans."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}

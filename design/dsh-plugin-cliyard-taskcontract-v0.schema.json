@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cliyard.local/schemas/dsh-plugin-cliyard-taskcontract-v0.schema.json",
+  "title": "cliyard local-CLI TaskContract v0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractVersion",
+    "contractId",
+    "scene",
+    "frozen",
+    "intent",
+    "workspace",
+    "driver",
+    "sandbox",
+    "verify",
+    "cleanup"
+  ],
+  "properties": {
+    "contractVersion": { "const": 1 },
+    "contractId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "scene": { "enum": ["code", "novel", "drama"] },
+    "frozen": { "type": "boolean" },
+    "frozenAt": { "type": "string", "minLength": 1 },
+    "planId": { "type": "string", "minLength": 1 },
+    "dependsOn": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+      }
+    },
+    "intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["goal", "acceptance"],
+      "properties": {
+        "goal": { "type": "string", "minLength": 1 },
+        "nonGoals": { "type": "array", "items": { "type": "string" } },
+        "acceptance": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "assets": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/asset" }
+        }
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "writeRoots"],
+      "properties": {
+        "kind": { "enum": ["git-worktree", "assets"] },
+        "path": { "type": "string", "minLength": 1 },
+        "baseRef": { "type": "string", "minLength": 1 },
+        "writeRoots": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "snapshotFrom": { "type": "string", "minLength": 1 }
+      }
+    },
+    "driver": {
+      "oneOf": [
+        { "$ref": "#/$defs/driverLocalCli" },
+        { "$ref": "#/$defs/driverDshLlm" },
+        { "$ref": "#/$defs/driverExternalApi" }
+      ]
+    },
+    "sandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": { "enum": ["none", "docker", "low-priv"] }
+      }
+    },
+    "verify": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commands"],
+      "properties": {
+        "commands": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["argv"],
+            "properties": {
+              "argv": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "cwd": { "enum": ["workspace", "repo"] }
+            }
+          }
+        }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["onCancel", "keepWorkspace"],
+      "properties": {
+        "onCancel": { "enum": ["dispose-child"] },
+        "keepWorkspace": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "registryTarget": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(claude|codex|opencode|dsh\\.chat|multimodal\\.render|custom:[A-Za-z0-9][A-Za-z0-9._:-]{0,63})$"
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "role"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": {
+          "enum": ["text", "image", "video", "audio", "code", "url"]
+        },
+        "path": { "type": "string", "minLength": 1 },
+        "uri": { "type": "string", "minLength": 1 },
+        "role": {
+          "enum": ["style", "spec", "reference", "input", "fixture"]
+        }
+      },
+      "anyOf": [{ "required": ["path"] }, { "required": ["uri"] }]
+    },
+    "driverLocalCli": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "target", "argv", "timeoutSec"],
+      "properties": {
+        "kind": { "const": "local-cli" },
+        "target": { "$ref": "#/$defs/registryTarget" },
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "stdin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": {
+              "enum": ["none", "assets", "json-assets", "text-assets", "raw"]
+            },
+            "assetIds": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "raw": { "type": "string" }
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "timeoutSec": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "driverDshLlm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "target", "timeoutSec"],
+      "properties": {
+        "kind": { "const": "dsh-llm" },
+        "target": { "$ref": "#/$defs/registryTarget" },
+        "systemAssetIds": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "userPromptTemplate": { "type": "string" },
+        "output": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "format"],
+          "properties": {
+            "path": { "type": "string", "minLength": 1 },
+            "format": { "type": "string", "minLength": 1 }
+          }
+        },
+        "timeoutSec": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "driverExternalApi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "target", "timeoutSec"],
+      "properties": {
+        "kind": { "const": "external-api" },
+        "target": { "$ref": "#/$defs/registryTarget" },
+        "request": { "type": "object" },
+        "output": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "format"],
+          "properties": {
+            "path": { "type": "string", "minLength": 1 },
+            "format": { "type": "string", "minLength": 1 }
+          }
+        },
+        "timeoutSec": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

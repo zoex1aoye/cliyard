@@ -1,0 +1,56 @@
+{
+  "contractVersion": 1,
+  "contractId": "mvp-echo-worktree",
+  "scene": "code",
+  "frozen": true,
+  "frozenAt": "2026-11-07T16:50:00+08:00",
+  "planId": "mvp-m1-idle-spin",
+  "dependsOn": [],
+  "intent": {
+    "goal": "M1 idle-spin: run a registered local CLI inside an isolated git worktree",
+    "nonGoals": [
+      "Do not modify trunk tracked files",
+      "Do not call a real coding model yet"
+    ],
+    "acceptance": [
+      "Child process cwd equals workspace.path",
+      "Trunk working tree remains clean for tracked paths outside writeRoots",
+      "verify commands exit 0"
+    ],
+    "assets": [
+      {
+        "id": "spec-idle",
+        "kind": "text",
+        "path": "design/mvp-m0-contract-persona-v0.md",
+        "role": "spec"
+      }
+    ]
+  },
+  "workspace": {
+    "kind": "git-worktree",
+    "path": ".cliyard/worktrees/mvp-echo-worktree",
+    "baseRef": "HEAD",
+    "writeRoots": [".cliyard/mvp-echo/"]
+  },
+  "driver": {
+    "kind": "local-cli",
+    "target": "custom:echo-ok",
+    "argv": ["sh", "-c", "mkdir -p .cliyard/mvp-echo && echo ok > .cliyard/mvp-echo/hello.txt"],
+    "stdin": { "mode": "none" },
+    "env": { "CLIYARD_RUN_MODE": "contract" },
+    "timeoutSec": 60
+  },
+  "sandbox": { "mode": "none" },
+  "verify": {
+    "commands": [
+      {
+        "argv": ["test", "-f", ".cliyard/mvp-echo/hello.txt"],
+        "cwd": "workspace"
+      }
+    ]
+  },
+  "cleanup": {
+    "onCancel": "dispose-child",
+    "keepWorkspace": true
+  }
+}
