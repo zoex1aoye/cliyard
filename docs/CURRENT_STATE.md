@@ -1,7 +1,7 @@
 # cliyard Current State
 
-> Verified: 2026-11-07 (Asia/Shanghai) — P3c + VerificationTask v0 merged
-> (`0fadc1a` / PR #14); VT batch wire on branch (see evidence).
+> Verified: 2026-11-07 (Asia/Shanghai) — VT batch wire merged (`3d88342` /
+> PR #15); clean-context Reviewer v0 on branch (see evidence).
 >
 > This page is the single current-status authority for implementation order,
 > known gaps and the next executable slice. Product rationale remains in
@@ -196,9 +196,9 @@ list is its summary. New slices start only after a human-approved Plan.
    measurement; microVM tier. WorkspaceBoundary remains the independent
    post-run detection fallback.
 
-6. **Background VerificationTask** — **v0 merged** (`0fadc1a`); **opt-in
-   batch wire** on branch: durable `.cliyard/verification/`, detached worker
-   PG, offset + delivery latch, startup orphan → `lost`, plus
+6. **Background VerificationTask** — **v0 + opt-in batch wire merged**
+   (`0fadc1a`, `3d88342`): durable `.cliyard/verification/`, detached worker
+   PG, offset + delivery latch, startup orphan → `lost`,
    `createBackgroundVerifier` / `CLIYARD_BACKGROUND_VERIFY=1` / manifest
    `task.verification`. Evidence:
    [VERIFICATION_TASK_V0.md](evidence/VERIFICATION_TASK_V0.md),
@@ -206,8 +206,12 @@ list is its summary. New slices start only after a human-approved Plan.
    Residual: default-on background verify; RuntimeManager-backed verify
    services; cascade stop of owned tasks.
 
-7. **Clean-context Reviewer**
-   Structured `ReviewFinding` against exact diff + bounded evidence.
+7. **Clean-context Reviewer** — **v0 model/session on branch**:
+   `ReviewFinding`, chat-free `CleanReviewContext`, durable
+   `.cliyard/reviews/`, fixture reviewer (no model). Evidence:
+   [REVIEWER_CLEAN_CONTEXT_V0.md](evidence/REVIEWER_CLEAN_CONTEXT_V0.md).
+   Residual: model-backed reviewer adapter; wire into acceptance flow;
+   human intervention ledger.
 
 8. **Human intervention ledger**
    Retry / Judge / Approve / Carry / Trigger / Stand-in as auditable facts.

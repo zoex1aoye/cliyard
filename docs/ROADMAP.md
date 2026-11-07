@@ -28,7 +28,7 @@ The endpoint has three inseparable parts:
 | P1b write cutover | **complete** (`1fd737f` + production ledger/journal attach + path unify) | Run + queue + ledger + journal single-writer on `.cliyard/state.db` | — |
 | P2a daemon + Control API | **complete** (`1f4be2d`) | `cliyardd` + read-only `/v1/status|events|runs` | Write/auth + daemon-owned dispatch deferred to P5 |
 | P2b ExecutionSupervisor | **complete** (`6f9e550`) | RuntimeHandle authority + continuity + conformance | launchd / systemd-run / Job Object backends |
-| P3 沙箱 + 独立验收 + 干净裁决 | **VT v0 merged; opt-in VT batch wire next** | Sandbox + VT durable runner; background Verifier adapter | default-on VT/sandbox; Reviewer |
+| P3 沙箱 + 独立验收 + 干净裁决 | **VT batch wire merged; Reviewer v0 next** | Sandbox + VT + opt-in background verify; clean-context ReviewFinding | model Reviewer; default-on VT/sandbox; intervention ledger |
 | P4 路由 + 分层并行 | pending | ProfileCatalog activation + routing A/B + hierarchical admission | — |
 | P5 人机面 | pending | Web console over Control API; DSH thin client | desktop packaging |
 | P6 终点验收 | pending | Vue + Liquid Glass TDesign through the tool itself | — |
@@ -74,7 +74,10 @@ VerificationTask v0 (durable model, detached runner, recovery → `lost`):
 Opt-in batch wire (`createBackgroundVerifier` /
 `CLIYARD_BACKGROUND_VERIFY=1`):
 [VERIFICATION_BATCH_WIRE.md](./evidence/VERIFICATION_BATCH_WIRE.md).
-Next: clean-context Reviewer; default-on VT/sandbox wrap.
+Clean-context Reviewer v0 (findings + chat-free context + durable session):
+[REVIEWER_CLEAN_CONTEXT_V0.md](./evidence/REVIEWER_CLEAN_CONTEXT_V0.md).
+Next: model-backed Reviewer adapter; human intervention ledger; default-on
+VT/sandbox wrap.
 
 ### P4 — routing and hierarchical parallelism
 
