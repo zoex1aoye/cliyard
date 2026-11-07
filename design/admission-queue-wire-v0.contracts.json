@@ -1,0 +1,55 @@
+{
+  "planId": "admission-queue-wire-v0",
+  "contracts": [
+    {
+      "taskId": "admission-queue-wire-v0",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Opt-in queue admission wire: add src/admission/gate.ts (isQueueAdmissionEnabled, evaluateQueueAdmission, appendAdmissionDecision) using catalog + running-item counts; unknown permit=1; activated profile required. Wire into src/orchestration/queue-runner.ts before dispatchItem when enabled (QueueRunOptions.admission or CLIYARD_ADMISSION=1); on deny stop with admission-denied and leave item pending. Extend QueueStopReason + QueueRunSummary.observation. Export from src/admission/index.ts. tests/admission-queue-wire.test.ts. Evidence ADMISSION_QUEUE_WIRE_V0.md + CURRENT_STATE/ROADMAP/README bilingual."
+      ],
+      "nonGoals": [
+        "Do not enable admission by default.",
+        "Do not learn 429 ramps or auto-scale permits.",
+        "Do not parallelize the sequential foreground queue.",
+        "Do not hard-code warm-start 3 as a product constant.",
+        "Do not claim 24h unattended delivery."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/admission-queue-wire-v0.md",
+        "design/profile-catalog-admission-v0.md",
+        "src/admission/admit.ts",
+        "src/admission/catalog.ts",
+        "src/orchestration/queue-runner.ts"
+      ],
+      "writePaths": [
+        "src/admission/gate.ts",
+        "src/admission/index.ts",
+        "src/orchestration/queue-runner.ts",
+        "tests/admission-queue-wire.test.ts",
+        "docs/evidence/ADMISSION_QUEUE_WIRE_V0.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md",
+        "README.md",
+        "README.zh-CN.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "321b911ecb98109942d11337fded6bf98c1be8db",
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/admission-queue-wire.test.ts tests/profile-catalog-admission.test.ts"
+      ],
+      "deliverables": [
+        "Opt-in evaluateQueueAdmission wired into runQueue.",
+        "Focused tests + evidence + status docs."
+      ],
+      "forbidden": [
+        "Do not permanently block items on capacity denial.",
+        "Do not invent provider brand quotas.",
+        "Do not add default-on admission."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}
