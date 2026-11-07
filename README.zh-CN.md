@@ -56,12 +56,12 @@ English: [README.md](README.md)
 | **P0** 封刀 | **完成** | 冻结面已绑定 |
 | **P1 / P1b** StateStore | **完成** | SQLite 权威 + ledger/journal 挂接 + `.cliyard/state.db` 统一 |
 | **P2a / P2b** daemon + ExecutionSupervisor | **完成** | 只读 Control API；RuntimeHandle（launchd / Job Object 仍残留） |
-| **P3** 沙箱 + 独立验收 + 干净裁决 | **进行中** | 沙箱 opt-in + VT + Reviewer v0 **已在主线**；human intervention ledger v0 **开 PR 中** |
+| **P3** 沙箱 + 独立验收 + 干净裁决 | **进行中** | 沙箱 opt-in + VT + Reviewer + intervention ledger **已在主线**；SkillPack provenance v0 **开 PR 中** |
 | **P4** 路由 / 准入 | 未开始 | ProfileCatalog |
 | **P5** 人机面 | 未开始 | Control API 控制台 |
 | **P6** 终点验收 | 未开始 | 用工具交付 Vue Liquid Glass TDesign |
 
-**intervention ledger 合入后的下一刀：** SkillPack provenance，和/或模型驱动 Reviewer（不是 default-on sandbox / 无限并行）。
+**SkillPack 合入后的下一刀：** ProfileCatalog / 分层准入，和/或模型驱动 Reviewer（不是 default-on sandbox / 无限并行）。
 
 ## 今天能做什么（诚实版）
 
@@ -76,13 +76,14 @@ English: [README.md](README.md)
 - **Opt-in OS 沙箱（P3）：** nono `v0.81.0` pin、Landlock 诚实测量、`CLIYARD_SANDBOX=1` / `sandbox.enabled` worker wrap（非默认开启；无网络/凭据测量）
 - **Background VerificationTask（P3）：** 耐久 `.cliyard/verification/`、detached runner、恢复标 `lost`；opt-in `CLIYARD_BACKGROUND_VERIFY=1` batch wire
 - **Clean-context Reviewer v0：** `ReviewFinding` + 无聊天上下文 + 耐久 `.cliyard/reviews/`（fixture reviewer；尚无模型）
+- **Human intervention ledger v0：** 六角色、耐久 `.cliyard/interventions/`、拒收密钥型 reason（仅观测）
 - 失败分类与成本真相（含 resume 保留 abandoned attempt；历史 missing 有导入约束）
 - Task Architect：只产出供人审的 Plan，不自动冻结或派发
 - 确定性 integration full-suite gate、estimate-plan telemetry 校准、Linux verifier 进程组超时回收
 - **StateStore**（`cdde392` / `1fd737f`）：事件溯源 facts + projection；SQLite 可用时 run/queue/ledger/journal 写权威在 `.cliyard/state.db`
 - **`cliyardd` + 只读 Control API**（`1f4be2d`）与 **ExecutionSupervisor / RuntimeHandle**（`6f9e550`）
 
-**P0–P2b 已在主线封完。** P3 沙箱 + VerificationTask + Reviewer v0 已上主线（沙箱/VT 为 **opt-in**）；当前打开切片是 human intervention ledger v0。
+**P0–P2b 已在主线封完。** P3 至 intervention ledger 已上主线（沙箱/VT 为 **opt-in**）；当前打开切片是 SkillPack provenance v0。
 
 ## 今天还不能宣称什么
 
@@ -170,6 +171,7 @@ Windows + WSL 入口（`doctor` / `run` / `batch`）仍可用，但 **已不是�
 | 独立验收 | VerificationTask + 可选 background Verifier | Detached PG；默认仍 shell verify |
 | 干净裁决 | ReviewFinding / CleanReviewContext（v0） | Fixture reviewer；下一步模型适配器 |
 | 人工干预 | Intervention ledger（v0） | 六角色；仅观测；不自动执行 |
+| Skill 溯源 | SkillPack digests（v0） | `.agents/skills` → pack digest + run binding |
 
 ## License
 
