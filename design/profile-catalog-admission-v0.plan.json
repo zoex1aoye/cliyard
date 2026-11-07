@@ -1,0 +1,48 @@
+{
+  "planId": "profile-catalog-admission-v0",
+  "tasks": [
+    {
+      "taskId": "profile-catalog-admission-v0",
+      "goal": "ProfileCatalog + hierarchical admission v0: add src/admission/types.ts (catalog, binding capacity, admission decision). Add src/admission/catalog.ts load/save/activate/list/remove using parseExecutionProfile; durable .cliyard/profile-catalog.json; setBindingCapacity with configuredMax null ⇒ unknown. Add src/admission/admit.ts admitHierarchical conjunctive min across global/item/profile(/optional host) scopes; unknown profile permit=1; explainable reasons; never treat missing as infinity. Export src/admission/index.ts. tests/profile-catalog-admission.test.ts. Evidence PROFILE_CATALOG_ADMISSION_V0.md + CURRENT_STATE/ROADMAP/README bilingual.",
+      "nonGoals": [
+        "Do not implement learned 429 auto-scale ramp.",
+        "Do not auto-dispatch queue items from this module.",
+        "Do not hard-code provider brand concurrency tables.",
+        "Do not claim 24h unattended parallel delivery."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/profile-catalog-admission-v0.md",
+        "design/dynamic-parallel-admission-v0.md",
+        "src/execution/profile.ts",
+        "src/runtime/resource-snapshot.ts"
+      ],
+      "writePaths": [
+        "src/admission/types.ts",
+        "src/admission/catalog.ts",
+        "src/admission/admit.ts",
+        "src/admission/index.ts",
+        "tests/profile-catalog-admission.test.ts",
+        "docs/evidence/PROFILE_CATALOG_ADMISSION_V0.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md",
+        "README.md",
+        "README.zh-CN.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/profile-catalog-admission.test.ts"
+      ],
+      "deliverables": [
+        "Activated ProfileCatalog + explainable hierarchical admission.",
+        "Focused tests + evidence + status docs."
+      ],
+      "forbidden": [
+        "Do not encode permanent maxParallel=3 in admission logic.",
+        "Do not invent provider quota from model names.",
+        "Do not store secrets or endpoint URLs in the catalog."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}
