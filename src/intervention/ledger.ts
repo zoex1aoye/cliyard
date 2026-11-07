@@ -15,7 +15,6 @@ import {
 import { join } from "node:path";
 import {
   isHumanInterventionEvent,
-  isInterventionOutcome,
   isInterventionRole,
   type HumanInterventionEvent,
   type InterventionOutcome,
