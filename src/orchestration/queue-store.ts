@@ -72,6 +72,11 @@ import {
   type ExecutionRuntimeId,
 } from "../execution/profile.js";
 import {
+  isQueueRoutingEnabled,
+  resolveRoutedExecutionProfile,
+  type QueueRoutingOptions,
+} from "../admission/queue-routing-wire.js";
+import {
   FileEvidenceStore,
   META_PROJECTION_FORMAT,
   META_PROJECTION_SEQ,
@@ -1002,6 +1007,11 @@ export interface AddQueueItemInput {
   continuationPolicyPath?: string;
   planId?: string;
   maxAttempts?: number;
+  /**
+   * Opt-in Routing B: when no executionProfilePath, select an activated
+   * ProfileCatalog binding (`CLIYARD_ROUTING=1` when `enabled` omitted).
+   */
+  routing?: QueueRoutingOptions;
 }
 
 /**
@@ -1118,6 +1128,8 @@ export interface AddPlanQueueItemInput {
   /** Parsed once under the queue lock and persisted; the path is never stored. */
   continuationPolicyPath?: string;
   maxAttempts?: number;
+  /** Opt-in Routing B when no executionProfilePath (see AddQueueItemInput). */
+  routing?: QueueRoutingOptions;
 }
 
 /**
@@ -2362,6 +2374,7 @@ interface ExecutionFreezeInput {
   model?: string;
   executionProfilePath?: string;
   continuationPolicyPath?: string;
+  routing?: QueueRoutingOptions;
 }
 
 interface ExecutionFreeze {
@@ -2434,14 +2447,37 @@ function resolveExecutionFreeze(
 
   const runtimeId: ExecutionRuntimeId = input.worker ?? "claude";
   validateWorkerInput(runtimeId);
-  const profile =
-    executionProfile ??
-    createLegacyExecutionProfile({
-      runtimeId,
-      ...(optionalNonEmpty(input.model) !== undefined
-        ? { modelId: optionalNonEmpty(input.model)! }
-        : {}),
-    });
+  let profile = executionProfile;
+  if (!profile) {
+    if (isQueueRoutingEnabled(input.routing)) {
+      try {
+        profile = resolveRoutedExecutionProfile({
+          repoRoot,
+          worker: runtimeId,
+          ...(optionalNonEmpty(input.model) !== undefined
+            ? { model: optionalNonEmpty(input.model)! }
+            : {}),
+          ...(input.routing?.requirements !== undefined
+            ? { requirements: input.routing.requirements }
+            : {}),
+          ...(input.routing?.respectAdmission !== undefined
+            ? { respectAdmission: input.routing.respectAdmission }
+            : {}),
+        }).profile;
+      } catch (error) {
+        throw new QueueValidationError(
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    } else {
+      profile = createLegacyExecutionProfile({
+        runtimeId,
+        ...(optionalNonEmpty(input.model) !== undefined
+          ? { modelId: optionalNonEmpty(input.model)! }
+          : {}),
+      });
+    }
+  }
   return {
     worker: profile.runtimeId,
     model: profile.modelId,

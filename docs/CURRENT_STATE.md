@@ -1,7 +1,7 @@
 # cliyard Current State
 
-> Verified: 2026-11-07 (Asia/Shanghai) — acceptance-flow Reviewer wire
-> merged (`a5d1c47` / PR #22); execution routing (Routing B) v0 on branch
+> Verified: 2026-11-07 (Asia/Shanghai) — Routing B merged (`73b7e50` /
+> PR #23); router→queue wire (opt-in `CLIYARD_ROUTING`) on branch
 > (see evidence).
 >
 > This page is the single current-status authority for implementation order,
@@ -228,14 +228,16 @@ list is its summary. New slices start only after a human-approved Plan.
    Residual: RunManifest field; eval-gated default pack promotion.
 
 10. **ProfileCatalog, routing and hierarchical admission** — **catalog +
-    opt-in queue wire merged** (`1993cc4`, `b88889d`); **execution routing
-    (Routing B) v0 on branch**: deterministic activated-catalog profile
-    selection with explainable reasons. Evidence:
+    opt-in admission gate + Routing B merged** (`1993cc4`, `b88889d`,
+    `73b7e50`); **router→queue wire on branch** (`CLIYARD_ROUTING=1`):
+    add-time activated-catalog select (no legacy invent) + run-time
+    activated gate (`routing-denied` ⇒ pending). Evidence:
     [PROFILE_CATALOG_ADMISSION_V0.md](evidence/PROFILE_CATALOG_ADMISSION_V0.md),
     [ADMISSION_QUEUE_WIRE_V0.md](evidence/ADMISSION_QUEUE_WIRE_V0.md),
-    [EXECUTION_ROUTING_V0.md](evidence/EXECUTION_ROUTING_V0.md).
-    Residual: queue wire for router; Routing A (design attribution);
-    default-on admission; learned 429 ramp; intra-item ready-wave.
+    [EXECUTION_ROUTING_V0.md](evidence/EXECUTION_ROUTING_V0.md),
+    [ROUTING_QUEUE_WIRE_V0.md](evidence/ROUTING_QUEUE_WIRE_V0.md).
+    Residual: Routing A (design attribution); default-on admission/routing;
+    learned 429 ramp; intra-item ready-wave.
 
 ## Actual-project readiness
 

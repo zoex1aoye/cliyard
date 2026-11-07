@@ -43,6 +43,13 @@ export {
   type TaskRoutingRequirements,
 } from "./routing.js";
 export {
+  evaluateQueueRoutingGate,
+  isQueueRoutingEnabled,
+  resolveRoutedExecutionProfile,
+  type QueueRoutingOptions,
+  type ResolveRoutedExecutionProfileInput,
+} from "./queue-routing-wire.js";
+export {
   PROFILE_CATALOG_VERSION,
   UNKNOWN_EXECUTION_PROFILE_PERMIT,
   isProfileBindingCapacity,
