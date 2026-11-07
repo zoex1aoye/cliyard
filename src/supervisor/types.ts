@@ -161,6 +161,11 @@ export interface RunTaskState {
    * Observational only; never grants acceptance. Older manifests omit it.
    */
   verification?: import("../verification/background-verifier.js").VerificationObservation;
+  /**
+   * Clean-review observation for the latest acceptance-path review.
+   * Observational only; never grants acceptance. Older manifests omit it.
+   */
+  review?: import("../review/observation.js").ReviewObservation;
 }
 
 /** A rejected attempt whose worktree still validates for reuse. */

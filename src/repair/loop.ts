@@ -52,6 +52,13 @@ import {
   isVerificationObservation,
   type VerificationObservation,
 } from "../verification/background-verifier.js";
+import {
+  isCleanReviewEnabled,
+  isReviewObservation,
+  runAcceptanceReview,
+  type CleanReviewWireOptions,
+  type ReviewObservation,
+} from "../review/index.js";
 
 export interface LoopOptions {
   contract: TaskContract;
@@ -77,6 +84,12 @@ export interface LoopOptions {
    * Supervisor-backed batch supplies it so every spawned worker is tracked.
    */
   onWorkerLease?: WorkerLeaseAttacher;
+  /**
+   * Opt-in clean-context review after verify.ok. Observational only —
+   * findings never flip the loop verdict. Enable via `review.enabled` or
+   * `CLIYARD_CLEAN_REVIEW=1`.
+   */
+  review?: CleanReviewWireOptions;
 }
 
 export interface LoopResult {
@@ -124,6 +137,11 @@ export interface LoopResult {
    * Absence means shell/mock verify was used. Never grants acceptance.
    */
   verification?: import("../verification/background-verifier.js").VerificationObservation;
+  /**
+   * Observational clean-review summary after verify.ok when enabled.
+   * Absence means clean review was not enabled. Never grants acceptance.
+   */
+  review?: ReviewObservation;
 }
 
 function setStatus(
@@ -185,6 +203,8 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
   let sandbox: SandboxReport | undefined;
   /** Last valid background verification observation (observational). */
   let verification: VerificationObservation | undefined;
+  /** Last valid clean-review observation (observational). */
+  let review: ReviewObservation | undefined;
 
   while (true) {
     await updateLedger(ledgerPath, (ledger) => {
@@ -419,6 +439,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         taskBudget,
         sandbox,
         verification,
+        review,
       );
     }
 
@@ -439,10 +460,37 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
     log(verify.logTail.split("\n").map((l) => `    ${l}`).join("\n"));
 
     if (verify.ok) {
+      let reviewError: string | undefined;
+      if (isCleanReviewEnabled(opts.review)) {
+        // Observational only: failures here must not flip verify.ok into a
+        // reject, and findings never grant or revoke acceptance.
+        try {
+          const observation = await runAcceptanceReview({
+            contract,
+            options: opts.review ?? { enabled: true },
+          });
+          if (isReviewObservation(observation)) {
+            review = observation;
+          }
+        } catch (error) {
+          reviewError =
+            error instanceof Error ? error.message : String(error);
+          log(`  clean review skipped: ${reviewError}`);
+        }
+      }
       await updateLedger(ledgerPath, (ledger) => {
         record = ledger.tasks[contract.taskId]!;
         record.lastVerifyLog = verify.logTail;
         appendEvent(record, "verify.done", `ok=${verify.ok} exit=${verify.exitCode}`);
+        if (review !== undefined) {
+          appendEvent(
+            record,
+            "review.done",
+            `reviewId=${review.reviewId} findings=${review.findingCount}`,
+          );
+        } else if (reviewError !== undefined) {
+          appendEvent(record, "review.error", reviewError);
+        }
         setStatus(record, "accepted", log);
         record.verdict = "accepted";
         record.reason = `verified after ${attempt} repair(s)`;
@@ -460,6 +508,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         taskBudget,
         sandbox,
         verification,
+        review,
       );
     }
 
@@ -505,6 +554,7 @@ export async function runClosedLoop(opts: LoopOptions): Promise<LoopResult> {
         taskBudget,
         sandbox,
         verification,
+        review,
       );
     }
     priorFailure = {
@@ -542,6 +592,7 @@ function finish(
   taskBudget: TaskBudgetContinuationState | undefined,
   sandbox: SandboxReport | undefined,
   verification: VerificationObservation | undefined,
+  review: ReviewObservation | undefined,
 ): LoopResult {
   return {
     taskId: record.taskId,
@@ -576,6 +627,7 @@ function finish(
     ...(cleanupFailure !== undefined ? { cleanupFailure } : {}),
     ...(sandbox !== undefined ? { sandbox } : {}),
     ...(verification !== undefined ? { verification } : {}),
+    ...(review !== undefined ? { review } : {}),
   };
 }
 

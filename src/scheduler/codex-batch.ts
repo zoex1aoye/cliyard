@@ -23,6 +23,7 @@ import {
   isBackgroundVerificationEnabled,
   recoverVerificationTasks,
 } from "../verification/index.js";
+import { isCleanReviewEnabled } from "../review/index.js";
 import {
   BUDGET_CONTINUATION_POLICY_VERSION,
   DEFAULT_BUDGET_CONTINUATION_POLICY,
@@ -175,6 +176,12 @@ export interface CodexBatchOptions {
    * recoverVerificationTasks once at batch start. Dry-run stays on mock.
    */
   backgroundVerification?: boolean;
+  /**
+   * Opt-in clean-context review after verify.ok. When true (or
+   * `CLIYARD_CLEAN_REVIEW=1`), the closed loop opens a durable review
+   * session. Findings are observational and never flip the verdict.
+   */
+  cleanReview?: boolean;
 }
 
 /** Safe default gate: full suite then build, never a model. */
@@ -1171,6 +1178,11 @@ export async function runCodexBatch(
   if (backgroundVerification && !dryRun) {
     await recoverVerificationTasks({ repoRoot });
   }
+  const cleanReview = isCleanReviewEnabled(
+    opts.cleanReview === undefined
+      ? undefined
+      : { enabled: opts.cleanReview },
+  );
 
   try {
     if (checkpoint) {
@@ -1549,6 +1561,16 @@ export async function runCodexBatch(
                 }
               : {}),
             ...(onWorkerLease ? { onWorkerLease } : {}),
+            ...(cleanReview && !dryRun
+              ? {
+                  review: {
+                    enabled: true,
+                    controlRepoRoot: repoRoot,
+                    worktree: workerCwd,
+                    baseCommit: contract.baseCommit,
+                  },
+                }
+              : {}),
           });
           // Every dispatched task gets a final worktree comparison, even when
           // the worker never collected.
@@ -1687,6 +1709,9 @@ export async function runCodexBatch(
                   ...(result.verification !== undefined
                     ? { verification: result.verification }
                     : {}),
+                  ...(result.review !== undefined
+                    ? { review: result.review }
+                    : {}),
                   workspaceBoundary: boundaryRecord,
                 };
                 manifest.integrationHead = integrationHead;
@@ -1742,6 +1767,9 @@ export async function runCodexBatch(
                     : {}),
                   ...(result.verification !== undefined
                     ? { verification: result.verification }
+                    : {}),
+                  ...(result.review !== undefined
+                    ? { review: result.review }
                     : {}),
                   // One bounded evidence record for every task in the wave,
                   // accepted or rejected. Full snapshots stay in memory.
