@@ -1,7 +1,7 @@
 # cliyard Current State
 
-> Verified: 2026-11-07 (Asia/Shanghai) — VT batch wire merged (`3d88342` /
-> PR #15); clean-context Reviewer v0 on branch (see evidence).
+> Verified: 2026-11-07 (Asia/Shanghai) — Reviewer v0 merged (`56c1bd2` /
+> PR #16); human intervention ledger v0 on branch (see evidence).
 >
 > This page is the single current-status authority for implementation order,
 > known gaps and the next executable slice. Product rationale remains in
@@ -206,15 +206,16 @@ list is its summary. New slices start only after a human-approved Plan.
    Residual: default-on background verify; RuntimeManager-backed verify
    services; cascade stop of owned tasks.
 
-7. **Clean-context Reviewer** — **v0 model/session on branch**:
+7. **Clean-context Reviewer** — **v0 merged** (`56c1bd2`):
    `ReviewFinding`, chat-free `CleanReviewContext`, durable
    `.cliyard/reviews/`, fixture reviewer (no model). Evidence:
    [REVIEWER_CLEAN_CONTEXT_V0.md](evidence/REVIEWER_CLEAN_CONTEXT_V0.md).
-   Residual: model-backed reviewer adapter; wire into acceptance flow;
-   human intervention ledger.
+   Residual: model-backed reviewer adapter; wire into acceptance flow.
 
-8. **Human intervention ledger**
-   Retry / Judge / Approve / Carry / Trigger / Stand-in as auditable facts.
+8. **Human intervention ledger** — **v0 on branch**: six roles, durable
+   `.cliyard/interventions/`, secret-refusing reasons, observational only.
+   Evidence: [INTERVENTION_LEDGER_V0.md](evidence/INTERVENTION_LEDGER_V0.md).
+   Residual: automation of repeated Retry/Carry/Trigger; Control API surface.
 
 9. **SkillPack provenance**
    Version rule/skill input by id, digest, entrypoint and capability.
