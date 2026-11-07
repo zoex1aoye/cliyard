@@ -1,7 +1,8 @@
 # cliyard Current State
 
-> Verified: 2026-11-07 (Asia/Shanghai) — intervention ledger merged
-> (`0d96d61` / PR #17); SkillPack provenance v0 on branch (see evidence).
+> Verified: 2026-11-07 (Asia/Shanghai) — SkillPack provenance merged
+> (`8e33df3` / PR #18); ProfileCatalog + hierarchical admission v0 on branch
+> (see evidence).
 >
 > This page is the single current-status authority for implementation order,
 > known gaps and the next executable slice. Product rationale remains in
@@ -218,13 +219,16 @@ list is its summary. New slices start only after a human-approved Plan.
    [INTERVENTION_LEDGER_V0.md](evidence/INTERVENTION_LEDGER_V0.md).
    Residual: automation of repeated Retry/Carry/Trigger; Control API surface.
 
-9. **SkillPack provenance** — **v0 on branch**: digest `.agents/skills`,
-   durable pack snapshot + run binding. Evidence:
+9. **SkillPack provenance** — **v0 merged** (`8e33df3`): digest
+   `.agents/skills`, durable pack snapshot + run binding. Evidence:
    [SKILLPACK_PROVENANCE_V0.md](evidence/SKILLPACK_PROVENANCE_V0.md).
    Residual: RunManifest field; eval-gated default pack promotion.
 
-10. **ProfileCatalog, routing and hierarchical admission**
-   Activated bindings only; unknown concurrency starts at one probe.
+10. **ProfileCatalog, routing and hierarchical admission** — **v0 on
+    branch**: activated `.cliyard/profile-catalog.json`, unknown binding
+    permit=1, conjunctive `admitHierarchical`. Evidence:
+    [PROFILE_CATALOG_ADMISSION_V0.md](evidence/PROFILE_CATALOG_ADMISSION_V0.md).
+    Residual: queue/scheduler wire; learned 429 ramp; routing A/B.
 
 ## Actual-project readiness
 
