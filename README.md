@@ -55,12 +55,12 @@ Authoritative detail: [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) · overview
 | **P0** legacy closeout | **done** | Freeze binding |
 | **P1 / P1b** StateStore | **done** | SQLite authority + ledger/journal attach + `.cliyard/state.db` unify |
 | **P2a / P2b** daemon + ExecutionSupervisor | **done** | Read-only Control API; RuntimeHandle (launchd / Job Object residual) |
-| **P3** sandbox + independent verify + clean review | **in progress** | Sandbox opt-in + VerificationTask + VT batch wire **on mainline**; clean-context Reviewer v0 **open PR** (fixture only, no model yet) |
+| **P3** sandbox + independent verify + clean review | **in progress** | Sandbox opt-in + VT + Reviewer v0 **on mainline**; human intervention ledger v0 **open PR** |
 | **P4** routing / admission | pending | ProfileCatalog |
 | **P5** human-machine UI | pending | Control API console |
 | **P6** endpoint acceptance | pending | Vue Liquid Glass TDesign via the tool |
 
-**Next after Reviewer v0 lands:** model-backed Reviewer adapter and/or human intervention ledger (not default-on sandbox / unbounded parallel).
+**Next after intervention ledger lands:** SkillPack provenance and/or model-backed Reviewer (not default-on sandbox / unbounded parallel).
 
 ## What works today (honest)
 
@@ -74,13 +74,14 @@ On mainline today (foreground Supervisor, single-repo lock, sequential queue —
 - WorkspaceBoundary v1: **detection-only** protected-root integrity (independent of sandbox)
 - **Opt-in OS sandbox (P3):** nono `v0.81.0` pin, Landlock-honest measure, `CLIYARD_SANDBOX=1` / `sandbox.enabled` worker wrap (not default-on; no network/credential measure)
 - **Background VerificationTask (P3):** durable `.cliyard/verification/`, detached runner, recovery → `lost`; opt-in `CLIYARD_BACKGROUND_VERIFY=1` batch wire
+- **Clean-context Reviewer v0:** `ReviewFinding` + chat-free context + durable `.cliyard/reviews/` (fixture reviewer; no model yet)
 - Failure taxonomy and cost truth (resume retains abandoned attempts; historical missing has an import constraint)
 - Task Architect: produces a human-reviewable Plan only — never freezes or dispatches
 - Deterministic integration full-suite gate, estimate-plan telemetry calibration, Linux verifier process-group timeout reclaim
 - **StateStore** (`cdde392` / `1fd737f`): event-sourced facts + projection; run/queue/ledger/journal write authority on `.cliyard/state.db` when SQLite is available
 - **`cliyardd` + read-only Control API** (`1f4be2d`) and **ExecutionSupervisor / RuntimeHandle** (`6f9e550`)
 
-**P0–P2b are closed on mainline.** P3 sandbox + VerificationTask are on mainline as **opt-in** gates; clean-context Reviewer v0 is the open slice.
+**P0–P2b are closed on mainline.** P3 sandbox + VerificationTask + Reviewer v0 are on mainline (sandbox/VT **opt-in**); human intervention ledger v0 is the open slice.
 
 ## What we do not claim
 
@@ -88,7 +89,7 @@ On mainline today (foreground Supervisor, single-repo lock, sequential queue —
 - Not a dispatch-owning daemon, cross-host recovery, Windows Job Object parity, or 24-hour unattended operation
 - Not automatic Plan approval, automatic `main` merge, or unbounded parallelism
 - Not production-ready dynamic routing / ProfileCatalog activation / hierarchical admission
-- Not a model-backed clean Reviewer or human intervention ledger yet
+- Not a model-backed Reviewer; intervention ledger automation / Control API write not shipped
 - Not a recommended supervised pilot yet — DCP v2 still needs a human decision; P3 residuals remain
 
 Adjacent products: [docs/OSS_LANDSCAPE.md](docs/OSS_LANDSCAPE.md).  
@@ -167,6 +168,7 @@ Standing rules: [`.agents/rules/`](.agents/rules/). Task SOPs: [`.agents/skills/
 | Safety boundary | WorkspaceBoundary + opt-in SandboxAdapter/nono | Detect always; OS wrap opt-in (`CLIYARD_SANDBOX`) |
 | Independent verify | VerificationTask + optional background Verifier | Detached PG; shell verify still default |
 | Clean review | ReviewFinding / CleanReviewContext (v0) | Fixture reviewer; model adapter next |
+| Human interventions | Intervention ledger (v0) | Six roles; observational; no auto-execute |
 
 ## License
 
