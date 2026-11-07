@@ -50,17 +50,18 @@ The end state is not “auto-merge to main.” It is: **humans set direction and
 
 Authoritative detail: [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) · overview: [docs/ROADMAP.md](docs/ROADMAP.md).
 
-| Phase | Mainline | Notes |
-|---|---|---|
-| **P0** legacy closeout | **done** | Freeze binding |
-| **P1 / P1b** StateStore | **done** | SQLite authority + ledger/journal attach + `.cliyard/state.db` unify |
-| **P2a / P2b** daemon + ExecutionSupervisor | **done** | Read-only Control API; RuntimeHandle (launchd / Job Object residual) |
-| **P3** sandbox + independent verify + clean review | **in progress** | Sandbox/VT/Reviewer/ledger/SkillPack + acceptance-flow review **on mainline** (still opt-in) |
-| **P4** routing / admission | **in progress** | Catalog + admission + Routing B **on mainline**; router→queue wire **open PR** |
-| **P5** human-machine UI | pending | Control API console |
-| **P6** endpoint acceptance | pending | Vue Liquid Glass TDesign via the tool |
+**Stop-loss (2026-11-08):** active MVP is **`dsh-plugin-cliyard`** on DSH/Cordis — not more self-built SQLite / Landlock / port-lease / process-tree ownership. Contract draft: [design/dsh-plugin-cliyard-taskcontract-v0.md](design/dsh-plugin-cliyard-taskcontract-v0.md).
 
-**Next after router→queue wire lands:** Routing A (design attribution) and/or default-on admission residuals — not unbounded parallel.
+| Track | Status | Notes |
+|---|---|---|
+| **M0** TaskContract shell | **draft** | Universal `intent` / `workspace` / `driver` / `verify` / `cleanup` |
+| **M1** idle spin + cwd lock | **next** | `/cliyard-test` mock → worktree → `local-cli` spawn |
+| **M2** dispose + optional wrap | pending | Cordis dispose; optional docker/low-priv |
+| **M3** Compiler + `/freeze` | pending | Session → Plan → human freeze |
+| **M4** three-scene demos | pending | code / novel / drama on one schema |
+| Mainline P0–P4 inventory | **frozen for MVP** | Kept through `ba2f458`; Routing A parked |
+
+**Next:** approve M0 contract draft → M1 mock isolation spawn — not another routing/StateStore knife.
 
 ## What works today (honest)
 
@@ -83,16 +84,16 @@ On mainline today (foreground Supervisor, single-repo lock, sequential queue —
 - **StateStore** (`cdde392` / `1fd737f`): event-sourced facts + projection; run/queue/ledger/journal write authority on `.cliyard/state.db` when SQLite is available
 - **`cliyardd` + read-only Control API** (`1f4be2d`) and **ExecutionSupervisor / RuntimeHandle** (`6f9e550`)
 
-**P0–P2b are closed on mainline.** P3 through SkillPack + Reviewer acceptance wire + ProfileCatalog/admission + Routing B are on mainline (**opt-in** gates); router→queue wire is the open P4 slice.
+**Mainline P0–P4 inventory exists** (opt-in gates through queue-wired Routing B at `ba2f458`) but is **frozen for MVP deepen**. Active work is the DSH plugin track (M0–M4).
 
 ## What we do not claim
 
-- Not default-on OS write prevention; not credential / network isolation (Boundary remains post-hoc detection)
-- Not a dispatch-owning daemon, cross-host recovery, Windows Job Object parity, or 24-hour unattended operation
+- Not that the DSH plugin MVP already runs — M0 is draft; M1 evidence not yet landed
+- Not default-on OS write prevention; not credential / network isolation
+- Not a dispatch-owning daemon, Job Object parity, or 24-hour unattended operation
 - Not automatic Plan approval, automatic `main` merge, or unbounded parallelism
-- Not production-ready Routing A / default-on admission or routing (Routing B + opt-in queue wire exist; no learned ramp)
-- Not a default-on / live-CLI Reviewer yet (opt-in acceptance wire exists); intervention ledger automation / Control API write not shipped
-- Not a recommended supervised pilot yet — DCP v2 still needs a human decision; P3 residuals remain
+- Not continuing Landlock / SQLite ledger / process-tree ownership as the MVP path
+- Not unfreezing mainline modules without plugin demo evidence + a new human Plan
 
 Adjacent products: [docs/OSS_LANDSCAPE.md](docs/OSS_LANDSCAPE.md).  
 Unlike ThinkRail-style agentic IDEs built around one coding engine, cliyard is an **engine-agnostic delivery control plane** with a replaceable human surface.
