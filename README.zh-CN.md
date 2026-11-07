@@ -56,12 +56,12 @@ English: [README.md](README.md)
 | **P0** 封刀 | **完成** | 冻结面已绑定 |
 | **P1 / P1b** StateStore | **完成** | SQLite 权威 + ledger/journal 挂接 + `.cliyard/state.db` 统一 |
 | **P2a / P2b** daemon + ExecutionSupervisor | **完成** | 只读 Control API；RuntimeHandle（launchd / Job Object 仍残留） |
-| **P3** 沙箱 + 独立验收 + 干净裁决 | **进行中** | 沙箱 opt-in + VT + Reviewer + intervention ledger + SkillPack **已在主线** |
-| **P4** 路由 / 准入 | **进行中** | ProfileCatalog **已在主线**；opt-in queue 准入挂接 **开 PR 中** |
+| **P3** 沙箱 + 独立验收 + 干净裁决 | **进行中** | 沙箱/VT/Reviewer/ledger/SkillPack **已在主线**；模型 Reviewer adapter **开 PR 中** |
+| **P4** 路由 / 准入 | **进行中** | ProfileCatalog + opt-in queue 准入 **已在主线** |
 | **P5** 人机面 | 未开始 | Control API 控制台 |
 | **P6** 终点验收 | 未开始 | 用工具交付 Vue Liquid Glass TDesign |
 
-**admission wire 合入后的下一刀：** routing A/B / default-on gate，和/或模型驱动 Reviewer（不是无限并行）。
+**模型 Reviewer 合入后的下一刀：** acceptance-flow Reviewer 挂接，和/或 routing A/B（不是无限并行）。
 
 ## 今天能做什么（诚实版）
 
@@ -75,7 +75,7 @@ English: [README.md](README.md)
 - WorkspaceBoundary v1：**检测型**保护根完整性（与 sandbox 独立）
 - **Opt-in OS 沙箱（P3）：** nono `v0.81.0` pin、Landlock 诚实测量、`CLIYARD_SANDBOX=1` / `sandbox.enabled` worker wrap（非默认开启；无网络/凭据测量）
 - **Background VerificationTask（P3）：** 耐久 `.cliyard/verification/`、detached runner、恢复标 `lost`；opt-in `CLIYARD_BACKGROUND_VERIFY=1` batch wire
-- **Clean-context Reviewer v0：** `ReviewFinding` + 无聊天上下文 + 耐久 `.cliyard/reviews/`（fixture reviewer；尚无模型）
+- **Clean-context Reviewer v0：** `ReviewFinding` + 无聊天上下文 + 耐久 `.cliyard/reviews/`（fixture + 可注入 model adapter）
 - **Human intervention ledger v0：** 六角色、耐久 `.cliyard/interventions/`、拒收密钥型 reason（仅观测）
 - **SkillPack provenance v0：** `.agents/skills` digests + 耐久 pack 快照 + run binding
 - 失败分类与成本真相（含 resume 保留 abandoned attempt；历史 missing 有导入约束）
@@ -84,7 +84,7 @@ English: [README.md](README.md)
 - **StateStore**（`cdde392` / `1fd737f`）：事件溯源 facts + projection；SQLite 可用时 run/queue/ledger/journal 写权威在 `.cliyard/state.db`
 - **`cliyardd` + 只读 Control API**（`1f4be2d`）与 **ExecutionSupervisor / RuntimeHandle**（`6f9e550`）
 
-**P0–P2b 已在主线封完。** P3 至 SkillPack 已上主线（沙箱/VT 为 **opt-in**）；ProfileCatalog 已上主线；当前打开切片是 opt-in admission queue wire（P4）。
+**P0–P2b 已在主线封完。** P3 至 SkillPack + ProfileCatalog/admission gate 已上主线（沙箱/VT/admission 为 **opt-in**）；当前打开切片是模型 Reviewer adapter（P3 残留）。
 
 ## 今天还不能宣称什么
 
@@ -92,7 +92,7 @@ English: [README.md](README.md)
 - 不是拥有派发权的 daemon、跨宿主恢复、Windows Job Object 对等、24 小时无人值守
 - 不是自动批准 Plan、自动合入 `main`、无限并行
 - 不是已完成的动态路由 / default-on 分层 admission 生产就绪（catalog + opt-in queue gate 已有；无 learned ramp）
-- 不是模型驱动 Reviewer；intervention ledger 自动化 / Control API 写面尚未交付
+- 不是已挂 acceptance / live-CLI 的 Reviewer；intervention ledger 自动化 / Control API 写面尚未交付
 - 不是 supervised pilot「已推荐」——仍差 DCP v2 人工决策与 P3 残留门禁
 
 对照表与相邻产品见 [docs/OSS_LANDSCAPE.md](docs/OSS_LANDSCAPE.md)。  
@@ -170,7 +170,7 @@ Windows + WSL 入口（`doctor` / `run` / `batch`）仍可用，但 **已不是�
 | 执行身份 | ExecutionSupervisor / RuntimeHandle | PID/PGID 仅诊断 |
 | 安全边界 | WorkspaceBoundary + opt-in SandboxAdapter/nono | 检测常在；OS wrap opt-in（`CLIYARD_SANDBOX`） |
 | 独立验收 | VerificationTask + 可选 background Verifier | Detached PG；默认仍 shell verify |
-| 干净裁决 | ReviewFinding / CleanReviewContext（v0） | Fixture reviewer；下一步模型适配器 |
+| 干净裁决 | ReviewFinding / CleanReviewContext（v0） | Fixture + 可注入 model adapter |
 | 人工干预 | Intervention ledger（v0） | 六角色；仅观测；不自动执行 |
 | Skill 溯源 | SkillPack digests（v0） | `.agents/skills` → pack digest + run binding |
 | 准入 | ProfileCatalog + opt-in queue gate（v0） | 未知 binding permit=1；`CLIYARD_ADMISSION=1` |

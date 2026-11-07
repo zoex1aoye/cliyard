@@ -41,6 +41,17 @@ export {
   type FixtureReviewer,
 } from "./fixture-reviewer.js";
 
+export type { Reviewer } from "./reviewer.js";
+
+export {
+  ModelReviewerError,
+  buildModelReviewPrompt,
+  createModelReviewer,
+  type ModelReviewInvoker,
+  type ModelReviewer,
+  type ModelReviewerOptions,
+} from "./model-reviewer.js";
+
 export {
   REVIEW_FINDING_SEVERITIES,
   REVIEW_FINDING_STATUSES,

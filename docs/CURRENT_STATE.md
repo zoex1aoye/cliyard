@@ -1,7 +1,8 @@
 # cliyard Current State
 
-> Verified: 2026-11-07 (Asia/Shanghai) — ProfileCatalog merged
-> (`1993cc4` / PR #19); admission queue wire v0 on branch (see evidence).
+> Verified: 2026-11-07 (Asia/Shanghai) — admission queue wire merged
+> (`b88889d` / PR #20); model-backed Reviewer adapter v0 on branch
+> (see evidence).
 >
 > This page is the single current-status authority for implementation order,
 > known gaps and the next executable slice. Product rationale remains in
@@ -206,11 +207,12 @@ list is its summary. New slices start only after a human-approved Plan.
    Residual: default-on background verify; RuntimeManager-backed verify
    services; cascade stop of owned tasks.
 
-7. **Clean-context Reviewer** — **v0 merged** (`56c1bd2`):
-   `ReviewFinding`, chat-free `CleanReviewContext`, durable
-   `.cliyard/reviews/`, fixture reviewer (no model). Evidence:
-   [REVIEWER_CLEAN_CONTEXT_V0.md](evidence/REVIEWER_CLEAN_CONTEXT_V0.md).
-   Residual: model-backed reviewer adapter; wire into acceptance flow.
+7. **Clean-context Reviewer** — **v0 merged** (`56c1bd2`); **model adapter
+   v0 on branch**: injectable `createModelReviewer` over CleanReviewContext
+   only; findings never grant acceptance. Evidence:
+   [REVIEWER_CLEAN_CONTEXT_V0.md](evidence/REVIEWER_CLEAN_CONTEXT_V0.md),
+   [REVIEWER_MODEL_ADAPTER_V0.md](evidence/REVIEWER_MODEL_ADAPTER_V0.md).
+   Residual: acceptance-flow wire; live CLI invoker production binding.
 
 8. **Human intervention ledger** — **v0 merged** (`0d96d61`): six roles,
    durable `.cliyard/interventions/`, secret-refusing reasons, observational
@@ -223,10 +225,9 @@ list is its summary. New slices start only after a human-approved Plan.
    [SKILLPACK_PROVENANCE_V0.md](evidence/SKILLPACK_PROVENANCE_V0.md).
    Residual: RunManifest field; eval-gated default pack promotion.
 
-10. **ProfileCatalog, routing and hierarchical admission** — **catalog v0
-    merged** (`1993cc4`); **queue wire v0 on branch**: opt-in
-    `CLIYARD_ADMISSION=1` / `admission.enabled` consults activated catalog
-    before dispatch; deny leaves pending. Evidence:
+10. **ProfileCatalog, routing and hierarchical admission** — **catalog +
+    opt-in queue wire merged** (`1993cc4`, `b88889d`): activated catalog,
+    unknown permit=1, `CLIYARD_ADMISSION=1` deny ⇒ pending. Evidence:
     [PROFILE_CATALOG_ADMISSION_V0.md](evidence/PROFILE_CATALOG_ADMISSION_V0.md),
     [ADMISSION_QUEUE_WIRE_V0.md](evidence/ADMISSION_QUEUE_WIRE_V0.md).
     Residual: default-on gate; learned 429 ramp; routing A/B; intra-item
