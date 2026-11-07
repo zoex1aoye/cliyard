@@ -1,0 +1,62 @@
+{
+  "planId": "mvp-m1-idle-spin-v0",
+  "contracts": [
+    {
+      "taskId": "mvp-m1-idle-spin-v0",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "M1 idle-spin: src/mvp/idle-spin.ts creates git worktree from frozen local-cli TaskContract, spawns driver.argv with cwd=worktree abs path, runs verify commands, asserts trunk clean; cliyard mvp-test CLI + npm script; optional dsh-cliyard tool cliyard_mvp_test; tests/mvp-idle-spin.test.ts; evidence MVP_M1_IDLE_SPIN.md; update ROADMAP/CURRENT_STATE/mvp roadmap checkboxes."
+      ],
+      "nonGoals": [
+        "Do not call real claude/codex models.",
+        "Do not implement Landlock or process-tree ownership (M2).",
+        "Do not implement Plan compiler /freeze (M3).",
+        "Do not auto-merge to main."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/mvp-m1-idle-spin-v0.md",
+        "design/dsh-plugin-mvp-roadmap-v0.md",
+        "examples/mvp/code-local-cli.mock.contract.json",
+        "src/mvp/taskcontract.ts",
+        "src/workspace/worktree.ts",
+        "src/cli.ts",
+        "plugins/dsh-cliyard/index.js"
+      ],
+      "writePaths": [
+        "src/mvp/idle-spin.ts",
+        "src/mvp/cli.ts",
+        "src/mvp/index.ts",
+        "src/cli.ts",
+        "package.json",
+        "plugins/dsh-cliyard/index.js",
+        "plugins/dsh-cliyard/lib/idle-spin-bridge.js",
+        "plugins/dsh-cliyard/README.md",
+        "tests/mvp-idle-spin.test.ts",
+        "docs/evidence/MVP_M1_IDLE_SPIN.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md",
+        "design/dsh-plugin-mvp-roadmap-v0.md",
+        "README.md",
+        "README.zh-CN.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "a27458c565ceb04d9803aa606fb12778a669f290",
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/mvp-idle-spin.test.ts tests/mvp-taskcontract.test.ts"
+      ],
+      "deliverables": [
+        "Idle-spin runner with cwd lock + trunk-clean check.",
+        "CLI mvp-test + focused tests + evidence."
+      ],
+      "forbidden": [
+        "Do not spawn with cwd=repoRoot.",
+        "Do not invent absolute executable paths from target names.",
+        "Do not delete keepWorkspace worktrees automatically."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}
