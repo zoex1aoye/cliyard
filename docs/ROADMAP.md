@@ -28,8 +28,8 @@ The endpoint has three inseparable parts:
 | P1b write cutover | **complete** (`1fd737f` + production ledger/journal attach + path unify) | Run + queue + ledger + journal single-writer on `.cliyard/state.db` | — |
 | P2a daemon + Control API | **complete** (`1f4be2d`) | `cliyardd` + read-only `/v1/status|events|runs` | Write/auth + daemon-owned dispatch deferred to P5 |
 | P2b ExecutionSupervisor | **complete** (`6f9e550`) | RuntimeHandle authority + continuity + conformance | launchd / systemd-run / Job Object backends |
-| P3 沙箱 + 独立验收 + 干净裁决 | **SkillPack merged; P3 residuals remain** | Opt-in sandbox + VT + Reviewer + interventions + SkillPack on mainline | model Reviewer; default-on VT/sandbox |
-| P4 路由 + 分层并行 | **catalog merged; queue wire on PR** | Catalog + unknown probe=1; opt-in queue gate | default-on; routing A/B; learned ramp |
+| P3 沙箱 + 独立验收 + 干净裁决 | **model Reviewer adapter on PR** | Opt-in sandbox + VT + Reviewer + interventions + SkillPack on mainline | acceptance-flow Reviewer wire; default-on VT/sandbox |
+| P4 路由 + 分层并行 | **catalog + opt-in queue gate merged** | Catalog + unknown probe=1; `CLIYARD_ADMISSION=1` | default-on; routing A/B; learned ramp |
 | P5 人机面 | pending | Web console over Control API; DSH thin client | desktop packaging |
 | P6 终点验收 | pending | Vue + Liquid Glass TDesign through the tool itself | — |
 
@@ -76,11 +76,13 @@ Opt-in batch wire (`createBackgroundVerifier` /
 [VERIFICATION_BATCH_WIRE.md](./evidence/VERIFICATION_BATCH_WIRE.md).
 Clean-context Reviewer v0 (findings + chat-free context + durable session):
 [REVIEWER_CLEAN_CONTEXT_V0.md](./evidence/REVIEWER_CLEAN_CONTEXT_V0.md).
+Model-backed Reviewer adapter v0 (injectable CleanReviewContext-only path):
+[REVIEWER_MODEL_ADAPTER_V0.md](./evidence/REVIEWER_MODEL_ADAPTER_V0.md).
 Human intervention ledger v0 (six roles, secret-free durable events):
 [INTERVENTION_LEDGER_V0.md](./evidence/INTERVENTION_LEDGER_V0.md).
 SkillPack provenance v0 (skill digests + run binding):
 [SKILLPACK_PROVENANCE_V0.md](./evidence/SKILLPACK_PROVENANCE_V0.md).
-Next within P3 residuals: model-backed Reviewer; default-on VT/sandbox.
+Next within P3 residuals: acceptance-flow Reviewer wire; default-on VT/sandbox.
 
 ### P4 — routing and hierarchical parallelism
 

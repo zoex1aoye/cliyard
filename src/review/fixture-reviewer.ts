@@ -2,14 +2,15 @@
  * Deterministic fixture reviewer — no model / provider call
  * (design/reviewer-clean-context-v0.md).
  */
-import type { CleanReviewContext } from "./types.js";
+import type { CleanReviewContext, ReviewSessionRecord } from "./types.js";
 import {
   validateReviewFinding,
   type ProposeReviewFindingInput,
 } from "./findings.js";
 import { proposeFindings } from "./session.js";
+import type { Reviewer } from "./reviewer.js";
 
-export interface FixtureReviewer {
+export interface FixtureReviewer extends Reviewer {
   /**
    * Validate injected findings against the clean context and attach them to
    * the durable session. Never invents findings from chat.
@@ -18,8 +19,8 @@ export interface FixtureReviewer {
     repoRoot: string,
     reviewId: string,
     context: CleanReviewContext,
-    proposals: Omit<ProposeReviewFindingInput, "artifactCommit">[],
-  ): ReturnType<typeof proposeFindings>;
+    proposals?: Omit<ProposeReviewFindingInput, "artifactCommit">[],
+  ): ReviewSessionRecord;
 }
 
 /**
@@ -28,7 +29,7 @@ export interface FixtureReviewer {
  */
 export function createFixtureReviewer(): FixtureReviewer {
   return {
-    review(repoRoot, reviewId, context, proposals) {
+    review(repoRoot, reviewId, context, proposals = []) {
       const bound: ProposeReviewFindingInput[] = proposals.map((p) => {
         const input: ProposeReviewFindingInput = {
           ...p,
