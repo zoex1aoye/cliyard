@@ -1,0 +1,49 @@
+{
+  "planId": "routing-queue-wire-v0",
+  "tasks": [
+    {
+      "taskId": "routing-queue-wire-v0",
+      "goal": "Opt-in Routing B queue wire: add src/admission/queue-routing-wire.ts (isQueueRoutingEnabled, resolveRoutedExecutionProfile). Wire resolveExecutionFreeze in src/orchestration/queue-store.ts to select activated catalog profile when routing enabled and no executionProfilePath (fail closed; appendRoutingDecision). Wire src/orchestration/queue-runner.ts before dispatch: require activated profileId, optional respectAdmission; stop routing-denied leave pending. Extend QueueStopReason + QueueRunOptions.routing + AddQueueItemInput/options. Export from src/admission/index.ts. tests/routing-queue-wire.test.ts. Evidence ROUTING_QUEUE_WIRE_V0.md + CURRENT_STATE/ROADMAP/README bilingual.",
+      "nonGoals": [
+        "Do not enable routing by default.",
+        "Do not silently rebind a supplied profile file at dispatch.",
+        "Do not implement Routing A (design attribution).",
+        "Do not learn 429 ramps or auto-dispatch parallel waves."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/routing-queue-wire-v0.md",
+        "design/execution-routing-v0.md",
+        "src/admission/routing.ts",
+        "src/orchestration/queue-store.ts",
+        "src/orchestration/queue-runner.ts"
+      ],
+      "writePaths": [
+        "src/admission/queue-routing-wire.ts",
+        "src/admission/index.ts",
+        "src/orchestration/queue-store.ts",
+        "src/orchestration/queue-runner.ts",
+        "tests/routing-queue-wire.test.ts",
+        "docs/evidence/ROUTING_QUEUE_WIRE_V0.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md",
+        "README.md",
+        "README.zh-CN.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/routing-queue-wire.test.ts tests/execution-routing.test.ts"
+      ],
+      "deliverables": [
+        "Opt-in catalog routing on queue add + run gate.",
+        "Focused tests + evidence + status docs."
+      ],
+      "forbidden": [
+        "Do not fall back to createLegacyExecutionProfile when routing is enabled.",
+        "Do not permanently block items on routing-denied.",
+        "Do not invent brand quotas."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}

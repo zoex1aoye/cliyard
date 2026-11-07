@@ -75,6 +75,11 @@ import {
   type QueueAdmissionEvaluation,
   type QueueAdmissionOptions,
 } from "../admission/gate.js";
+import {
+  evaluateQueueRoutingGate,
+  isQueueRoutingEnabled,
+  type QueueRoutingOptions,
+} from "../admission/queue-routing-wire.js";
 
 export interface QueueSupervisorRequest {
   repoRoot: string;
@@ -140,7 +145,8 @@ export type QueueStopReason =
   | "no-ready"
   | "blocked"
   | "max-dispatches"
-  | "admission-denied";
+  | "admission-denied"
+  | "routing-denied";
 
 export interface QueueRunSummary {
   version: 1;
@@ -171,6 +177,11 @@ export interface QueueRunOptions {
    * (`CLIYARD_ADMISSION=1` when `enabled` is omitted).
    */
   admission?: QueueAdmissionOptions;
+  /**
+   * Opt-in Routing B gate before dispatch (`CLIYARD_ROUTING=1` when
+   * `enabled` is omitted). Requires the item profile to be activated.
+   */
+  routing?: QueueRoutingOptions;
   /** Defaults to the Supervisor CLI runner. */
   runner?: QueueSupervisorRunner;
   /** Lock wait for a live same-host queue owner. Defaults to 5000 ms. */
@@ -490,6 +501,22 @@ export async function runQueue(
             journalPropagatedBlocks(repoRoot, document, newlyBlocked);
           }
           continue;
+        }
+
+        if (isQueueRoutingEnabled(options.routing)) {
+          const gate = evaluateQueueRoutingGate({
+            repoRoot,
+            profile: candidate.executionProfile,
+            options: options.routing,
+          });
+          if (!gate.ok) {
+            stopped = "routing-denied";
+            stopReason =
+              `item ${JSON.stringify(candidate.id)} routing denied` +
+              ` (${gate.code}): ${gate.reasons.join("; ")}`;
+            log(`routing-denied ${candidate.id}: ${stopReason}`);
+            break;
+          }
         }
 
         if (isQueueAdmissionEnabled(options.admission)) {
