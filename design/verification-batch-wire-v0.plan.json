@@ -1,0 +1,50 @@
+{
+  "planId": "verification-batch-wire-v0",
+  "tasks": [
+    {
+      "taskId": "verification-batch-wire",
+      "goal": "Wire VerificationTask into production verify path (opt-in). Add src/verification/background-verifier.ts createBackgroundVerifier({ repoRoot, worktree, runId?, contractsHash?, timeoutMs? }) implementing Verifier: path overshoot fail-closed; refuse contract.runtime; startVerificationTask + awaitVerificationTask + markVerificationDelivered; map to VerifyResult with verification observation. Extend VerifyResult and LoopResult with optional verification summary; finish() threads it. CodexBatchOptions.backgroundVerification (or CLIYARD_BACKGROUND_VERIFY=1) selects background verifier instead of shell (dry-run stays mock); recoverVerificationTasks at batch start when enabled; checkpoint task.verification on accept/reject. Export from verification/index. tests/verification-batch-wire.test.ts + evidence VERIFICATION_BATCH_WIRE.md + CURRENT_STATE/ROADMAP.",
+      "nonGoals": [
+        "Do not default-on background verify for every batch.",
+        "Do not move RuntimeManager services into VerificationTask.",
+        "Do not implement Reviewer or stop-cascade.",
+        "Do not grant acceptance from VerificationTask status alone."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/verification-batch-wire-v0.md",
+        "design/verification-task-v0.md",
+        "src/verification/task-runner.ts",
+        "src/verification/verifier.ts",
+        "src/repair/loop.ts",
+        "src/scheduler/codex-batch.ts"
+      ],
+      "writePaths": [
+        "src/verification/background-verifier.ts",
+        "src/verification/verifier.ts",
+        "src/verification/index.ts",
+        "src/repair/loop.ts",
+        "src/scheduler/codex-batch.ts",
+        "src/supervisor/types.ts",
+        "src/supervisor/store.ts",
+        "tests/verification-batch-wire.test.ts",
+        "docs/evidence/VERIFICATION_BATCH_WIRE.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md"
+      ],
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/verification-batch-wire.test.ts tests/verification-task.test.ts"
+      ],
+      "deliverables": [
+        "Opt-in background Verifier + batch wire + manifest observation.",
+        "Focused tests + evidence."
+      ],
+      "forbidden": [
+        "Do not replace shell verifier as the unconditional default.",
+        "Do not silently ignore contract.runtime under background mode."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}
