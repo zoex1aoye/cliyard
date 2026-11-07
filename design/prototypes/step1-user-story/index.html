@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>cliyard · Step 1 用户故事原型</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Source+Sans+3:wght@400;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #142033;
+      --muted: #5a6578;
+      --line: #c9d2de;
+      --bg: #e8eef4;
+      --panel: #f7f9fc;
+      --accent: #0f766e;
+      --accent-soft: #d5efe9;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      font-family: "Source Sans 3", system-ui, sans-serif;
+      background:
+        radial-gradient(1200px 600px at 10% -10%, #d7e7f5 0%, transparent 55%),
+        radial-gradient(900px 500px at 100% 0%, #d9efe8 0%, transparent 50%),
+        linear-gradient(180deg, #eef3f8 0%, var(--bg) 100%);
+    }
+    header {
+      padding: 2.5rem 2rem 1rem;
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+    .brand {
+      font-family: Syne, sans-serif;
+      font-weight: 800;
+      font-size: clamp(2.4rem, 6vw, 3.6rem);
+      letter-spacing: -0.04em;
+      line-height: 1;
+      margin: 0 0 0.75rem;
+    }
+    header p {
+      margin: 0;
+      max-width: 46rem;
+      color: var(--muted);
+      font-size: 1.05rem;
+      line-height: 1.5;
+    }
+    nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      max-width: 1100px;
+      margin: 1.25rem auto 0;
+      padding: 0 2rem;
+    }
+    nav button {
+      font: 600 0.85rem "Source Sans 3", sans-serif;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--ink);
+      padding: 0.45rem 0.8rem;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    nav button[aria-current="true"] {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 1.25rem 2rem 3rem;
+    }
+    .frame {
+      border: 1px solid var(--line);
+      background: #0b1220;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .frame img {
+      display: block;
+      width: 100%;
+      height: auto;
+      background: #0b1220;
+    }
+    .caption {
+      margin-top: 1rem;
+      padding: 1rem 1.1rem;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+    }
+    .caption h2 {
+      font-family: Syne, sans-serif;
+      font-size: 1.25rem;
+      margin: 0 0 0.4rem;
+      letter-spacing: -0.02em;
+    }
+    .caption p { margin: 0; color: var(--muted); line-height: 1.55; }
+    .caption code {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.86em;
+      color: var(--ink);
+    }
+    .align {
+      margin-top: 0.85rem;
+      padding-top: 0.85rem;
+      border-top: 1px solid var(--line);
+      font-size: 0.95rem;
+      color: var(--ink);
+    }
+    footer {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 0 2rem 2.5rem;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1 class="brand">cliyard</h1>
+    <p>
+      Step 1 用户故事原型对齐稿：人在 DSH 里整理 Plan → 冻结契约 →
+      派发<strong>本机 CLI</strong>到隔离 worktree → 监控并行状态 →
+      人审证据后合入。Cordis/DSH 只借会话与 dispose，不改故事。
+    </p>
+  </header>
+  <nav id="tabs" aria-label="原型屏"></nav>
+  <main>
+    <div class="frame"><img id="shot" alt="" /></div>
+    <div class="caption">
+      <h2 id="title"></h2>
+      <p id="body"></p>
+      <p class="align" id="align"></p>
+    </div>
+  </main>
+  <footer>
+    来源：<code>docs/USER_STORY_STEP1.md</code> · 文件目录
+    <code>design/prototypes/step1-user-story/</code>
+  </footer>
+  <script>
+    const screens = [
+      {
+        id: "flow",
+        file: "cliyard-proto-01-flow.jpg",
+        title: "01 · 端到端流",
+        body: "Plan → Freeze → 本机 CLI @ worktree → Verify → 人合入。",
+        align: "对齐点：Worker 始终是本机 CLI；控制面只做契约、隔离与证据门。",
+      },
+      {
+        id: "plan",
+        file: "cliyard-proto-02-plan-session.jpg",
+        title: "02 · DSH 会话整理 Plan",
+        body: "Master 壳里把需求/原型收敛成结构化 Plan（goals / writePaths / verify）。",
+        align: "对齐点：聊天不是真相；Plan 才是可审输入。Master 不自己写大段业务代码。",
+      },
+      {
+        id: "freeze",
+        file: "cliyard-proto-03-freeze-dispatch.jpg",
+        title: "03 · 冻结契约并派发",
+        body: "Freeze 锁死 TaskContract；Dispatch 拉起注册表中的本机 CLI（如 claude）。",
+        align: "对齐点：driver = local-cli；cwd 锁在 git worktree；不是平台内置写码引擎。",
+      },
+      {
+        id: "monitor",
+        file: "cliyard-proto-04-parallel-monitor.jpg",
+        title: "04 · 并行监控台",
+        body: "两模块并行：各自 worktree + 不重叠 writeRoots；状态 running / verifying。",
+        align: "对齐点：不必开两个工人聊天窗；隔离靠目录，不靠「同一会话里的子 Agent」。",
+      },
+      {
+        id: "merge",
+        file: "cliyard-proto-05-evidence-merge.jpg",
+        title: "05 · 证据与人合入",
+        body: "Verifier 证据 + path audit；Merge 仍是人的不可逆决策。",
+        align: "对齐点：accepted ≠ 自动合入 main；人保留设计权与合入权。",
+      },
+    ];
+    const tabs = document.getElementById("tabs");
+    const shot = document.getElementById("shot");
+    const title = document.getElementById("title");
+    const body = document.getElementById("body");
+    const align = document.getElementById("align");
+    function show(i) {
+      const s = screens[i];
+      shot.src = s.file;
+      shot.alt = s.title;
+      title.textContent = s.title;
+      body.textContent = s.body;
+      align.textContent = s.align;
+      [...tabs.children].forEach((b, j) => b.setAttribute("aria-current", j === i ? "true" : "false"));
+    }
+    screens.forEach((s, i) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = s.title;
+      b.addEventListener("click", () => show(i));
+      tabs.appendChild(b);
+    });
+    show(0);
+  </script>
+</body>
+</html>
