@@ -39,8 +39,8 @@ writeRoots semantics, human merge gate, deterministic verify.
 
 | Stage | Status | Gate |
 |---|---|---|
-| **M0** TaskContract shell | draft on disk | Schema + code mock fixture |
-| **M0.5** Master system persona | design landed | New DSH session carries Master law (system layer) |
+| **M0** TaskContract shell | **implemented (PR)** | Schema + mock fixture + validator |
+| **M0.5** Master system persona | **implemented (PR)** | Plugin mounts systemPrompt section when host provides it |
 | **M1** Idle spin + cwd lock | **next implement** | `/cliyard-test`: worktree + `local-cli` spawn; trunk clean |
 | **M2** Dispose (+ optional wrap) | pending | Cancel kills child; no Landlock claim |
 | **M3** Compiler + `/freeze` | pending | No dispatch without human freeze |

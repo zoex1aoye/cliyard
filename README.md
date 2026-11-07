@@ -54,8 +54,8 @@ Authoritative detail: [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) · overview
 
 | Track | Status | Notes |
 |---|---|---|
-| **M0** TaskContract shell | **draft** | Universal `intent` / `workspace` / `driver` / `verify` / `cleanup` |
-| **M0.5** Master system persona | **design** | systemPrompt law — not AGENTS.md-only |
+| **M0** TaskContract shell | **on PR** | Schema + mock fixture + validator |
+| **M0.5** Master system persona | **on PR** | `dsh-cliyard` systemPrompt mount (unit) |
 | **M1** idle spin + cwd lock | **next** | `/cliyard-test` mock → worktree → `local-cli` spawn |
 | **M2** dispose + optional wrap | pending | Cordis dispose; optional docker/low-priv |
 | **M3** Compiler + `/freeze` | pending | Session → Plan → human freeze |

@@ -55,8 +55,8 @@ English: [README.md](README.md)
 
 | 轨道 | 状态 | 说明 |
 |---|---|---|
-| **M0** TaskContract 外壳 | **草案** | 通用 `intent` / `workspace` / `driver` / `verify` / `cleanup` |
-| **M0.5** Master system 人设 | **设计已落** | systemPrompt 宪法，不只靠 AGENTS.md |
+| **M0** TaskContract 外壳 | **开 PR** | Schema + mock 夹具 + 校验器 |
+| **M0.5** Master system 人设 | **开 PR** | `dsh-cliyard` systemPrompt 挂载（单测） |
 | **M1** 空转 + 目录锁 | **下一步** | `/cliyard-test` mock → worktree → `local-cli` spawn |
 | **M2** dispose + 可选包裹 | 未开始 | Cordis dispose；可选 docker/low-priv |
 | **M3** Compiler + `/freeze` | 未开始 | 会话 → Plan → 人工冻结 |

@@ -158,12 +158,13 @@ Do not start new mainline knives that deepen the frozen inventory below.
 Detail: [dsh-plugin-mvp-roadmap-v0.md](../design/dsh-plugin-mvp-roadmap-v0.md).
 Master persona: [dsh-master-persona-v0.md](../design/dsh-master-persona-v0.md).
 
-0. **M0 TaskContract shell (draft)** — `intent` + `workspace` + `driver`
-   (`local-cli` | `dsh-llm` | `external-api`) + `verify` + `cleanup`.
-   Next: JSON Schema + code mock fixture.
+0. **M0 TaskContract shell** — **on branch**: JSON Schema +
+   `examples/mvp/code-local-cli.mock.contract.json` + `src/mvp/taskcontract.ts`.
+   Evidence: [MVP_M0_CONTRACT_PERSONA.md](evidence/MVP_M0_CONTRACT_PERSONA.md).
 
-1. **M0.5 Master system persona** — systemPrompt / personaPrefix (not only
-   AGENTS.md). Text in `dsh-master-persona-v0.prompt.txt`.
+1. **M0.5 Master system persona** — **on branch**: `dsh-cliyard` mounts
+   `cliyard:master-persona` via `ctx.systemPrompt.section` when present.
+   Live DSH profile smoke still outstanding.
 
 2. **M1 idle spin + cwd lock** — `/cliyard-test`: mock contract → worktree →
    `local-cli` spawn; trunk untouched. Borrow worktree/conductor where useful.

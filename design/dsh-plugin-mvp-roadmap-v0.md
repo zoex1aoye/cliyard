@@ -58,8 +58,8 @@ M0 契约面 ──► M0.5 Master persona ──► M1 空转+cwd锁
 
 | 阶段 | 交付物 | 验收门禁 | 明确不做 |
 |---|---|---|---|
-| **M0** | TaskContract 外壳定稿 + JSON Schema | Schema 能校验 code 场景 mock 契约 | 不写派发实现 |
-| **M0.5** | Master system persona 挂上 DSH | 新会话 system 含 Master 纪律；模型自称 Worker 时可被纠 | 不改 DSH agent loop |
+| **M0** | TaskContract 外壳定稿 + JSON Schema | **done on branch** — Schema + fixture + validator | 不写派发实现 |
+| **M0.5** | Master system persona 挂上 DSH | **done on branch** (unit); live DSH smoke TBD | 不改 DSH agent loop |
 | **M1** | `/cliyard-test`：mock 契约 → worktree → `local-cli` spawn | 子进程 cwd=workspace；主干无脏写；exit 进证据 | 不接 LLM 编译；不自研进程树 |
 | **M2** | Cordis dispose 回收；可选 docker/low-priv | 取消/异常后子进程退出；无僵尸 | 不绑 Landlock；不宣称默认-on OS sandbox |
 | **M3** | Compiler 出 Plan；人 `/freeze` | 未确认不能派发；freeze 后改字节需新版本 | 不自动批准 Plan |
@@ -71,12 +71,13 @@ M0 契约面 ──► M0.5 Master persona ──► M1 空转+cwd锁
 
 ### M0
 - [x] `design/dsh-plugin-cliyard-taskcontract-v0.md`
-- [ ] `design/dsh-plugin-cliyard-taskcontract-v0.schema.json`
-- [ ] code 场景 mock fixture JSON
+- [x] `design/dsh-plugin-cliyard-taskcontract-v0.schema.json`
+- [x] code 场景 mock fixture JSON (`examples/mvp/code-local-cli.mock.contract.json`)
+- [x] hand validator `src/mvp/taskcontract.ts`
 
 ### M0.5
 - [x] `design/dsh-master-persona-v0.md` + `.prompt.txt`
-- [ ] profile patch 或 `dsh-cliyard` 内 `systemPrompt.section` 实测记录
+- [x] `dsh-cliyard` `systemPrompt.section` mount (unit-tested; live DSH smoke TBD)
 
 ### M1
 - [ ] DSH 命令/工具 `/cliyard-test`（或等价）

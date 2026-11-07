@@ -76,6 +76,20 @@ linked plugin source does not guarantee an active Host module is reloaded.
 | `model` | shipped patch: `deepseek-flash` |
 | `keepWorktrees` | `true` |
 | `monitorPort` | `3927` |
+| `masterPersonaPath` | default `design/dsh-master-persona-v0.prompt.txt` under control repo |
+
+## Master persona (M0.5)
+
+On load, if the host exposes `ctx.systemPrompt.section`, the plugin mounts
+`cliyard:master-persona` from `design/dsh-master-persona-v0.prompt.txt`
+(system layer — stronger than `AGENTS.md` guidance). Override with
+`masterPersonaPath`. Without `systemPrompt`, mount is skipped and logged.
+
+Local-CLI TaskContract schema / mock fixture (M0):
+
+- `design/dsh-plugin-cliyard-taskcontract-v0.schema.json`
+- `examples/mvp/code-local-cli.mock.contract.json`
+- `src/mvp/taskcontract.ts`
 
 ## Design rules
 

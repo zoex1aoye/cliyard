@@ -17,11 +17,16 @@ import {
   watchLedger,
 } from "./lib/monitor.js";
 import {
+  mountMasterPersona,
+  MASTER_PERSONA_SECTION_NAME,
+} from "./lib/master-persona.js";
+import {
   resolveControlRoot,
   resolveRepoRoot,
 } from "./lib/paths.js";
 
 export const name = "dsh-cliyard";
+/** Prefer tools; systemPrompt is optional (Master persona when present). */
 export const inject = ["tools"];
 
 /** Alias synthesized from defaultWorker/model when config defines no profiles. */
@@ -276,6 +281,21 @@ export function apply(ctx, config = {}) {
     defaultExecutionProfileId,
     keepWorktrees,
   });
+
+  const persona = mountMasterPersona(ctx, {
+    promptPath: config?.masterPersonaPath
+      ? resolve(String(config.masterPersonaPath))
+      : undefined,
+  });
+  if (persona.mounted) {
+    console.log(
+      `[dsh-cliyard] Master persona mounted section=${MASTER_PERSONA_SECTION_NAME} chars=${persona.chars}`,
+    );
+  } else {
+    console.log(
+      "[dsh-cliyard] Master persona skipped (no ctx.systemPrompt); AGENTS.md alone is not Master law",
+    );
+  }
 
   try {
     if (ctx && typeof ctx.on === "function") {
