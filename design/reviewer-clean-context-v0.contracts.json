@@ -1,0 +1,54 @@
+{
+  "planId": "reviewer-clean-context-v0",
+  "contracts": [
+    {
+      "taskId": "reviewer-clean-context-v0",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "Clean-context Reviewer v0: add src/review/types.ts (ReviewFinding + CleanReviewContext + status/severity enums). Add src/review/context.ts buildCleanReviewContext that accepts only artifactCommit, baseCommit?, unifiedDiff (bounded), requirementRefs/text, evidenceRefs — refuse chat/prompt/selfAssessment keys. Add src/review/findings.ts validateReviewFinding (require location.path + reason). Add src/review/store.ts atomic JSON under .cliyard/reviews/<id>.json. Add src/review/session.ts createReviewSession / proposeFindings / resolveFinding (confirm|reject|fix) with audited transitions and contextHash binding. Add src/review/fixture-reviewer.ts createFixtureReviewer (deterministic, no model). Export src/review/index.ts. tests/reviewer-clean-context.test.ts + evidence REVIEWER_CLEAN_CONTEXT_V0.md + CURRENT_STATE/ROADMAP."
+      ],
+      "nonGoals": [
+        "Do not call a provider/LLM in this slice.",
+        "Do not auto-merge or auto-accept from findings.",
+        "Do not implement human intervention ledger or SkillPack.",
+        "Do not replace Verifier / VerificationTask."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/reviewer-clean-context-v0.md",
+        "design/continuous-harness-v2.md",
+        "docs/CURRENT_STATE.md"
+      ],
+      "writePaths": [
+        "src/review/types.ts",
+        "src/review/context.ts",
+        "src/review/findings.ts",
+        "src/review/store.ts",
+        "src/review/session.ts",
+        "src/review/fixture-reviewer.ts",
+        "src/review/index.ts",
+        "tests/reviewer-clean-context.test.ts",
+        "docs/evidence/REVIEWER_CLEAN_CONTEXT_V0.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "b655a65c8b3f3953549dc4ac038aef4ad1f04074",
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/reviewer-clean-context.test.ts"
+      ],
+      "deliverables": [
+        "Clean review context + ReviewFinding model + durable session.",
+        "Focused tests proving chat refusal and audited transitions."
+      ],
+      "forbidden": [
+        "Do not accept findings without location.path and reason.",
+        "Do not allow chat/prompt/selfAssessment into CleanReviewContext.",
+        "Do not call a model provider."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}

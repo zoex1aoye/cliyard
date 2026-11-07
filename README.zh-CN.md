@@ -47,6 +47,22 @@ English: [README.md](README.md)
 
 终点不是「无人自动合入 main」，而是：**人只定方向与终审，中间派工、校准、机器门禁交给控制面。**
 
+## 路线图进行到哪
+
+权威细节：[docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) · 概览：[docs/ROADMAP.md](docs/ROADMAP.md)。
+
+| 阶段 | 主线 | 说明 |
+|---|---|---|
+| **P0** 封刀 | **完成** | 冻结面已绑定 |
+| **P1 / P1b** StateStore | **完成** | SQLite 权威 + ledger/journal 挂接 + `.cliyard/state.db` 统一 |
+| **P2a / P2b** daemon + ExecutionSupervisor | **完成** | 只读 Control API；RuntimeHandle（launchd / Job Object 仍残留） |
+| **P3** 沙箱 + 独立验收 + 干净裁决 | **进行中** | 沙箱 opt-in + VerificationTask + VT batch wire **已在主线**；clean-context Reviewer v0 **开 PR 中**（仅 fixture，尚无模型） |
+| **P4** 路由 / 准入 | 未开始 | ProfileCatalog |
+| **P5** 人机面 | 未开始 | Control API 控制台 |
+| **P6** 终点验收 | 未开始 | 用工具交付 Vue Liquid Glass TDesign |
+
+**Reviewer v0 合入后的下一刀：** 模型驱动 Reviewer 适配器，和/或 human intervention ledger（不是 default-on sandbox / 无限并行）。
+
 ## 今天能做什么（诚实版）
 
 已在主线可用（前台、单仓库锁、顺序 queue；细节与证据见 CURRENT_STATE）：
@@ -56,25 +72,25 @@ English: [README.md](README.md)
 - 显式批准的 foreground queue：`add` / `add-plan` / `run` / `retry` / `adopt`
 - RuntimeManager：本机 loopback 端口租约、readiness、runtime manifest、清理
 - WorkerLease + 进程树清理（POSIX；controller-death 嵌套组恢复仍未闭环）
-- WorkspaceBoundary v1：**检测型**保护根完整性（不是 OS sandbox）
+- WorkspaceBoundary v1：**检测型**保护根完整性（与 sandbox 独立）
+- **Opt-in OS 沙箱（P3）：** nono `v0.81.0` pin、Landlock 诚实测量、`CLIYARD_SANDBOX=1` / `sandbox.enabled` worker wrap（非默认开启；无网络/凭据测量）
+- **Background VerificationTask（P3）：** 耐久 `.cliyard/verification/`、detached runner、恢复标 `lost`；opt-in `CLIYARD_BACKGROUND_VERIFY=1` batch wire
 - 失败分类与成本真相（含 resume 保留 abandoned attempt；历史 missing 有导入约束）
 - Task Architect：只产出供人审的 Plan，不自动冻结或派发
 - 确定性 integration full-suite gate、estimate-plan telemetry 校准、Linux verifier 进程组超时回收
-- **StateStore**（`cdde392` / `1fd737f`）：事件溯源 facts + projection；run/queue 写权威；耐久后端在已安装时为 **`better-sqlite3` SQLite**（否则 JSON-file 回退）
+- **StateStore**（`cdde392` / `1fd737f`）：事件溯源 facts + projection；SQLite 可用时 run/queue/ledger/journal 写权威在 `.cliyard/state.db`
 - **`cliyardd` + 只读 Control API**（`1f4be2d`）与 **ExecutionSupervisor / RuntimeHandle**（`6f9e550`）
 
-**P0 已封刀**（[docs/P0_LEGACY_SEAM_FREEZE.md](docs/P0_LEGACY_SEAM_FREEZE.md)）。  
-**P1 / P1b / P2a / P2b 已在主线。** 残留：ledger/journal 生产挂接；launchd 级后端；controller-death 嵌套恢复。  
-DCP v2 人工审阅后的下一主切片：**P3 SandboxAdapter + background VerificationTask**（见 [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md)）。
+**P0–P2b 已在主线封完。** P3 沙箱与 VerificationTask 已作为 **opt-in** 门禁上主线；当前打开切片是 clean-context Reviewer v0。
 
 ## 今天还不能宣称什么
 
-- 不是 OS 级写保护 / 凭据隔离 / 网络隔离（Boundary 只是事后检测）
-- 不是 daemon、跨宿主恢复、Windows Job Object 对等、24 小时无人值守
+- 不是默认开启的 OS 写保护；不是凭据 / 网络隔离（Boundary 仍是事后检测）
+- 不是拥有派发权的 daemon、跨宿主恢复、Windows Job Object 对等、24 小时无人值守
 - 不是自动批准 Plan、自动合入 `main`、无限并行
 - 不是已完成的动态路由 / ProfileCatalog 实装 / 分层 admission 生产就绪
-- 不是「SQLite 已接管所有 JSON」——ledger/journal 入口仍可能直写 JSON
-- 不是 supervised pilot「已推荐」——仍差 DCP v2 人工决策与 P3 门禁
+- 不是模型驱动的干净 Reviewer，也不是 human intervention ledger
+- 不是 supervised pilot「已推荐」——仍差 DCP v2 人工决策与 P3 残留门禁
 
 对照表与相邻产品见 [docs/OSS_LANDSCAPE.md](docs/OSS_LANDSCAPE.md)。  
 与 ThinkRail 一类「围绕单一 coding engine 的 agentic IDE」不同：cliyard 做的是 **engine-agnostic 的交付控制面**，人机面可替换。
@@ -146,10 +162,12 @@ Windows + WSL 入口（`doctor` / `run` / `batch`）仍可用，但 **已不是�
 | 任务权威 | RunManifest | accepted/rejected 只写这里 |
 | 协调 | foreground queue | 显式批准；当前顺序派发 |
 | 人机面 | DSH 插件（可替换） | 不持有契约/证据唯一真相 |
-| 耐久状态 | StateStore（`better-sqlite3`） | run/queue 权威；JSON 导出为派生 |
+| 耐久状态 | StateStore（`better-sqlite3`） | run/queue/ledger/journal 落在 `.cliyard/state.db` |
 | Daemon / 读 API | `cliyardd` | 只读 Control API；尚未拥有派发 |
 | 执行身份 | ExecutionSupervisor / RuntimeHandle | PID/PGID 仅诊断 |
-| 安全边界 | WorkspaceBoundary → 未来 SandboxAdapter | 今日检测；P3 才做 OS 写隔离 |
+| 安全边界 | WorkspaceBoundary + opt-in SandboxAdapter/nono | 检测常在；OS wrap opt-in（`CLIYARD_SANDBOX`） |
+| 独立验收 | VerificationTask + 可选 background Verifier | Detached PG；默认仍 shell verify |
+| 干净裁决 | ReviewFinding / CleanReviewContext（v0） | Fixture reviewer；下一步模型适配器 |
 
 ## License
 
