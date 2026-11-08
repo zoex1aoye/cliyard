@@ -99,6 +99,10 @@ Dispose (M2): `--cancel-after-ms` / tool `cancelAfterMs` / Cordis `dispose`
 aborts the child process group. Wrap stays default-off. See
 `docs/evidence/MVP_M2_DISPOSE.md`.
 
+Freeze (M3): `cliyard_mvp_compile` / `mvp-compile` writes unfrozen drafts;
+`cliyard_mvp_freeze` / `mvp-freeze` sets `frozen`/`frozenAt` + `.sha256`.
+Unfrozen contracts refuse idle-spin. See `docs/evidence/MVP_M3_FREEZE.md`.
+
 ## Design rules
 
 - Control truth = frozen contracts, RunManifest and EvidenceBundle in cliyard;

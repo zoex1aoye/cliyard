@@ -33,4 +33,18 @@ export {
   type DisposeResult,
   type TrackedChild,
 } from "./dispose.js";
-export { runMvpTestCli } from "./cli.js";
+export { compileMvpPlan, parseMvpPlan, type MvpPlan, type MvpPlanTask } from "./compile.js";
+export {
+  assertFrozenImmutable,
+  contractHashSidecarPath,
+  freezeContract,
+  loadAndAssertFrozen,
+  sha256Hex,
+  stableStringify,
+  writeFrozenContract,
+} from "./freeze.js";
+export {
+  runMvpCompileCli,
+  runMvpFreezeCli,
+  runMvpTestCli,
+} from "./cli.js";

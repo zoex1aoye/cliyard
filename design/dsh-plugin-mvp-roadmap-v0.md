@@ -90,9 +90,10 @@ M0 契约面 ──► M0.5 Master persona ──► M1 空转+cwd锁
 - [x] 可选 wrap 开关（默认关；docker/low-priv 拒绝启用）
 
 ### M3
-- [ ] Plan JSON 草稿输出
-- [ ] `/freeze` 写 `frozen`/`frozenAt` + schema 校验
-- [ ] 未 freeze 拒绝 dispatch
+- [x] Plan JSON 草稿输出 — `mvp-compile` / `cliyard_mvp_compile`
+- [x] `/freeze` 写 `frozen`/`frozenAt` + schema 校验 + sha256 — `mvp-freeze`
+- [x] 未 freeze 拒绝 dispatch — idle-spin `frozen=true` + hash immutability
+  Evidence: [MVP_M3_FREEZE.md](../docs/evidence/MVP_M3_FREEZE.md)
 
 ### M4
 - [ ] code：`local-cli` → claude/codex/opencode 之一

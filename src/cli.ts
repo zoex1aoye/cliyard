@@ -19,7 +19,11 @@ import { runQueueCli } from "./orchestration/cli.js";
 import { runEvaluationCli } from "./evaluation/cli.js";
 import { runStateStoreCli } from "./statestore/read.js";
 import { runDaemonCli } from "./daemon/cli.js";
-import { runMvpTestCli } from "./mvp/cli.js";
+import {
+  runMvpCompileCli,
+  runMvpFreezeCli,
+  runMvpTestCli,
+} from "./mvp/cli.js";
 import type { PermissionIntent, WorkerId } from "./types.js";
 
 function usage(): never {
@@ -76,6 +80,8 @@ Usage:
   cliyard daemon status --repo <path> [--json]
   cliyard daemon stop --repo <path> [--timeout <ms>] [--json]
   cliyard mvp-test --repo <path> [contract.json] [--replace-existing] [--json]
+  cliyard mvp-compile <plan.json> --out <dir> [--json]
+  cliyard mvp-freeze <draft.json> --out <frozen.json> [--json]
 
 Master (DeepSeek Harness plugin / local demo):
   npm run master-monitor
@@ -223,6 +229,16 @@ async function main(): Promise<void> {
 
   if (cmd === "mvp-test") {
     await runMvpTestCli(argv.slice(1));
+    return;
+  }
+
+  if (cmd === "mvp-compile") {
+    await runMvpCompileCli(argv.slice(1));
+    return;
+  }
+
+  if (cmd === "mvp-freeze") {
+    await runMvpFreezeCli(argv.slice(1));
     return;
   }
 

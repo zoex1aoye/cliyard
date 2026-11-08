@@ -12,6 +12,7 @@ import {
   type DisposeRegistry,
   type DisposeResult,
 } from "./dispose.js";
+import { assertFrozenImmutable } from "./freeze.js";
 import {
   assertLocalCliTaskContract,
   type LocalCliTaskContract,
@@ -251,7 +252,13 @@ function trunkProductClean(
 
 export function loadContractFile(path: string): LocalCliTaskContract {
   const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
-  return assertLocalCliTaskContract(raw);
+  const contract = assertLocalCliTaskContract(raw);
+  if (!contract.frozen) {
+    throw new Error("idle-spin requires frozen=true");
+  }
+  // M3: if a sha256 sidecar exists, refuse silently mutated frozen bytes.
+  assertFrozenImmutable(path);
+  return contract;
 }
 
 /**
