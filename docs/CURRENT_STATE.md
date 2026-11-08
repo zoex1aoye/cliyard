@@ -171,11 +171,12 @@ Master persona: [dsh-master-persona-v0.md](../design/dsh-master-persona-v0.md).
    `local-cli` spawn with cwd lock; trunk product paths untouched. Evidence:
    [MVP_M1_IDLE_SPIN.md](evidence/MVP_M1_IDLE_SPIN.md).
 
-3. **M2 dispose + optional wrap** — **on branch**: Cordis/`AbortSignal`
-   dispose kills tracked child (+ process group); wrap default-off.
-   Evidence: [MVP_M2_DISPOSE.md](evidence/MVP_M2_DISPOSE.md).
+3. **M2 dispose + optional wrap** — **landed** in `e0f6bb6` (PR #29):
+   Cordis/`AbortSignal` dispose kills tracked child (+ process group); wrap
+   default-off. Evidence: [MVP_M2_DISPOSE.md](evidence/MVP_M2_DISPOSE.md).
 
-4. **M3 Compiler + `/freeze`** — session → Plan → human freeze → immutable bytes.
+4. **M3 Compiler + `/freeze`** — **next**: Plan → unfrozen draft → human
+   freeze (`frozen`/`frozenAt` + sha256); unfrozen refuses dispatch.
 
 5. **M4 demos** — code local-CLI + one second scene on the same schema.
 
@@ -216,7 +217,8 @@ These are capability gates, not date estimates or a percentage score.
 | Use mode | Current assessment | Gate before use |
 |---|---|---|
 | DSH plugin idle-spin (M1) | **Landed** (`12db03b`) | Evidence: MVP_M1_IDLE_SPIN; next gate is M2 dispose |
-| DSH plugin dispose (M2) | **On branch / needs merge** | Evidence: MVP_M2_DISPOSE; next gate is M3 /freeze |
+| DSH plugin dispose (M2) | **Landed** (`e0f6bb6`) | Evidence: MVP_M2_DISPOSE; next gate is M3 /freeze |
+| DSH plugin freeze (M3) | **Active target** | Compile draft; human freeze; hash immutability |
 | Supervised local-CLI pilot via DSH | Not ready | M1–M2 green; human `/freeze`; one real `local-cli` target |
 | Multi-scene creator demo (novel/drama) | Not ready | M3–M4 on same TaskContract shell |
 | Legacy mainline unsupervised / 24h | Far (frozen path) | Not MVP; do not claim from P0–P4 inventory alone |

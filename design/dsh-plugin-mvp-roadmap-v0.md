@@ -61,7 +61,7 @@ M0 契约面 ──► M0.5 Master persona ──► M1 空转+cwd锁
 | **M0** | TaskContract 外壳定稿 + JSON Schema | **landed** `95146d2` / PR #27 | 不写派发实现 |
 | **M0.5** | Master system persona 挂上 DSH | **landed** `95146d2` (unit); live DSH smoke TBD | 不改 DSH agent loop |
 | **M1** | `/cliyard-test`：mock 契约 → worktree → `local-cli` spawn | **landed** `12db03b` / PR #28 | 不接 LLM 编译；不自研进程树 |
-| **M2** | Cordis dispose 回收；可选 docker/low-priv | 取消/异常后子进程退出；无僵尸 | 不绑 Landlock；不宣称默认-on OS sandbox |
+| **M2** | Cordis dispose 回收；可选 docker/low-priv | **landed** `e0f6bb6` / PR #29 | 不绑 Landlock；不宣称默认-on OS sandbox |
 | **M3** | Compiler 出 Plan；人 `/freeze` | 未确认不能派发；freeze 后改字节需新版本 | 不自动批准 Plan |
 | **M4** | 至少 **code 本机 CLI** + 另一场景（novel 或第二 CLI）各一条 Demo | 同一 Schema；人审证据；不合入 main | 不自研多模态运行时；不自动合入 |
 
