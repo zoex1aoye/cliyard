@@ -20,6 +20,7 @@ import {
   mountMasterPersona,
   MASTER_PERSONA_SECTION_NAME,
 } from "./lib/master-persona.js";
+import { runMvpTestViaCli } from "./lib/idle-spin-bridge.js";
 import {
   resolveControlRoot,
   resolveRepoRoot,
@@ -281,6 +282,7 @@ export function apply(ctx, config = {}) {
     defaultExecutionProfileId,
     keepWorktrees,
   });
+  registerMvpTestTool(ctx, { controlRoot, targetRepo: repoRoot });
 
   const persona = mountMasterPersona(ctx, {
     promptPath: config?.masterPersonaPath
@@ -436,6 +438,70 @@ function registerPlanTool(ctx, opts) {
   } catch (e) {
     console.warn(
       `[dsh-cliyard] plan tool not registered: ${
+        e instanceof Error ? e.message : e
+      }`,
+    );
+  }
+}
+
+function registerMvpTestTool(ctx, opts) {
+  if (!ctx?.tools || typeof ctx.tools.register !== "function") return;
+  const definition = {
+    name: "cliyard_mvp_test",
+    description:
+      "M1 idle-spin: run a frozen local-cli TaskContract in an isolated git " +
+      "worktree (cwd locked). Default contract is the echo mock fixture. " +
+      "Does not call coding models. Does not merge to main.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        contractPath: {
+          type: "string",
+          description:
+            "Optional path to a frozen local-cli TaskContract JSON. " +
+            "Defaults to examples/mvp/code-local-cli.mock.contract.json under controlRoot.",
+        },
+        replaceExisting: {
+          type: "boolean",
+          description: "Force-remove an existing worktree at the contract path.",
+        },
+      },
+    },
+    async execute(args) {
+      const input =
+        args && typeof args === "object" && !Array.isArray(args) ? args : {};
+      for (const key of Object.keys(input)) {
+        if (key !== "contractPath" && key !== "replaceExisting") {
+          throw new Error(`cliyard_mvp_test does not accept "${key}"`);
+        }
+      }
+      const result = await runMvpTestViaCli({
+        controlRoot: opts.controlRoot,
+        repoRoot: opts.targetRepo,
+        contractPath:
+          typeof input.contractPath === "string"
+            ? input.contractPath
+            : undefined,
+        replaceExisting: input.replaceExisting === true,
+      });
+      if (result.code !== 0) {
+        throw new Error(
+          result.stderr.trim() ||
+            result.stdout.trim() ||
+            `mvp-test failed with exit ${result.code}`,
+        );
+      }
+      return result.stdout.trim();
+    },
+  };
+  const install = () => ctx.tools.register(definition);
+  try {
+    if (typeof ctx.effect === "function") ctx.effect(install);
+    else install();
+  } catch (e) {
+    console.warn(
+      `[dsh-cliyard] mvp-test tool not registered: ${
         e instanceof Error ? e.message : e
       }`,
     );

@@ -15,3 +15,11 @@ export {
   mountMasterPersona,
   type SystemPromptSectionApi,
 } from "./master-persona.js";
+export {
+  loadContractFile,
+  productPorcelainLines,
+  runIdleSpin,
+  runIdleSpinFromFile,
+  type IdleSpinResult,
+} from "./idle-spin.js";
+export { runMvpTestCli } from "./cli.js";

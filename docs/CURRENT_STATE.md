@@ -158,16 +158,18 @@ Do not start new mainline knives that deepen the frozen inventory below.
 Detail: [dsh-plugin-mvp-roadmap-v0.md](../design/dsh-plugin-mvp-roadmap-v0.md).
 Master persona: [dsh-master-persona-v0.md](../design/dsh-master-persona-v0.md).
 
-0. **M0 TaskContract shell** — **on branch**: JSON Schema +
+0. **M0 TaskContract shell** — **landed** in `95146d2` (PR #27): JSON Schema +
    `examples/mvp/code-local-cli.mock.contract.json` + `src/mvp/taskcontract.ts`.
    Evidence: [MVP_M0_CONTRACT_PERSONA.md](evidence/MVP_M0_CONTRACT_PERSONA.md).
 
-1. **M0.5 Master system persona** — **on branch**: `dsh-cliyard` mounts
-   `cliyard:master-persona` via `ctx.systemPrompt.section` when present.
-   Live DSH profile smoke still outstanding.
+1. **M0.5 Master system persona** — **landed** in `95146d2` (PR #27):
+   `dsh-cliyard` mounts `cliyard:master-persona` via `ctx.systemPrompt.section`
+   when present. Live DSH profile smoke still outstanding.
 
-2. **M1 idle spin + cwd lock** — `/cliyard-test`: mock contract → worktree →
-   `local-cli` spawn; trunk untouched. Borrow worktree/conductor where useful.
+2. **M1 idle spin + cwd lock** — **on branch**: `cliyard mvp-test` /
+   `cliyard_mvp_test`: frozen mock contract → worktree → `local-cli` spawn with
+   cwd lock; trunk product paths untouched. Evidence:
+   [MVP_M1_IDLE_SPIN.md](evidence/MVP_M1_IDLE_SPIN.md).
 
 3. **M2 dispose + optional wrap** — Cordis `dispose`; optional docker/low-priv.
    Not Landlock as MVP path.
@@ -212,7 +214,7 @@ These are capability gates, not date estimates or a percentage score.
 
 | Use mode | Current assessment | Gate before use |
 |---|---|---|
-| DSH plugin idle-spin (M1) | **Active target** | Mock contract + worktree/cwd spawn evidence; dispose on cancel |
+| DSH plugin idle-spin (M1) | **On branch / needs merge** | Evidence: MVP_M1_IDLE_SPIN; next gate is M2 dispose |
 | Supervised local-CLI pilot via DSH | Not ready | M1–M2 green; human `/freeze`; one real `local-cli` target |
 | Multi-scene creator demo (novel/drama) | Not ready | M3–M4 on same TaskContract shell |
 | Legacy mainline unsupervised / 24h | Far (frozen path) | Not MVP; do not claim from P0–P4 inventory alone |

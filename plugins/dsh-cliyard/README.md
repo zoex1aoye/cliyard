@@ -91,6 +91,10 @@ Local-CLI TaskContract schema / mock fixture (M0):
 - `examples/mvp/code-local-cli.mock.contract.json`
 - `src/mvp/taskcontract.ts`
 
+Idle-spin (M1): tool `cliyard_mvp_test` / CLI `cliyard mvp-test` runs a frozen
+local-cli contract inside a git worktree with `cwd` locked. See
+`docs/evidence/MVP_M1_IDLE_SPIN.md`.
+
 ## Design rules
 
 - Control truth = frozen contracts, RunManifest and EvidenceBundle in cliyard;
