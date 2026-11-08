@@ -1,7 +1,14 @@
 /**
- * cliyard mvp-test — M1 idle-spin + M2 cancel-after dispose CLI.
+ * cliyard mvp-* CLI — M1 idle-spin, M2 dispose, M3 compile/freeze.
  */
-import { resolve } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { compileMvpPlan } from "./compile.js";
+import {
+  freezeContract,
+  stableStringify,
+  writeFrozenContract,
+} from "./freeze.js";
 import { runIdleSpinFromFile } from "./idle-spin.js";
 
 function arg(flag: string, argv: string[]): string | undefined {
@@ -119,5 +126,149 @@ export async function runMvpTestCli(argv: string[]): Promise<void> {
     process.exitCode = 1;
   } finally {
     if (cancelTimer) clearTimeout(cancelTimer);
+  }
+}
+
+function compileUsage(): never {
+  console.log(`cliyard mvp-compile — M3 Plan → unfrozen TaskContract draft(s)
+
+Usage:
+  cliyard mvp-compile <plan.json> --out <dir> [--json]
+
+Writes one draft JSON per task (frozen=false). Does not dispatch.
+`);
+  process.exit(1);
+}
+
+export async function runMvpCompileCli(argv: string[]): Promise<void> {
+  if (argv.includes("-h") || argv.includes("--help")) compileUsage();
+  const json = argv.includes("--json");
+  const out = arg("--out", argv);
+  if (!out) {
+    console.error("mvp-compile requires --out <dir>");
+    process.exitCode = 1;
+    return;
+  }
+  let planPath: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === "--out") {
+      i += 1;
+      continue;
+    }
+    if (a.startsWith("--out=")) continue;
+    if (a === "--json") continue;
+    if (a.startsWith("-")) continue;
+    planPath = a;
+    break;
+  }
+  if (!planPath) {
+    console.error("mvp-compile requires <plan.json>");
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    const raw = JSON.parse(readFileSync(resolve(planPath), "utf8"));
+    const { planId, drafts } = compileMvpPlan(raw);
+    const outDir = resolve(out);
+    mkdirSync(outDir, { recursive: true });
+    const written: string[] = [];
+    for (const draft of drafts) {
+      const path = join(outDir, `${draft.contractId}.draft.contract.json`);
+      writeFileSync(path, stableStringify(draft), "utf8");
+      written.push(path);
+    }
+    const summary = { ok: true, planId, drafts: written, frozen: false };
+    if (json) console.log(JSON.stringify(summary, null, 2));
+    else {
+      console.log(
+        [
+          "mvp-compile: ok",
+          `  planId: ${planId}`,
+          `  drafts: ${written.length}`,
+          ...written.map((p) => `    ${p}`),
+        ].join("\n"),
+      );
+    }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    if (json) console.log(JSON.stringify({ ok: false, error: detail }, null, 2));
+    else console.error(`mvp-compile: ${detail}`);
+    process.exitCode = 1;
+  }
+}
+
+function freezeUsage(): never {
+  console.log(`cliyard mvp-freeze — M3 human freeze of a TaskContract draft
+
+Usage:
+  cliyard mvp-freeze <draft.contract.json> --out <frozen.contract.json> [--json]
+
+Sets frozen=true + frozenAt, validates schema, writes bytes + .sha256 sidecar.
+Does not dispatch.
+`);
+  process.exit(1);
+}
+
+export async function runMvpFreezeCli(argv: string[]): Promise<void> {
+  if (argv.includes("-h") || argv.includes("--help")) freezeUsage();
+  const json = argv.includes("--json");
+  const out = arg("--out", argv);
+  if (!out) {
+    console.error("mvp-freeze requires --out <frozen.contract.json>");
+    process.exitCode = 1;
+    return;
+  }
+  let draftPath: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === "--out") {
+      i += 1;
+      continue;
+    }
+    if (a.startsWith("--out=")) continue;
+    if (a === "--json") continue;
+    if (a.startsWith("-")) continue;
+    draftPath = a;
+    break;
+  }
+  if (!draftPath) {
+    console.error("mvp-freeze requires <draft.contract.json>");
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    const raw = JSON.parse(readFileSync(resolve(draftPath), "utf8"));
+    const frozen = freezeContract(raw);
+    const written = writeFrozenContract({
+      contract: frozen,
+      outPath: resolve(out),
+    });
+    const summary = {
+      ok: true,
+      contractId: frozen.contractId,
+      frozen: true,
+      frozenAt: frozen.frozenAt,
+      path: written.path,
+      hashPath: written.hashPath,
+      sha256: written.sha256,
+    };
+    if (json) console.log(JSON.stringify(summary, null, 2));
+    else {
+      console.log(
+        [
+          "mvp-freeze: ok",
+          `  contract: ${frozen.contractId}`,
+          `  frozenAt: ${frozen.frozenAt}`,
+          `  path:     ${written.path}`,
+          `  sha256:   ${written.sha256}`,
+        ].join("\n"),
+      );
+    }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    if (json) console.log(JSON.stringify({ ok: false, error: detail }, null, 2));
+    else console.error(`mvp-freeze: ${detail}`);
+    process.exitCode = 1;
   }
 }

@@ -22,6 +22,10 @@ import {
 } from "./lib/master-persona.js";
 import { runMvpTestViaCli } from "./lib/idle-spin-bridge.js";
 import {
+  runMvpCompileViaCli,
+  runMvpFreezeViaCli,
+} from "./lib/freeze-bridge.js";
+import {
   abortAllTracked,
   trackAbortController,
 } from "./lib/dispose-registry.js";
@@ -287,6 +291,8 @@ export function apply(ctx, config = {}) {
     keepWorktrees,
   });
   registerMvpTestTool(ctx, { controlRoot, targetRepo: repoRoot });
+  registerMvpCompileTool(ctx, { controlRoot });
+  registerMvpFreezeTool(ctx, { controlRoot });
 
   const persona = mountMasterPersona(ctx, {
     promptPath: config?.masterPersonaPath
@@ -533,6 +539,129 @@ function registerMvpTestTool(ctx, opts) {
   } catch (e) {
     console.warn(
       `[dsh-cliyard] mvp-test tool not registered: ${
+        e instanceof Error ? e.message : e
+      }`,
+    );
+  }
+}
+
+function registerMvpCompileTool(ctx, opts) {
+  if (!ctx?.tools || typeof ctx.tools.register !== "function") return;
+  const definition = {
+    name: "cliyard_mvp_compile",
+    description:
+      "M3: compile an MVP Plan JSON into unfrozen local-cli TaskContract " +
+      "drafts (frozen=false). Does not dispatch. Human must call " +
+      "cliyard_mvp_freeze before mvp-test.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        planPath: {
+          type: "string",
+          description: "Path to Plan JSON (e.g. examples/mvp/echo.plan.json).",
+        },
+        outDir: {
+          type: "string",
+          description: "Directory to write *.draft.contract.json files.",
+        },
+      },
+      required: ["planPath", "outDir"],
+    },
+    async execute(args) {
+      const input =
+        args && typeof args === "object" && !Array.isArray(args) ? args : {};
+      for (const key of Object.keys(input)) {
+        if (key !== "planPath" && key !== "outDir") {
+          throw new Error(`cliyard_mvp_compile does not accept "${key}"`);
+        }
+      }
+      if (typeof input.planPath !== "string" || typeof input.outDir !== "string") {
+        throw new Error("cliyard_mvp_compile requires planPath and outDir");
+      }
+      const result = await runMvpCompileViaCli({
+        controlRoot: opts.controlRoot,
+        planPath: input.planPath,
+        outDir: input.outDir,
+      });
+      if (result.code !== 0) {
+        throw new Error(
+          result.stderr.trim() ||
+            result.stdout.trim() ||
+            `mvp-compile failed with exit ${result.code}`,
+        );
+      }
+      return result.stdout.trim();
+    },
+  };
+  const install = () => ctx.tools.register(definition);
+  try {
+    if (typeof ctx.effect === "function") ctx.effect(install);
+    else install();
+  } catch (e) {
+    console.warn(
+      `[dsh-cliyard] mvp-compile tool not registered: ${
+        e instanceof Error ? e.message : e
+      }`,
+    );
+  }
+}
+
+function registerMvpFreezeTool(ctx, opts) {
+  if (!ctx?.tools || typeof ctx.tools.register !== "function") return;
+  const definition = {
+    name: "cliyard_mvp_freeze",
+    description:
+      "M3 human /freeze: set frozen=true + frozenAt, validate schema, write " +
+      "contract bytes and .sha256 sidecar. Does not dispatch or auto-approve.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        draftPath: {
+          type: "string",
+          description: "Path to unfrozen draft contract JSON.",
+        },
+        outPath: {
+          type: "string",
+          description: "Output path for frozen contract JSON.",
+        },
+      },
+      required: ["draftPath", "outPath"],
+    },
+    async execute(args) {
+      const input =
+        args && typeof args === "object" && !Array.isArray(args) ? args : {};
+      for (const key of Object.keys(input)) {
+        if (key !== "draftPath" && key !== "outPath") {
+          throw new Error(`cliyard_mvp_freeze does not accept "${key}"`);
+        }
+      }
+      if (typeof input.draftPath !== "string" || typeof input.outPath !== "string") {
+        throw new Error("cliyard_mvp_freeze requires draftPath and outPath");
+      }
+      const result = await runMvpFreezeViaCli({
+        controlRoot: opts.controlRoot,
+        draftPath: input.draftPath,
+        outPath: input.outPath,
+      });
+      if (result.code !== 0) {
+        throw new Error(
+          result.stderr.trim() ||
+            result.stdout.trim() ||
+            `mvp-freeze failed with exit ${result.code}`,
+        );
+      }
+      return result.stdout.trim();
+    },
+  };
+  const install = () => ctx.tools.register(definition);
+  try {
+    if (typeof ctx.effect === "function") ctx.effect(install);
+    else install();
+  } catch (e) {
+    console.warn(
+      `[dsh-cliyard] mvp-freeze tool not registered: ${
         e instanceof Error ? e.message : e
       }`,
     );

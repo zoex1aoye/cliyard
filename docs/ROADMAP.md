@@ -42,8 +42,8 @@ writeRoots semantics, human merge gate, deterministic verify.
 | **M0** TaskContract shell | **implemented (PR)** | Schema + mock fixture + validator |
 | **M0.5** Master system persona | **implemented (PR)** | Plugin mounts systemPrompt section when host provides it |
 | **M1** Idle spin + cwd lock | **landed** (`12db03b` / PR #28) | `/cliyard-test`: worktree + `local-cli` spawn; trunk clean |
-| **M2** Dispose (+ optional wrap) | **on branch** | Cancel kills child; no Landlock claim |
-| **M3** Compiler + `/freeze` | pending | No dispatch without human freeze |
+| **M2** Dispose (+ optional wrap) | **landed** (`e0f6bb6` / PR #29) | Cancel kills child; no Landlock claim |
+| **M3** Compiler + `/freeze` | **on branch** | Unfrozen refuses dispatch; freeze writes hash |
 | **M4** Demo (code CLI + second scene) | pending | Same schema; human review; no auto-merge |
 
 ```text
