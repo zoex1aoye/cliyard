@@ -1,0 +1,62 @@
+{
+  "planId": "mvp-m3-freeze-v0",
+  "contracts": [
+    {
+      "taskId": "mvp-m3-freeze-v0",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "M3 freeze: src/mvp/compile.ts Plan→unfrozen local-cli drafts; src/mvp/freeze.ts sets frozen/frozenAt + schema + sha256 sidecar; CLI mvp-compile/mvp-freeze; idle-spin refuses unfrozen and fails closed on hash mismatch; DSH tools cliyard_mvp_compile/cliyard_mvp_freeze; examples/mvp/echo.plan.json; tests/mvp-freeze.test.ts; evidence MVP_M3_FREEZE.md; update CURRENT_STATE/ROADMAP/mvp roadmap."
+      ],
+      "nonGoals": [
+        "Do not auto-approve Plans or auto-dispatch on compile.",
+        "Do not call coding models for compile.",
+        "Do not deepen mainline plan-dispatch/queue freeze.",
+        "Do not implement M4 demos or auto-merge."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/mvp-m3-freeze-v0.md",
+        "design/dsh-plugin-mvp-roadmap-v0.md",
+        "design/dsh-plugin-cliyard-taskcontract-v0.md",
+        "src/mvp/taskcontract.ts",
+        "src/mvp/idle-spin.ts",
+        "src/mvp/cli.ts",
+        "plugins/dsh-cliyard/index.js"
+      ],
+      "writePaths": [
+        "src/mvp/compile.ts",
+        "src/mvp/freeze.ts",
+        "src/mvp/cli.ts",
+        "src/mvp/index.ts",
+        "src/cli.ts",
+        "package.json",
+        "examples/mvp/echo.plan.json",
+        "plugins/dsh-cliyard/index.js",
+        "plugins/dsh-cliyard/lib/freeze-bridge.js",
+        "plugins/dsh-cliyard/README.md",
+        "tests/mvp-freeze.test.ts",
+        "docs/evidence/MVP_M3_FREEZE.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md",
+        "design/dsh-plugin-mvp-roadmap-v0.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "e0f6bb6e701c512aab25b9a92cc19d22ff94b817",
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/mvp-freeze.test.ts tests/mvp-idle-spin.test.ts"
+      ],
+      "deliverables": [
+        "Deterministic Plan→draft compile and human freeze with hash sidecar.",
+        "CLI + DSH tools + focused tests + evidence."
+      ],
+      "forbidden": [
+        "Do not auto-dispatch after compile.",
+        "Do not allow silent mutation of frozen contract bytes.",
+        "Do not spawn with cwd=repoRoot."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}
