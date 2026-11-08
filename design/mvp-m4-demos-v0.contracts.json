@@ -1,0 +1,63 @@
+{
+  "planId": "mvp-m4-demos-v0",
+  "contracts": [
+    {
+      "taskId": "mvp-m4-demos-v0",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "M4 demos: extend idle-spin for workspace.kind=assets; examples/mvp/code-codex.plan.json (target codex + standin argv) and novel-ep1.plan.json (assets + episode write); cliyard mvp-demo runs compile→freeze→spin for both and writes .cliyard/mvp-demo/status.json; DSH tool cliyard_mvp_demo; tests/mvp-demo.test.ts; evidence MVP_M4_DEMOS.md; update CURRENT_STATE/ROADMAP/mvp roadmap."
+      ],
+      "nonGoals": [
+        "Do not auto-merge to main.",
+        "Do not claim live Codex/Claude sessions when binary missing.",
+        "Do not implement real dsh-llm chat or multimodal runtime.",
+        "Do not deepen Landlock/SQLite/process-tree ownership."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/mvp-m4-demos-v0.md",
+        "design/dsh-plugin-mvp-roadmap-v0.md",
+        "src/mvp/idle-spin.ts",
+        "src/mvp/compile.ts",
+        "src/mvp/freeze.ts",
+        "src/mvp/cli.ts",
+        "plugins/dsh-cliyard/index.js"
+      ],
+      "writePaths": [
+        "src/mvp/idle-spin.ts",
+        "src/mvp/demo.ts",
+        "src/mvp/cli.ts",
+        "src/mvp/index.ts",
+        "src/cli.ts",
+        "package.json",
+        "examples/mvp/code-codex.plan.json",
+        "examples/mvp/novel-ep1.plan.json",
+        "plugins/dsh-cliyard/index.js",
+        "plugins/dsh-cliyard/lib/demo-bridge.js",
+        "plugins/dsh-cliyard/README.md",
+        "tests/mvp-demo.test.ts",
+        "docs/evidence/MVP_M4_DEMOS.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md",
+        "design/dsh-plugin-mvp-roadmap-v0.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "e4f2f86b973b56a5a3aaa31d6549a743d97e0bcd",
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/mvp-demo.test.ts tests/mvp-freeze.test.ts tests/mvp-idle-spin.test.ts"
+      ],
+      "deliverables": [
+        "Dual-scene mvp-demo CLI + status JSON + evidence.",
+        "assets workspace support in idle-spin."
+      ],
+      "forbidden": [
+        "Do not auto-merge.",
+        "Do not spawn with cwd=repoRoot.",
+        "Do not enable wrap/sandbox by default."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}

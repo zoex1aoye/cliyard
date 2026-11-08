@@ -25,6 +25,7 @@ import {
   runMvpCompileViaCli,
   runMvpFreezeViaCli,
 } from "./lib/freeze-bridge.js";
+import { runMvpDemoViaCli } from "./lib/demo-bridge.js";
 import {
   abortAllTracked,
   trackAbortController,
@@ -293,6 +294,7 @@ export function apply(ctx, config = {}) {
   registerMvpTestTool(ctx, { controlRoot, targetRepo: repoRoot });
   registerMvpCompileTool(ctx, { controlRoot });
   registerMvpFreezeTool(ctx, { controlRoot });
+  registerMvpDemoTool(ctx, { controlRoot, targetRepo: repoRoot });
 
   const persona = mountMasterPersona(ctx, {
     promptPath: config?.masterPersonaPath
@@ -539,6 +541,65 @@ function registerMvpTestTool(ctx, opts) {
   } catch (e) {
     console.warn(
       `[dsh-cliyard] mvp-test tool not registered: ${
+        e instanceof Error ? e.message : e
+      }`,
+    );
+  }
+}
+
+function registerMvpDemoTool(ctx, opts) {
+  if (!ctx?.tools || typeof ctx.tools.register !== "function") return;
+  const definition = {
+    name: "cliyard_mvp_demo",
+    description:
+      "M4: run dual-scene demos (code codex registry target + novel assets) " +
+      "via compile→freeze→idle-spin. Writes .cliyard/mvp-demo/status.json. " +
+      "Does not merge to main. Does not claim live Codex when binary missing.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        planPaths: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional Plan JSON paths. Defaults to code-codex + novel-ep1 fixtures.",
+        },
+      },
+    },
+    async execute(args) {
+      const input =
+        args && typeof args === "object" && !Array.isArray(args) ? args : {};
+      for (const key of Object.keys(input)) {
+        if (key !== "planPaths") {
+          throw new Error(`cliyard_mvp_demo does not accept "${key}"`);
+        }
+      }
+      const planPaths = Array.isArray(input.planPaths)
+        ? input.planPaths.filter((p) => typeof p === "string")
+        : undefined;
+      const result = await runMvpDemoViaCli({
+        controlRoot: opts.controlRoot,
+        repoRoot: opts.targetRepo,
+        planPaths,
+      });
+      if (result.code !== 0) {
+        throw new Error(
+          result.stderr.trim() ||
+            result.stdout.trim() ||
+            `mvp-demo failed with exit ${result.code}`,
+        );
+      }
+      return result.stdout.trim();
+    },
+  };
+  const install = () => ctx.tools.register(definition);
+  try {
+    if (typeof ctx.effect === "function") ctx.effect(install);
+    else install();
+  } catch (e) {
+    console.warn(
+      `[dsh-cliyard] mvp-demo tool not registered: ${
         e instanceof Error ? e.message : e
       }`,
     );

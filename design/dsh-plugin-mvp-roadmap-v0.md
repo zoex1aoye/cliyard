@@ -62,7 +62,7 @@ M0 契约面 ──► M0.5 Master persona ──► M1 空转+cwd锁
 | **M0.5** | Master system persona 挂上 DSH | **landed** `95146d2` (unit); live DSH smoke TBD | 不改 DSH agent loop |
 | **M1** | `/cliyard-test`：mock 契约 → worktree → `local-cli` spawn | **landed** `12db03b` / PR #28 | 不接 LLM 编译；不自研进程树 |
 | **M2** | Cordis dispose 回收；可选 docker/low-priv | **landed** `e0f6bb6` / PR #29 | 不绑 Landlock；不宣称默认-on OS sandbox |
-| **M3** | Compiler 出 Plan；人 `/freeze` | 未确认不能派发；freeze 后改字节需新版本 | 不自动批准 Plan |
+| **M3** | Compiler 出 Plan；人 `/freeze` | **landed** `e4f2f86` / PR #30 | 不自动批准 Plan |
 | **M4** | 至少 **code 本机 CLI** + 另一场景（novel 或第二 CLI）各一条 Demo | 同一 Schema；人审证据；不合入 main | 不自研多模态运行时；不自动合入 |
 
 并行建议：M0.5 可与 M1 准备并行（人设不阻塞空转夹具）。M2 必须在真 spawn 之后。M3 依赖 M0 Schema。M4 依赖 M1–M3。
@@ -96,9 +96,10 @@ M0 契约面 ──► M0.5 Master persona ──► M1 空转+cwd锁
   Evidence: [MVP_M3_FREEZE.md](../docs/evidence/MVP_M3_FREEZE.md)
 
 ### M4
-- [ ] code：`local-cli` → claude/codex/opencode 之一
-- [ ] 第二故事：第二 CLI 或 `dsh-llm` 小说最小条
-- [ ] 监控可读状态（可借侧栏；数据我们供）
+- [x] code：`local-cli` → registry `codex`（无二进制时 standin，证据标明）
+- [x] 第二故事：novel + `workspace.kind=assets` 写 `episodes/ep1.md`
+- [x] 监控可读状态 — `.cliyard/mvp-demo/status.json` / `mvp-demo`
+  Evidence: [MVP_M4_DEMOS.md](../docs/evidence/MVP_M4_DEMOS.md)
 
 ## 6. 反哺主线的条件（之后才解冻）
 

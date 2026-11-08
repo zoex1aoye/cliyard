@@ -103,6 +103,10 @@ Freeze (M3): `cliyard_mvp_compile` / `mvp-compile` writes unfrozen drafts;
 `cliyard_mvp_freeze` / `mvp-freeze` sets `frozen`/`frozenAt` + `.sha256`.
 Unfrozen contracts refuse idle-spin. See `docs/evidence/MVP_M3_FREEZE.md`.
 
+Demos (M4): `cliyard_mvp_demo` / `mvp-demo` runs code (`codex` target) +
+novel (assets) compile→freeze→spin and writes
+`.cliyard/mvp-demo/status.json`. See `docs/evidence/MVP_M4_DEMOS.md`.
+
 ## Design rules
 
 - Control truth = frozen contracts, RunManifest and EvidenceBundle in cliyard;

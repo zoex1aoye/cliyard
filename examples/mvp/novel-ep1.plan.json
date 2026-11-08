@@ -1,0 +1,55 @@
+{
+  "planId": "mvp-m4-novel-ep1",
+  "scene": "novel",
+  "tasks": [
+    {
+      "taskId": "mvp-novel-ep1-demo",
+      "goal": "M4 novel demo: assets workspace writes episodes/ep1.md on the same TaskContract schema",
+      "nonGoals": [
+        "Do not call a live DSH LLM",
+        "Do not auto-merge"
+      ],
+      "acceptance": [
+        "spawn cwd equals assets workspace.path",
+        "episodes/ep1.md exists with non-empty body"
+      ],
+      "assets": [
+        {
+          "id": "voice-sample",
+          "kind": "text",
+          "path": "design/dsh-master-persona-v0.prompt.txt",
+          "role": "style"
+        }
+      ],
+      "workspace": {
+        "kind": "assets",
+        "path": ".cliyard/assets/mvp-novel-ep1",
+        "writeRoots": ["episodes/ep1.md"]
+      },
+      "driver": {
+        "kind": "local-cli",
+        "target": "custom:novel-standin",
+        "argv": [
+          "sh",
+          "-c",
+          "mkdir -p episodes && printf '%s\\n' '# Episode 1' '' 'Stand-in novel draft on TaskContract schema (scene=novel, workspace=assets).' '' 'Style asset role=style was declared; no live LLM invoked.' > episodes/ep1.md"
+        ],
+        "stdin": { "mode": "none" },
+        "timeoutSec": 30
+      },
+      "sandbox": { "mode": "none" },
+      "verify": {
+        "commands": [
+          {
+            "argv": ["test", "-s", "episodes/ep1.md"],
+            "cwd": "workspace"
+          }
+        ]
+      },
+      "cleanup": {
+        "onCancel": "dispose-child",
+        "keepWorkspace": true
+      }
+    }
+  ]
+}

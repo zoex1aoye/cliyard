@@ -1,0 +1,54 @@
+{
+  "planId": "mvp-m4-code-codex",
+  "scene": "code",
+  "tasks": [
+    {
+      "taskId": "mvp-code-codex-demo",
+      "goal": "M4 code demo: local-cli registry target codex writes under writeRoots",
+      "nonGoals": [
+        "Do not claim a live Codex model session when the binary is absent",
+        "Do not auto-merge"
+      ],
+      "acceptance": [
+        "spawn cwd equals workspace.path",
+        ".cliyard/mvp-code-demo/RESULT.txt exists",
+        "MODE file records live or standin"
+      ],
+      "workspace": {
+        "kind": "git-worktree",
+        "path": ".cliyard/worktrees/mvp-code-codex-demo",
+        "baseRef": "HEAD",
+        "writeRoots": [".cliyard/mvp-code-demo/"]
+      },
+      "driver": {
+        "kind": "local-cli",
+        "target": "codex",
+        "argv": [
+          "sh",
+          "-c",
+          "mkdir -p .cliyard/mvp-code-demo && if command -v codex >/dev/null 2>&1; then echo live > .cliyard/mvp-code-demo/MODE.txt; codex --version > .cliyard/mvp-code-demo/RESULT.txt 2>&1 || echo 'codex-present-but-failed' > .cliyard/mvp-code-demo/RESULT.txt; else echo standin > .cliyard/mvp-code-demo/MODE.txt; echo 'codex-standin: binary not on PATH' > .cliyard/mvp-code-demo/RESULT.txt; fi"
+        ],
+        "stdin": { "mode": "none" },
+        "env": { "CLIYARD_RUN_MODE": "contract" },
+        "timeoutSec": 60
+      },
+      "sandbox": { "mode": "none" },
+      "verify": {
+        "commands": [
+          {
+            "argv": ["test", "-f", ".cliyard/mvp-code-demo/RESULT.txt"],
+            "cwd": "workspace"
+          },
+          {
+            "argv": ["test", "-f", ".cliyard/mvp-code-demo/MODE.txt"],
+            "cwd": "workspace"
+          }
+        ]
+      },
+      "cleanup": {
+        "onCancel": "dispose-child",
+        "keepWorkspace": true
+      }
+    }
+  ]
+}

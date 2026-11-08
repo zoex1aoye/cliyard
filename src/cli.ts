@@ -21,6 +21,7 @@ import { runStateStoreCli } from "./statestore/read.js";
 import { runDaemonCli } from "./daemon/cli.js";
 import {
   runMvpCompileCli,
+  runMvpDemoCli,
   runMvpFreezeCli,
   runMvpTestCli,
 } from "./mvp/cli.js";
@@ -82,6 +83,7 @@ Usage:
   cliyard mvp-test --repo <path> [contract.json] [--replace-existing] [--json]
   cliyard mvp-compile <plan.json> --out <dir> [--json]
   cliyard mvp-freeze <draft.json> --out <frozen.json> [--json]
+  cliyard mvp-demo --repo <path> [--json] [plan.json ...]
 
 Master (DeepSeek Harness plugin / local demo):
   npm run master-monitor
@@ -239,6 +241,11 @@ async function main(): Promise<void> {
 
   if (cmd === "mvp-freeze") {
     await runMvpFreezeCli(argv.slice(1));
+    return;
+  }
+
+  if (cmd === "mvp-demo") {
+    await runMvpDemoCli(argv.slice(1));
     return;
   }
 
