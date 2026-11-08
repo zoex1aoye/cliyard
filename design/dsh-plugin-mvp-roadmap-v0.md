@@ -62,7 +62,7 @@ M0 契约面 ──► M0.5 Master persona ──► M1 空转+cwd锁
 | **M0.5** | Master system persona 挂上 DSH | **landed** `95146d2` (unit); live DSH smoke TBD | 不改 DSH agent loop |
 | **M1** | `/cliyard-test`：mock 契约 → worktree → `local-cli` spawn | **landed** `12db03b` / PR #28 | 不接 LLM 编译；不自研进程树 |
 | **M2** | Cordis dispose 回收；可选 docker/low-priv | **landed** `e0f6bb6` / PR #29 | 不绑 Landlock；不宣称默认-on OS sandbox |
-| **M3** | Compiler 出 Plan；人 `/freeze` | 未确认不能派发；freeze 后改字节需新版本 | 不自动批准 Plan |
+| **M3** | Compiler 出 Plan；人 `/freeze` | **landed** `e4f2f86` / PR #30 | 不自动批准 Plan |
 | **M4** | 至少 **code 本机 CLI** + 另一场景（novel 或第二 CLI）各一条 Demo | 同一 Schema；人审证据；不合入 main | 不自研多模态运行时；不自动合入 |
 
 并行建议：M0.5 可与 M1 准备并行（人设不阻塞空转夹具）。M2 必须在真 spawn 之后。M3 依赖 M0 Schema。M4 依赖 M1–M3。
