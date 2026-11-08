@@ -85,9 +85,9 @@ M0 契约面 ──► M0.5 Master persona ──► M1 空转+cwd锁
 - [x] 证据：主干 clean、子目录有写入、exit code — [MVP_M1_IDLE_SPIN.md](../docs/evidence/MVP_M1_IDLE_SPIN.md)
 
 ### M2
-- [ ] `AbortSignal` / Cordis `dispose` → SIGTERM/SIGKILL（含 process group）
-- [ ] 取消用例证据（至少一 OS）
-- [ ] 可选 wrap 开关（默认关）
+- [x] `AbortSignal` / Cordis `dispose` → SIGTERM/SIGKILL（含 process group）
+- [x] 取消用例证据（至少一 OS — Linux unit/CLI）— [MVP_M2_DISPOSE.md](../docs/evidence/MVP_M2_DISPOSE.md)
+- [x] 可选 wrap 开关（默认关；docker/low-priv 拒绝启用）
 
 ### M3
 - [ ] Plan JSON 草稿输出

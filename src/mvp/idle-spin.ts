@@ -1,9 +1,17 @@
 /**
- * MVP M1 idle-spin: frozen local-cli TaskContract → git worktree → spawn(cwd).
+ * MVP M1 idle-spin + M2 dispose: worktree → spawn(cwd) → AbortSignal kill.
  */
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
+import {
+  assertWrapDisabledOrKnown,
+  defaultDisposeRegistry,
+  disposeChild,
+  type DisposeReason,
+  type DisposeRegistry,
+  type DisposeResult,
+} from "./dispose.js";
 import {
   assertLocalCliTaskContract,
   type LocalCliTaskContract,
@@ -18,9 +26,13 @@ export interface IdleSpinResult {
   branch: string;
   spawnCwd: string;
   spawnExitCode: number;
+  spawnPid?: number;
   verify: Array<{ argv: string[]; exitCode: number }>;
   trunkClean: boolean;
   keptWorkspace: boolean;
+  disposed: boolean;
+  disposeReason?: DisposeReason;
+  dispose?: DisposeResult;
   error?: string;
 }
 
@@ -53,34 +65,133 @@ function spawnCommand(input: {
   cwd: string;
   env?: Record<string, string>;
   timeoutSec: number;
-}): Promise<{ code: number; stdout: string; stderr: string }> {
+  signal?: AbortSignal;
+  /** Detach into its own process group so dispose can kill descendants. */
+  detached?: boolean;
+  registry?: DisposeRegistry;
+}): Promise<{
+  code: number;
+  stdout: string;
+  stderr: string;
+  pid?: number;
+  disposed: boolean;
+  disposeReason?: DisposeReason;
+  dispose?: DisposeResult;
+}> {
   const [cmd, ...args] = input.argv;
   if (!cmd) {
     return Promise.reject(new Error("argv must be non-empty"));
   }
+  if (input.signal?.aborted) {
+    return Promise.resolve({
+      code: 1,
+      stdout: "",
+      stderr: "aborted before spawn",
+      disposed: true,
+      disposeReason: "abort",
+    });
+  }
+
+  const detached = input.detached === true;
+  const registry = input.registry;
+
   return new Promise((resolvePromise, reject) => {
     const child = spawn(cmd, args, {
       cwd: input.cwd,
       env: { ...process.env, ...(input.env ?? {}) },
+      detached,
+      stdio: ["ignore", "pipe", "pipe"],
     });
+    const pid = child.pid;
     let stdout = "";
     let stderr = "";
+    let disposed = false;
+    let disposeReason: DisposeReason | undefined;
+    let disposeInfo: DisposeResult | undefined;
+    let disposeInFlight: Promise<void> | undefined;
+    let unregister: (() => void) | undefined;
+    let settled = false;
+
+    const finish = (code: number) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      input.signal?.removeEventListener("abort", onAbort);
+      unregister?.();
+      resolvePromise({
+        code,
+        stdout,
+        stderr,
+        ...(pid ? { pid } : {}),
+        disposed,
+        ...(disposeReason ? { disposeReason } : {}),
+        ...(disposeInfo ? { dispose: disposeInfo } : {}),
+      });
+    };
+
+    const requestDispose = (reason: DisposeReason): Promise<void> => {
+      if (!pid) return Promise.resolve();
+      if (disposeInFlight) return disposeInFlight;
+      disposed = true;
+      disposeReason = reason;
+      disposeInFlight = (async () => {
+        disposeInfo = await disposeChild({
+          pid,
+          reason,
+          processGroup: detached,
+        });
+      })();
+      return disposeInFlight;
+    };
+
+    if (pid && registry) {
+      unregister = registry.register({
+        pid,
+        processGroup: detached,
+        dispose: async (reason) => {
+          await requestDispose(reason);
+          return (
+            disposeInfo ?? {
+              pid,
+              disposed: true,
+              reason,
+              usedProcessGroup: detached,
+              signals: [],
+              aliveAfter: false,
+            }
+          );
+        },
+      });
+    }
+
+    const onAbort = () => {
+      void requestDispose("abort");
+    };
+    input.signal?.addEventListener("abort", onAbort, { once: true });
+
     const timer = setTimeout(() => {
-      child.kill("SIGKILL");
+      void requestDispose("timeout");
     }, Math.max(1, input.timeoutSec) * 1000);
-    child.stdout.on("data", (d) => {
+
+    child.stdout?.on("data", (d) => {
       stdout += String(d);
     });
-    child.stderr.on("data", (d) => {
+    child.stderr?.on("data", (d) => {
       stderr += String(d);
     });
     child.on("error", (err) => {
       clearTimeout(timer);
+      input.signal?.removeEventListener("abort", onAbort);
+      unregister?.();
       reject(err);
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
-      resolvePromise({ code: code ?? 1, stdout, stderr });
+      const exitCode = code ?? 1;
+      if (disposeInFlight) {
+        void disposeInFlight.finally(() => finish(exitCode));
+      } else {
+        finish(exitCode);
+      }
     });
   });
 }
@@ -152,9 +263,14 @@ export async function runIdleSpin(input: {
   contract: LocalCliTaskContract;
   /** When true, remove an existing worktree at the same path first. */
   replaceExisting?: boolean;
+  /** M2: abort cancels the local-cli child (process group). */
+  signal?: AbortSignal;
+  /** Override dispose registry (defaults to shared in-process registry). */
+  registry?: DisposeRegistry;
 }): Promise<IdleSpinResult> {
   const repoRoot = resolve(input.repoRoot);
   const contract = input.contract;
+  const registry = input.registry ?? defaultDisposeRegistry;
 
   if (!contract.frozen) {
     throw new Error("idle-spin requires frozen=true");
@@ -165,6 +281,7 @@ export async function runIdleSpin(input: {
   if (contract.workspace.kind !== "git-worktree") {
     throw new Error("idle-spin v0 requires workspace.kind=git-worktree");
   }
+  assertWrapDisabledOrKnown(contract.sandbox?.mode);
   if (!existsSync(join(repoRoot, ".git"))) {
     throw new Error(`not a git repository: ${repoRoot}`);
   }
@@ -226,6 +343,10 @@ export async function runIdleSpin(input: {
   }
 
   let spawnExitCode = 1;
+  let spawnPid: number | undefined;
+  let disposed = false;
+  let disposeReason: DisposeReason | undefined;
+  let disposeInfo: DisposeResult | undefined;
   let error: string | undefined;
   try {
     const spawned = await spawnCommand({
@@ -233,9 +354,18 @@ export async function runIdleSpin(input: {
       cwd: worktreePath,
       env,
       timeoutSec,
+      signal: input.signal,
+      detached: true,
+      registry,
     });
     spawnExitCode = spawned.code;
-    if (spawned.code !== 0) {
+    spawnPid = spawned.pid;
+    disposed = spawned.disposed;
+    disposeReason = spawned.disposeReason;
+    disposeInfo = spawned.dispose;
+    if (spawned.disposed) {
+      error = `disposed (${spawned.disposeReason ?? "abort"})`;
+    } else if (spawned.code !== 0) {
       error = `spawn exit ${spawned.code}: ${spawned.stderr || spawned.stdout}`;
     }
   } catch (err) {
@@ -244,7 +374,7 @@ export async function runIdleSpin(input: {
   }
 
   const verify: Array<{ argv: string[]; exitCode: number }> = [];
-  if (spawnExitCode === 0) {
+  if (spawnExitCode === 0 && !disposed) {
     for (const cmd of contract.verify.commands) {
       const cwd =
         cmd.cwd === "repo" ? repoRoot : worktreePath;
@@ -259,9 +389,16 @@ export async function runIdleSpin(input: {
           argv: cmd.argv,
           cwd,
           timeoutSec: Math.min(timeoutSec, 120),
+          signal: input.signal,
+          detached: false,
         });
         verify.push({ argv: cmd.argv, exitCode: res.code });
-        if (res.code !== 0 && !error) {
+        if (res.disposed) {
+          disposed = true;
+          disposeReason = res.disposeReason;
+          disposeInfo = res.dispose;
+          error = error ?? `disposed during verify (${res.disposeReason})`;
+        } else if (res.code !== 0 && !error) {
           error = `verify failed (${cmd.argv.join(" ")}): exit ${res.code}`;
         }
       } catch (err) {
@@ -292,6 +429,7 @@ export async function runIdleSpin(input: {
   }
 
   const verifyOk =
+    !disposed &&
     spawnExitCode === 0 &&
     verify.length === contract.verify.commands.length &&
     verify.every((v) => v.exitCode === 0);
@@ -305,9 +443,13 @@ export async function runIdleSpin(input: {
     branch,
     spawnCwd: worktreePath,
     spawnExitCode,
+    ...(spawnPid !== undefined ? { spawnPid } : {}),
     verify,
     trunkClean,
     keptWorkspace: keepWorkspace,
+    disposed,
+    ...(disposeReason ? { disposeReason } : {}),
+    ...(disposeInfo ? { dispose: disposeInfo } : {}),
     ...(error ? { error } : {}),
   };
 }
@@ -316,6 +458,8 @@ export async function runIdleSpinFromFile(input: {
   repoRoot: string;
   contractPath: string;
   replaceExisting?: boolean;
+  signal?: AbortSignal;
+  registry?: DisposeRegistry;
 }): Promise<IdleSpinResult> {
   const contract = loadContractFile(input.contractPath);
   return runIdleSpin({
@@ -324,5 +468,7 @@ export async function runIdleSpinFromFile(input: {
     ...(input.replaceExisting !== undefined
       ? { replaceExisting: input.replaceExisting }
       : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
+    ...(input.registry ? { registry: input.registry } : {}),
   });
 }
