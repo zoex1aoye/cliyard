@@ -22,6 +22,10 @@ import {
 } from "./lib/master-persona.js";
 import { runMvpTestViaCli } from "./lib/idle-spin-bridge.js";
 import {
+  abortAllTracked,
+  trackAbortController,
+} from "./lib/dispose-registry.js";
+import {
   resolveControlRoot,
   resolveRepoRoot,
 } from "./lib/paths.js";
@@ -322,6 +326,12 @@ export function apply(ctx, config = {}) {
         });
       });
       ctx.on("dispose", async () => {
+        const aborted = abortAllTracked();
+        if (aborted > 0) {
+          console.log(
+            `[dsh-cliyard] dispose aborted ${aborted} in-flight mvp-test controller(s)`,
+          );
+        }
         stopWatch?.();
         await api.stopMonitor();
       });
@@ -449,9 +459,10 @@ function registerMvpTestTool(ctx, opts) {
   const definition = {
     name: "cliyard_mvp_test",
     description:
-      "M1 idle-spin: run a frozen local-cli TaskContract in an isolated git " +
-      "worktree (cwd locked). Default contract is the echo mock fixture. " +
-      "Does not call coding models. Does not merge to main.",
+      "M1/M2 idle-spin + dispose: run a frozen local-cli TaskContract in an " +
+      "isolated git worktree (cwd locked). Optional cancelAfterMs aborts the " +
+      "child. Plugin dispose also aborts in-flight runs. Default contract is " +
+      "the echo mock fixture. Does not call coding models. Does not merge.",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -466,33 +477,53 @@ function registerMvpTestTool(ctx, opts) {
           type: "boolean",
           description: "Force-remove an existing worktree at the contract path.",
         },
+        cancelAfterMs: {
+          type: "number",
+          description:
+            "M2 dispose probe: abort the local-cli child after N milliseconds.",
+        },
       },
     },
     async execute(args) {
       const input =
         args && typeof args === "object" && !Array.isArray(args) ? args : {};
       for (const key of Object.keys(input)) {
-        if (key !== "contractPath" && key !== "replaceExisting") {
+        if (
+          key !== "contractPath" &&
+          key !== "replaceExisting" &&
+          key !== "cancelAfterMs"
+        ) {
           throw new Error(`cliyard_mvp_test does not accept "${key}"`);
         }
       }
-      const result = await runMvpTestViaCli({
-        controlRoot: opts.controlRoot,
-        repoRoot: opts.targetRepo,
-        contractPath:
-          typeof input.contractPath === "string"
-            ? input.contractPath
-            : undefined,
-        replaceExisting: input.replaceExisting === true,
-      });
-      if (result.code !== 0) {
-        throw new Error(
-          result.stderr.trim() ||
-            result.stdout.trim() ||
-            `mvp-test failed with exit ${result.code}`,
-        );
+      const controller = new AbortController();
+      const untrack = trackAbortController(controller);
+      try {
+        const result = await runMvpTestViaCli({
+          controlRoot: opts.controlRoot,
+          repoRoot: opts.targetRepo,
+          contractPath:
+            typeof input.contractPath === "string"
+              ? input.contractPath
+              : undefined,
+          replaceExisting: input.replaceExisting === true,
+          cancelAfterMs:
+            typeof input.cancelAfterMs === "number"
+              ? input.cancelAfterMs
+              : undefined,
+          signal: controller.signal,
+        });
+        if (result.code !== 0 && !result.disposed) {
+          throw new Error(
+            result.stderr.trim() ||
+              result.stdout.trim() ||
+              `mvp-test failed with exit ${result.code}`,
+          );
+        }
+        return result.stdout.trim() || JSON.stringify({ disposed: true });
+      } finally {
+        untrack();
       }
-      return result.stdout.trim();
     },
   };
   const install = () => ctx.tools.register(definition);

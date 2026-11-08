@@ -1,0 +1,47 @@
+{
+  "contractVersion": 1,
+  "contractId": "mvp-sleep-dispose",
+  "scene": "code",
+  "frozen": true,
+  "frozenAt": "2026-11-08T13:20:00+08:00",
+  "planId": "mvp-m2-dispose",
+  "dependsOn": [],
+  "intent": {
+    "goal": "M2 dispose probe: long sleep inside worktree so cancel can kill it",
+    "nonGoals": [
+      "Do not finish successfully under cancel-after",
+      "Do not enable wrap/sandbox"
+    ],
+    "acceptance": [
+      "Child is disposed before sleep completes",
+      "kill -0 on spawnPid fails after dispose"
+    ],
+    "assets": []
+  },
+  "workspace": {
+    "kind": "git-worktree",
+    "path": ".cliyard/worktrees/mvp-sleep-dispose",
+    "baseRef": "HEAD",
+    "writeRoots": [".cliyard/mvp-sleep/"]
+  },
+  "driver": {
+    "kind": "local-cli",
+    "target": "custom:sleep-long",
+    "argv": ["sh", "-c", "sleep 30"],
+    "stdin": { "mode": "none" },
+    "timeoutSec": 60
+  },
+  "sandbox": { "mode": "none" },
+  "verify": {
+    "commands": [
+      {
+        "argv": ["true"],
+        "cwd": "workspace"
+      }
+    ]
+  },
+  "cleanup": {
+    "onCancel": "dispose-child",
+    "keepWorkspace": true
+  }
+}

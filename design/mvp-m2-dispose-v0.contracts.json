@@ -1,0 +1,62 @@
+{
+  "planId": "mvp-m2-dispose-v0",
+  "contracts": [
+    {
+      "taskId": "mvp-m2-dispose-v0",
+      "version": 1,
+      "frozen": true,
+      "goals": [
+        "M2 dispose: src/mvp/dispose.ts kills tracked local-cli child (process group when detached) on AbortSignal/Cordis dispose; idle-spin accepts signal + reports disposed; mvp-test --cancel-after-ms; plugin ActiveChild registry on ctx.dispose; optional wrap remains default-off; tests/mvp-dispose.test.ts; evidence MVP_M2_DISPOSE.md; update CURRENT_STATE/ROADMAP/mvp roadmap M1 done + M2 on branch."
+      ],
+      "nonGoals": [
+        "Do not implement Landlock or pid+pgid+lstart ownership ledger.",
+        "Do not implement Plan compiler /freeze (M3).",
+        "Do not claim default-on OS sandbox or 24h unattended.",
+        "Do not auto-merge to main or delete keepWorkspace worktrees on dispose."
+      ],
+      "dependsOn": [],
+      "readPaths": [
+        "design/mvp-m2-dispose-v0.md",
+        "design/dsh-plugin-mvp-roadmap-v0.md",
+        "src/mvp/idle-spin.ts",
+        "src/mvp/cli.ts",
+        "plugins/dsh-cliyard/index.js",
+        "plugins/dsh-cliyard/lib/idle-spin-bridge.js",
+        "examples/mvp/code-local-cli.mock.contract.json"
+      ],
+      "writePaths": [
+        "src/mvp/dispose.ts",
+        "src/mvp/idle-spin.ts",
+        "src/mvp/cli.ts",
+        "src/mvp/index.ts",
+        "src/cli.ts",
+        "examples/mvp/code-local-cli.sleep.contract.json",
+        "plugins/dsh-cliyard/index.js",
+        "plugins/dsh-cliyard/lib/idle-spin-bridge.js",
+        "plugins/dsh-cliyard/lib/dispose-registry.js",
+        "plugins/dsh-cliyard/README.md",
+        "tests/mvp-dispose.test.ts",
+        "docs/evidence/MVP_M2_DISPOSE.md",
+        "docs/CURRENT_STATE.md",
+        "docs/ROADMAP.md",
+        "design/dsh-plugin-mvp-roadmap-v0.md"
+      ],
+      "sharedResources": [],
+      "baseCommit": "12db03bc01abae67b6d6335c8e6ddbcaca7a9ebd",
+      "verifyCommands": [
+        "npm run build",
+        "npx tsx --test tests/mvp-dispose.test.ts tests/mvp-idle-spin.test.ts"
+      ],
+      "deliverables": [
+        "Dispose helper + AbortSignal wiring in idle-spin.",
+        "Plugin dispose registry; cancel-after CLI; evidence."
+      ],
+      "forbidden": [
+        "Do not deepen process-tree ownership ledger.",
+        "Do not enable docker/landlock wrap by default.",
+        "Do not spawn with cwd=repoRoot."
+      ],
+      "maxRepairs": 2
+    }
+  ]
+}

@@ -95,6 +95,10 @@ Idle-spin (M1): tool `cliyard_mvp_test` / CLI `cliyard mvp-test` runs a frozen
 local-cli contract inside a git worktree with `cwd` locked. See
 `docs/evidence/MVP_M1_IDLE_SPIN.md`.
 
+Dispose (M2): `--cancel-after-ms` / tool `cancelAfterMs` / Cordis `dispose`
+aborts the child process group. Wrap stays default-off. See
+`docs/evidence/MVP_M2_DISPOSE.md`.
+
 ## Design rules
 
 - Control truth = frozen contracts, RunManifest and EvidenceBundle in cliyard;

@@ -22,4 +22,15 @@ export {
   runIdleSpinFromFile,
   type IdleSpinResult,
 } from "./idle-spin.js";
+export {
+  DisposeRegistry,
+  assertWrapDisabledOrKnown,
+  defaultDisposeRegistry,
+  disposeChild,
+  isProcessAlive,
+  spawnDetachedSleep,
+  type DisposeReason,
+  type DisposeResult,
+  type TrackedChild,
+} from "./dispose.js";
 export { runMvpTestCli } from "./cli.js";

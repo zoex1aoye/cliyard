@@ -58,9 +58,9 @@ M0 契约面 ──► M0.5 Master persona ──► M1 空转+cwd锁
 
 | 阶段 | 交付物 | 验收门禁 | 明确不做 |
 |---|---|---|---|
-| **M0** | TaskContract 外壳定稿 + JSON Schema | **done on branch** — Schema + fixture + validator | 不写派发实现 |
-| **M0.5** | Master system persona 挂上 DSH | **done on branch** (unit); live DSH smoke TBD | 不改 DSH agent loop |
-| **M1** | `/cliyard-test`：mock 契约 → worktree → `local-cli` spawn | 子进程 cwd=workspace；主干无脏写；exit 进证据 | 不接 LLM 编译；不自研进程树 |
+| **M0** | TaskContract 外壳定稿 + JSON Schema | **landed** `95146d2` / PR #27 | 不写派发实现 |
+| **M0.5** | Master system persona 挂上 DSH | **landed** `95146d2` (unit); live DSH smoke TBD | 不改 DSH agent loop |
+| **M1** | `/cliyard-test`：mock 契约 → worktree → `local-cli` spawn | **landed** `12db03b` / PR #28 | 不接 LLM 编译；不自研进程树 |
 | **M2** | Cordis dispose 回收；可选 docker/low-priv | 取消/异常后子进程退出；无僵尸 | 不绑 Landlock；不宣称默认-on OS sandbox |
 | **M3** | Compiler 出 Plan；人 `/freeze` | 未确认不能派发；freeze 后改字节需新版本 | 不自动批准 Plan |
 | **M4** | 至少 **code 本机 CLI** + 另一场景（novel 或第二 CLI）各一条 Demo | 同一 Schema；人审证据；不合入 main | 不自研多模态运行时；不自动合入 |
@@ -80,14 +80,14 @@ M0 契约面 ──► M0.5 Master persona ──► M1 空转+cwd锁
 - [x] `dsh-cliyard` `systemPrompt.section` mount (unit-tested; live DSH smoke TBD)
 
 ### M1
-- [ ] DSH 命令/工具 `/cliyard-test`（或等价）
-- [ ] worktree create（可借插件 API）+ spawn `cwd` 锁
-- [ ] 证据：主干 clean、子目录有写入、exit code
+- [x] DSH 命令/工具 `/cliyard-test`（或等价）— `cliyard mvp-test` / `cliyard_mvp_test`
+- [x] worktree create + spawn `cwd` 锁
+- [x] 证据：主干 clean、子目录有写入、exit code — [MVP_M1_IDLE_SPIN.md](../docs/evidence/MVP_M1_IDLE_SPIN.md)
 
 ### M2
-- [ ] `subCtx.on('dispose')` → SIGKILL/等价
-- [ ] 人工取消用例记录（至少一 OS）
-- [ ] 可选 wrap 开关（默认关）
+- [x] `AbortSignal` / Cordis `dispose` → SIGTERM/SIGKILL（含 process group）
+- [x] 取消用例证据（至少一 OS — Linux unit/CLI）— [MVP_M2_DISPOSE.md](../docs/evidence/MVP_M2_DISPOSE.md)
+- [x] 可选 wrap 开关（默认关；docker/low-priv 拒绝启用）
 
 ### M3
 - [ ] Plan JSON 草稿输出
