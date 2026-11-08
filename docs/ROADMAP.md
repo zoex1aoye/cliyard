@@ -44,7 +44,7 @@ writeRoots semantics, human merge gate, deterministic verify.
 | **M1** Idle spin + cwd lock | **landed** (`12db03b` / PR #28) | `/cliyard-test`: worktree + `local-cli` spawn; trunk clean |
 | **M2** Dispose (+ optional wrap) | **landed** (`e0f6bb6` / PR #29) | Cancel kills child; no Landlock claim |
 | **M3** Compiler + `/freeze` | **landed** (`e4f2f86` / PR #30) | Unfrozen refuses dispatch; freeze writes hash |
-| **M4** Demo (code CLI + second scene) | **next implement** | Same schema; human review; no auto-merge |
+| **M4** Demo (code CLI + second scene) | **on branch** | Same schema; human review; no auto-merge |
 
 ```text
 DSH / Cordis

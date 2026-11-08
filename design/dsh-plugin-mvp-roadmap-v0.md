@@ -96,9 +96,10 @@ M0 契约面 ──► M0.5 Master persona ──► M1 空转+cwd锁
   Evidence: [MVP_M3_FREEZE.md](../docs/evidence/MVP_M3_FREEZE.md)
 
 ### M4
-- [ ] code：`local-cli` → claude/codex/opencode 之一
-- [ ] 第二故事：第二 CLI 或 `dsh-llm` 小说最小条
-- [ ] 监控可读状态（可借侧栏；数据我们供）
+- [x] code：`local-cli` → registry `codex`（无二进制时 standin，证据标明）
+- [x] 第二故事：novel + `workspace.kind=assets` 写 `episodes/ep1.md`
+- [x] 监控可读状态 — `.cliyard/mvp-demo/status.json` / `mvp-demo`
+  Evidence: [MVP_M4_DEMOS.md](../docs/evidence/MVP_M4_DEMOS.md)
 
 ## 6. 反哺主线的条件（之后才解冻）
 

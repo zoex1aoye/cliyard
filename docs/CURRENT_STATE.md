@@ -179,8 +179,9 @@ Master persona: [dsh-master-persona-v0.md](../design/dsh-master-persona-v0.md).
    unfrozen draft → human freeze (`frozen`/`frozenAt` + sha256); unfrozen
    refuses dispatch. Evidence: [MVP_M3_FREEZE.md](evidence/MVP_M3_FREEZE.md).
 
-5. **M4 demos** — **next**: code local-CLI (`codex` registry target) + novel
-   assets scene on the same schema; `mvp-demo` + status JSON; no auto-merge.
+5. **M4 demos** — **on branch**: code local-CLI (`codex` registry target) +
+   novel assets scene on the same schema; `mvp-demo` + status JSON; no
+   auto-merge. Evidence: [MVP_M4_DEMOS.md](evidence/MVP_M4_DEMOS.md).
 
 Soul kept: design-as-truth, workspace cage, deterministic verify, human freeze.
 Infrastructure borrowed: DSH session/LLM, Cordis dispose, community worktree/CLI
@@ -221,7 +222,7 @@ These are capability gates, not date estimates or a percentage score.
 | DSH plugin idle-spin (M1) | **Landed** (`12db03b`) | Evidence: MVP_M1_IDLE_SPIN; next gate is M2 dispose |
 | DSH plugin dispose (M2) | **Landed** (`e0f6bb6`) | Evidence: MVP_M2_DISPOSE; next gate is M3 /freeze |
 | DSH plugin freeze (M3) | **Landed** (`e4f2f86`) | Evidence: MVP_M3_FREEZE; next gate is M4 demos |
-| DSH plugin demos (M4) | **Active target** | code+novel same schema; status JSON; no auto-merge |
+| DSH plugin demos (M4) | **On branch / needs merge** | Evidence: MVP_M4_DEMOS; human review before mainline unfreeze |
 | Supervised local-CLI pilot via DSH | Not ready | M1–M2 green; human `/freeze`; one real `local-cli` target |
 | Multi-scene creator demo (novel/drama) | Not ready | M3–M4 on same TaskContract shell |
 | Legacy mainline unsupervised / 24h | Far (frozen path) | Not MVP; do not claim from P0–P4 inventory alone |

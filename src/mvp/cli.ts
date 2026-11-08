@@ -4,6 +4,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { compileMvpPlan } from "./compile.js";
+import { runMvpDemo } from "./demo.js";
 import {
   freezeContract,
   stableStringify,
@@ -194,6 +195,73 @@ export async function runMvpCompileCli(argv: string[]): Promise<void> {
     const detail = err instanceof Error ? err.message : String(err);
     if (json) console.log(JSON.stringify({ ok: false, error: detail }, null, 2));
     else console.error(`mvp-compile: ${detail}`);
+    process.exitCode = 1;
+  }
+}
+
+function demoUsage(): never {
+  console.log(`cliyard mvp-demo — M4 dual-scene demos (code + novel)
+
+Usage:
+  cliyard mvp-demo --repo <git-repo> [--json] [--no-replace]
+                   [plan.json ...]
+
+Default plans: examples/mvp/code-codex.plan.json + novel-ep1.plan.json
+Runs compile → freeze → idle-spin for each plan; writes
+.cliyard/mvp-demo/status.json. Does not merge to main.
+`);
+  process.exit(1);
+}
+
+export async function runMvpDemoCli(argv: string[]): Promise<void> {
+  if (argv.includes("-h") || argv.includes("--help")) demoUsage();
+  const json = argv.includes("--json");
+  const replaceExisting = !argv.includes("--no-replace");
+  const repo = arg("--repo", argv);
+  if (!repo) {
+    console.error("mvp-demo requires --repo <git-repo>");
+    process.exitCode = 1;
+    return;
+  }
+  const plans: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === "--repo") {
+      i += 1;
+      continue;
+    }
+    if (a.startsWith("--repo=")) continue;
+    if (a === "--json" || a === "--no-replace") continue;
+    if (a.startsWith("-")) continue;
+    plans.push(a);
+  }
+  try {
+    const result = await runMvpDemo({
+      repoRoot: resolve(repo),
+      ...(plans.length ? { planPaths: plans } : {}),
+      replaceExisting,
+    });
+    if (json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(
+        [
+          result.ok ? "mvp-demo: ok" : "mvp-demo: failed",
+          `  status: ${result.statusPath}`,
+          ...result.scenes.map(
+            (s) =>
+              `  - ${s.scene}/${s.contractId} ok=${s.ok} target=${s.target}` +
+              (s.codexMode ? ` codexMode=${s.codexMode}` : "") +
+              (s.error ? ` err=${s.error}` : ""),
+          ),
+        ].join("\n"),
+      );
+    }
+    if (!result.ok) process.exitCode = 1;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    if (json) console.log(JSON.stringify({ ok: false, error: detail }, null, 2));
+    else console.error(`mvp-demo: ${detail}`);
     process.exitCode = 1;
   }
 }

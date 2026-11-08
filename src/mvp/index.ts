@@ -44,7 +44,13 @@ export {
   writeFrozenContract,
 } from "./freeze.js";
 export {
+  runMvpDemo,
+  type DemoRunResult,
+  type DemoSceneResult,
+} from "./demo.js";
+export {
   runMvpCompileCli,
+  runMvpDemoCli,
   runMvpFreezeCli,
   runMvpTestCli,
 } from "./cli.js";

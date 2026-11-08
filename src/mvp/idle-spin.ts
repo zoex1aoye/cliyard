@@ -2,7 +2,7 @@
  * MVP M1 idle-spin + M2 dispose: worktree → spawn(cwd) → AbortSignal kill.
  */
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import {
   assertWrapDisabledOrKnown,
@@ -23,7 +23,9 @@ export interface IdleSpinResult {
   contractId: string;
   target: string;
   repoRoot: string;
+  /** Absolute workspace cwd (git worktree or assets cage). */
   worktreePath: string;
+  workspaceKind: "git-worktree" | "assets";
   branch: string;
   spawnCwd: string;
   spawnExitCode: number;
@@ -285,8 +287,11 @@ export async function runIdleSpin(input: {
   if (contract.driver.kind !== "local-cli") {
     throw new Error(`idle-spin requires driver.kind=local-cli (got ${String(contract.driver.kind)})`);
   }
-  if (contract.workspace.kind !== "git-worktree") {
-    throw new Error("idle-spin v0 requires workspace.kind=git-worktree");
+  const workspaceKind = contract.workspace.kind;
+  if (workspaceKind !== "git-worktree" && workspaceKind !== "assets") {
+    throw new Error(
+      `idle-spin requires workspace.kind=git-worktree|assets (got ${String(workspaceKind)})`,
+    );
   }
   assertWrapDisabledOrKnown(contract.sandbox?.mode);
   if (!existsSync(join(repoRoot, ".git"))) {
@@ -306,7 +311,10 @@ export async function runIdleSpin(input: {
     contract.workspace.baseRef.trim() !== ""
       ? contract.workspace.baseRef.trim()
       : "HEAD";
-  const branch = `cliyard/mvp/${slug(contract.contractId)}`;
+  const branch =
+    workspaceKind === "git-worktree"
+      ? `cliyard/mvp/${slug(contract.contractId)}`
+      : "";
   const argv = contract.driver.argv as string[];
   const timeoutSec = Number(contract.driver.timeoutSec) || 60;
   const env =
@@ -320,33 +328,40 @@ export async function runIdleSpin(input: {
     throw new Error(`git status failed: ${before.stderr || before.stdout}`);
   }
 
-  mkdirSync(resolve(repoRoot, ".cliyard", "worktrees"), { recursive: true });
-  await runGit(repoRoot, ["worktree", "prune"]);
+  if (workspaceKind === "git-worktree") {
+    mkdirSync(resolve(repoRoot, ".cliyard", "worktrees"), { recursive: true });
+    await runGit(repoRoot, ["worktree", "prune"]);
 
-  if (existsSync(worktreePath)) {
-    if (input.replaceExisting) {
-      await runGit(repoRoot, ["worktree", "remove", "--force", worktreePath]);
-      await runGit(repoRoot, ["branch", "-D", branch]).catch(() => undefined);
-    } else {
-      throw new Error(
-        `worktree path already exists: ${worktreePath} (pass replaceExisting)`,
-      );
+    if (existsSync(worktreePath)) {
+      if (input.replaceExisting) {
+        await runGit(repoRoot, ["worktree", "remove", "--force", worktreePath]);
+        await runGit(repoRoot, ["branch", "-D", branch]).catch(() => undefined);
+      } else {
+        throw new Error(
+          `worktree path already exists: ${worktreePath} (pass replaceExisting)`,
+        );
+      }
     }
-  }
 
-  // Drop leftover branch name if previous force-remove left it.
-  await runGit(repoRoot, ["branch", "-D", branch]).catch(() => undefined);
+    await runGit(repoRoot, ["branch", "-D", branch]).catch(() => undefined);
 
-  const add = await runGit(repoRoot, [
-    "worktree",
-    "add",
-    "-b",
-    branch,
-    worktreePath,
-    baseRef,
-  ]);
-  if (add.code !== 0) {
-    throw new Error(`git worktree add failed:\n${add.stderr || add.stdout}`);
+    const add = await runGit(repoRoot, [
+      "worktree",
+      "add",
+      "-b",
+      branch,
+      worktreePath,
+      baseRef,
+    ]);
+    if (add.code !== 0) {
+      throw new Error(`git worktree add failed:\n${add.stderr || add.stdout}`);
+    }
+  } else {
+    // assets cage: mkdir only (optional wipe when replaceExisting).
+    if (existsSync(worktreePath) && input.replaceExisting) {
+      rmSync(worktreePath, { recursive: true, force: true });
+    }
+    mkdirSync(worktreePath, { recursive: true });
   }
 
   let spawnExitCode = 1;
@@ -431,8 +446,12 @@ export async function runIdleSpin(input: {
   }
 
   if (!keepWorkspace) {
-    await runGit(repoRoot, ["worktree", "remove", "--force", worktreePath]);
-    await runGit(repoRoot, ["branch", "-D", branch]).catch(() => undefined);
+    if (workspaceKind === "git-worktree") {
+      await runGit(repoRoot, ["worktree", "remove", "--force", worktreePath]);
+      await runGit(repoRoot, ["branch", "-D", branch]).catch(() => undefined);
+    } else {
+      rmSync(worktreePath, { recursive: true, force: true });
+    }
   }
 
   const verifyOk =
@@ -447,6 +466,7 @@ export async function runIdleSpin(input: {
     target: String(contract.driver.target),
     repoRoot,
     worktreePath,
+    workspaceKind,
     branch,
     spawnCwd: worktreePath,
     spawnExitCode,
